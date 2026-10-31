@@ -125,12 +125,21 @@ def _signals(keeper: dict[str, Any]) -> str:
     return "+".join(str(s) for s in signals) if isinstance(signals, list) and signals else "?"
 
 
+def _keeper_cell(record: dict[str, Any], keeper: dict[str, Any] | None,
+                 closure: Any) -> str:
+    if not keeper:
+        return "no"
+    released = "; released: you closed its case" if mailverdicts.keeper_released(
+        record, closure=closure) else ""
+    return f"yes (from {keeper.get('from')}: {_signals(keeper)}{released})"
+
+
 def row_of(
     row: mailview.Row, clean: Clean, truth: TruthOf | None = None
 ) -> list[str]:
     record, header = row.record, row.header
     raw = verdict_word(record, "disposition")
-    effective = mailverdicts.effective_disposition(record) or raw
+    effective = mailverdicts.effective_disposition(record, closure=row.closure) or raw
     clamped = mailverdicts.clamp_of(record)
     keeper = mailverdicts.keeper_clamp_of(record)
     case = str(record.get("case_choice") or "") or verdict_word(record, "case")
@@ -150,7 +159,7 @@ def row_of(
         (raw, CELL_CHARS),
         (effective, CELL_CHARS),
         (f"yes (from {clamped.get('from')})" if clamped else "no", CELL_CHARS),
-        (f"yes (from {keeper.get('from')}: {_signals(keeper)})" if keeper else "no", CELL_CHARS),
+        (_keeper_cell(record, keeper, row.closure), CELL_CHARS),
         (_owner_wrote(record), CELL_CHARS),
         (verdict_word(record, "wanted"), CELL_CHARS),
         (verdict_word(record, "deadline"), CELL_CHARS),

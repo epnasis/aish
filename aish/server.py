@@ -1401,6 +1401,16 @@ def _describe_hold(event: dict, *, terse: bool = False) -> str:
     return "an action"
 
 
+def _task_sender(session: "Session") -> bool:
+    """Did a person send the task a Retry or continuation re-runs? What this
+    process recorded when it ran; for a chat reopened cold, only a chat he
+    started is presumed his — a triggered chat's last task may be its trigger's
+    prompt, and the case verbs fail closed on it."""
+    if session.last_task_from_owner is not None:
+        return session.last_task_from_owner
+    return session.origin == "user"
+
+
 def _auto_safe(name: str, args: dict, origin: str, *, kept_outside: bool = False) -> str | None:
     """The policy that lets this call run with NO approval card, named — or None
     when it must be carded. Two policies, deliberately not one list, because
@@ -1923,6 +1933,12 @@ class Session:
         self.origin = origin
         self.trigger_meta = trigger_meta or {}
         self.busy = False
+        # Whether a person sent the task this chat ran last (#142 W5, the case
+        # verbs). A Retry or a continuation re-runs THAT task, so it inherits
+        # this rather than becoming his by the press: Retry on a trigger's
+        # prompt re-runs words a mail may have written. None: nothing ran in
+        # this process yet (`_task_sender`).
+        self.last_task_from_owner: bool | None = None
         self.runner: asyncio.Task | None = None
         self.queue: list[tuple[str, list[str]]] = []  # (text, attachments) waiting
         self.pending_cwd: str | None = None  # a /cd requested while busy; applied after
@@ -3439,7 +3455,8 @@ class WebServer:
         session.busy = True
         # He pressed Retry: a task he sent, again (#446).
         session.runner = asyncio.ensure_future(
-            self._run_task(session, prompt, owner_sent=True)
+            self._run_task(session, prompt, owner_sent=True,
+                           from_owner=_task_sender(session))
         )
         # Superseding the turn may have taken the current objective revision
         # with it (L7), so the strip is re-read now rather than at the next
@@ -3510,7 +3527,8 @@ class WebServer:
         session.runner = asyncio.ensure_future(
             # A continuation he pressed Retry for is his; restart recovery's
             # is aish's own (#446).
-            self._run_task(session, note, resume=True, carried=carried, owner_sent=bool(by))
+            self._run_task(session, note, resume=True, carried=carried, owner_sent=bool(by),
+                           from_owner=_task_sender(session) if by else False)
         )
 
     async def _rate_turn(self, client: Client, message: dict) -> None:
@@ -3862,6 +3880,7 @@ class WebServer:
         owner_sent: bool = False,
         monitor: scheduling.MonitorSpec | None = None,
         present: str = "",
+        from_owner: bool | None = None,
     ) -> None:
         """`present` (the daily inbox report): handed ONLY by `launch_triggered`
         — the turn's answer, composed by code; no model is called.
@@ -3913,6 +3932,14 @@ class WebServer:
         finished: tuple[str, TitleRequest | None] | None = None
         boundary: objective.Boundary | None = None
         monitored: scheduling.MonitorOutcome | None = None
+        # Who sent this task, for the case verbs (#142 W5): only a task a
+        # person sent may propose changing his cases. Set on every task, so a
+        # trigger's prompt after his message in the same chat is not his.
+        # `from_owner` overrides for a re-run (Retry, a continuation), which is
+        # the task it re-runs, whoever pressed the button.
+        sender = owner_sent if from_owner is None else from_owner
+        session.agent.task_from_owner = sender
+        session.last_task_from_owner = sender
         try:
             if present:
                 # The daily inbox report: the answer is code's, and no model is

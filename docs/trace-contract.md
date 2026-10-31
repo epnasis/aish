@@ -1009,6 +1009,16 @@ Written once by `Agent.present` (and `ClaudeMaxAgent.present`) through `_emit_re
 
 **What it does NOT establish:** who sent the text over `/trigger` — the server knows only that a token holder did (`server.REPORT_NOTE_HEADING` says so); or that the owner read it.
 
+### 3.23 · `case_act` — an owner case verb proposed through the `cases` tool (#142 W5)
+
+```json
+{"kind": "case_act", "turn": 2, "verb": "close", "outcome": "applied", "cases": ["case-0123456789ab"]}
+```
+
+Written by `Agent._cases` through `_emit_record` for every CHANGE or CREATE the model proposed, whatever became of it, and **renderless** (`RENDERLESS_STEPS`). `outcome`: `blocked` (the task was not sent by a person — `why` says so; no card was shown), `denied`, `held` (approved with a comment: nothing ran), `applied`, or `not_applied` (approved, then refused at apply time — the store changed since the card, or a watcher pass held the store's lock). `cases`: the case ids the applied act touched (`case`, and `into` for a merge or move); empty otherwise. LOOK calls (`list`, `show`) write none. The act itself — who, what, when, and the typed fields — is ALSO appended by the case store's one writer to `<state>/mail/case-acts.jsonl` (`mailcases.read_acts`), which is the case history `show` prints; this record is the session's side of it. No mail text and no note text is recorded here (§8.6).
+
+**What it does NOT establish:** that the person who tapped the card read it; a chip tap and a typed message are the same `task` to the server, so `task_from_owner` true means *a person sent this task*, not *he typed these words*.
+
 ### 3.20 · `mail_verdict` — the inbox assistant's verdict on one mail (#142 W5)
 
 **BUILT 2026-10-24 (slice S1, shadow).** Rationale and fences: `docs/mail-assistant.md`. One record per (mail, Reader model), written by `mailverdicts.build_record` for every inbound mail a shadow pass or a backtest arm assessed — gated, unadmitted and failed readings included (§0 corollary 2: a mail that was not read says so).
@@ -1052,7 +1062,7 @@ Written once by `Agent.present` (and `ClaudeMaxAgent.present`) through `_emit_re
 | `at`, `at_source` | The provider's receipt time when there is one (`provider`), else the sender-written Date header (`date_header`) — always the latter for Tuta mail (S1.5). |
 | `model`, `charter`, `version`, `charter_digest` | Which Reader, examined against which text (§0 corollary 1): a reader never needs today's charter to know what read this mail. |
 | `ending` | `ok` \| `invalid` (answered twice, neither validated) \| `unavailable` \| `unadmitted` \| `gated` (list headers; no call) \| `error` (the assessment raised; `why` names the exception, and this record carries only the identity fields beside it). Only `ok` carries a `verdict`. `ok`, `invalid` and `gated` are final; the rest are read again on the next pass. |
-| `gate` | The deterministic Gate's facts as of the mail — authentication from the top-most Gmail header (S1.5 adds `auth.gateway`, the gateway the parsing adapter DECLARED, and, for a gateway with no readable result such as `tuta`, `auth.verdict` = `not_readable_via_gateway` with the reason in `auth.why`; fields added, `v` kept), the owner-acts-only grade (`inbound` is recorded and read by nothing), structural flags, the newsletter gate and which header decided it. Flag `detail` is a code-written host or filename, attacker-chosen — for audit, never for an acting context. |
+| `gate` | The deterministic Gate's facts as of the mail — authentication from the top-most Gmail header (S1.5 adds `auth.gateway`, the gateway the parsing adapter DECLARED, and, for a gateway with no readable result, `auth.verdict` = `not_readable_via_gateway` with the reason in `auth.why`; since #461 `tuta` reads the bridge's own first-line header: `auth.read_from` = `bridge-header` and `auth.verdict` = `authenticated` when it authenticates, else `auth.verdict` = Tuta's status word or `unknown` with what was observed in `auth.why`; fields added, `v` kept), the owner-acts-only grade (`inbound` is recorded and read by nothing), structural flags, the newsletter gate and which header decided it. Flag `detail` is a code-written host or filename, attacker-chosen — for audit, never for an acting context. |
 | `candidates` | The correlator's shortlist with the bundle ref each was shown as, score and reasons. |
 | `verdict` | The validated, capped Reader answer (`mailreader.Verdict`). `meaning` and `kind` are de-linked and de-voiced; every closed axis may be `cannot_tell`. |
 | `owner_wrote_days` | S1.6, additive, `v` kept. Days from his latest message in this conversation at or before the mail to the mail, or `null` for never — code's past-facing fact, counted over the whole conversation (`mailreader.owner_wrote_days`). Absent on records written before it and on `error` records: absent is "not recorded", never "never". |

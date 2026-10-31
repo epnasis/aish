@@ -241,6 +241,16 @@ class ClaudeMaxAgent:
         self.inner.on_plan = callback
 
     @property
+    def task_from_owner(self) -> bool:
+        return self.inner.task_from_owner
+
+    @task_from_owner.setter
+    def task_from_owner(self, value: bool) -> None:
+        # The case verbs read it on the inner agent, whose `_dispatch` runs
+        # every native tool here too.
+        self.inner.task_from_owner = value
+
+    @property
     def plan_owner_changed(self):
         return self.inner.plan_owner_changed
 

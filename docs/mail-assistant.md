@@ -2,7 +2,7 @@
 
 `mailindex.py`, `mailgate.py`, `mailcases.py`, `mailreader.py`, `mailverdicts.py`,
 `mailwatch.py`, `mailsource.py`, `mailtuta.py`, `mailview.py`, `mailexport.py`,
-`mailbacktest.py`, `mailreport.py`,
+`mailbacktest.py`, `mailreport.py`, `mailcasetool.py`,
 `aish/charters/mail-reader.md`, `scripts/install-mailwatch-service.sh`,
 `scripts/install-mailreport-service.sh`.
 The binding design is the comment *"W5 REWRITTEN — the inbox assistant"* on epic #142
@@ -380,14 +380,46 @@ and alias admission can lose an act to a squatter but never gain one. `TestMessa
 `TestIdentityNotUid`.
 
 **The authenticator is declared by the adapter, never inferred from headers.** Each parser
-stamps `Header.mailbox`; `mailgate.authenticate_header` reads it. Through the Tuta gateway
-nothing prepends a result above the sender's, so the top-most Authentication-Results IS the
-sender's, and a sender-written exact copy of Gmail's would authenticate. So
-`mailindex.from_rfc822` DROPS every Authentication-Results header at parse time, and the Gate
-gives the explicit ending `not_readable_via_gateway` with the reason in words — even for a
-header that somehow survived. Unauthenticated, an INBOUND Tuta mail mints nothing on its own
-behalf: its sender is `first-contact` whatever the history, and it opens no case and puts no
-account in a case's history; the forged perfect-Gmail-header case is pinned end to end. **A mail
+stamps `Header.mailbox`; `mailgate.authenticate_header` reads it, through
+`GATEWAY_AUTHENTICATOR` (`gmail` → Gmail's authserv-id, `tuta` → `tuta-bridge`, anything else →
+the explicit ending `not_readable_via_gateway`). Through the Tuta gateway nothing prepends an
+Authentication-Results above the sender's, so the top-most one IS the sender's, and a
+sender-written exact copy of Gmail's would authenticate. So `mailindex.from_rfc822` DROPS every
+Authentication-Results header at parse time, still.
+
+**Since 2026-10-31 (#461) Tuta's authenticator is the bridge's own header.** tutabridge
+(epnasis/tutabridge#16, observed live on 2026-10-31: 6 of 6 sampled raw messages carried it)
+writes `X-Tutabridge-Authentication: status=<authenticated|hard_fail|soft_fail|invalid_mail_from|
+missing_mail_from|unknown>; status-source=tuta-server; encryption-auth=<…>` — Tuta's
+server-computed `authStatus` — as the FIRST header line of every message it serves, after
+stripping every copy the sender wrote. Its documented guarantee: *present means the bridge wrote
+it, and exactly one copy exists.* aish checks that guarantee rather than trusting it. The adapter
+declares the header (`mailtuta.AUTH_HEADER`, passed as `from_rfc822(first_header=…)`); the parse
+records what it saw (`mailindex.first_header_observation` → `Header.gateway_auth` and
+`gateway_auth_observed`): the value only when the raw message's FIRST line is that header and
+exactly one copy exists in the header block — counted on the raw lines (any case, blanks before
+the colon) AND by the email parser, the larger count winning, and the first line only when the parser agrees it is that header; lines are split as the parser splits them (CRLF, CR, LF), so a bare CR cannot fold a later line into the value. The Gate's
+`mailgate.authenticate_tuta_bridge` then authenticates ONLY on: the observation is *the first
+header line, the only copy*; `status-source` is named once and is `tuta-server`; `status` is named
+once and is `authenticated`. Anything else is not authenticated, and `why` says what was seen —
+*no X-Tutabridge-Authentication header*, *2 copies of … in the header block*, *… is not the first
+header line (it is at header line 4)*, *status-source sender, not tuta-server*, *the bridge
+reports Tuta's status=hard_fail* — never a cause. A copy in the body is not a header and is never
+read; a header only counts when the ADAPTER asked for it, so another gateway's mail carrying the
+same line authenticates nothing. **An index file written before this slice has no observation**
+and reads *no … observation was recorded for this mail (indexed before aish read the bridge's
+header)* — not authenticated; held mail is never re-fetched, so Tuta mail indexed before
+2026-10-31 stays unauthenticated (*Residuals*).
+
+**What it changes, all by existing rules:** an authenticated Tuta mail opens cases, puts accounts
+in a case's history, earns owner-act grades and becomes admissible as an alias exactly like
+authenticated Gmail; an unauthenticated one still mints nothing on its own behalf — its sender is
+`first-contact` whatever the history, it opens no case and puts no account in a case's history.
+Pinned forgeries: the header not first, two copies (one genuine), two copies in different case, a
+`status-source` other than `tuta-server` or absent, two `status` values, the header inside the
+body, a perfect Gmail Authentication-Results, the line on a gateway that did not declare it.
+`tests/test_mailtuta_auth.py` (`TestTheBridgeHeader`, `TestForgeries`, `TestEndToEnd`); the forged perfect-Gmail-header case is pinned end to end in
+`TestAuthenticationIsDeclaredByTheGateway`. **A mail
 in his Tuta Sent folder is his own act and legitimately counts** — acts toward its recipients,
 an owner case from a key in it, admission of the domains he wrote to — as his Gmail sent mail
 does. That rests on the Sent folder being his alone: only Tuta puts mail there, and the bridge
@@ -422,8 +454,14 @@ folder's STATUS count and pages envelopes by sequence number from the newest
 first page wholly older than the window. An empty folder is a healthy empty listing; a failed
 STATUS or page is a failed listing. `TestEnumeration`.
 
-**Provider ids are unstable here** (UIDs renumber on restart, UIDVALIDITY unchanged), so all
-skip-by-id and top-up logic is Gmail-only. A Tuta fetch is skipped only when the index already
+**Provider ids are treated as unstable here** (UIDs renumbered on restart, UIDVALIDITY
+unchanged), so all skip-by-id and top-up logic is Gmail-only. **The bridge fixed this
+(epnasis/tutabridge#19: stable UIDs), and aish does NOT rely on it yet.** Flipping
+`TutaMailbox.stable_ids` would now be possible, and would buy the Gmail-side economies for Tuta:
+skip-by-UID instead of the Message-ID+sender+subject match, and the top-up ledger for failed
+fetches. It is a separate change, made on an observation of UIDs surviving a bridge restart, not
+on the bridge's word; identity stays content-addressed either way (`digest_for`), so flipping it
+would move no digest. A Tuta fetch is skipped only when the index already
 holds a TUTA message matching the envelope's Message-ID AND sender address AND subject — an
 identity the renumbering cannot move, and one a squatter matching on the id alone cannot use to
 suppress another mail's fetch. Anything less matching is fetched, and identical content dedups.
@@ -752,8 +790,8 @@ mail visible:
   signal is lawful here because it can only RESTRICT**: it can block filing and permits nothing.
 
 **Never on a newsletter-gated mail** — the rule refuses `gated` whatever the signals say (a gated
-mail has no verdict anyway; the refusal is the belt to that brace). **Unauthenticated mail — every
-inbound Tuta mail included — gets it from the judged signal only**: the deterministic signals name
+mail has no verdict anyway; the refusal is the belt to that brace). **Unauthenticated mail — Tuta mail
+without the bridge's authenticated header included — gets it from the judged signal only**: the deterministic signals name
 an authenticated sender, as the owner's rule states. What it gets is visibility: the clamp writes
 nothing into the case store, the ledger or the admissions, so it mints no case, grade or alias.
 `TestUnauthenticated` in `tests/test_mail_keeper.py`.
@@ -766,15 +804,21 @@ independently, so each one's effect stays measurable. **Restrict-only is checked
 too**: `keeper_clamp_of` accepts a clamp only when it names `surface`, and odd shapes from corrupt
 bytes neither raise nor release. `TestCorruptRecords`.
 
-### Case closure releases it — and there is no closure yet
+### Case closure releases it — his close, since 2026-10-31
 
 `cases` is every case the mail is on at assessment (the cases whose mails include it, the
 key-linked ones, the Reader's chosen candidate). `mailreader.keeper_released` is true only when the
-mail is on at least one case and EVERY one of them is closed; `effective_disposition` takes the
-closed set as an argument. **The case store has no closure today (S3), so no caller passes any and
-every keeper clamp holds: fail-visible.** Nothing here invents a closure. A keeper on NO case — a
-document from a sender with no key and no Reader case — can never be released by closure and holds
-for good. `TestCaseClosureReleases`.
+mail is on at least one case and EVERY one of them is closed. **Since 2026-10-31 the owner's close
+is that closure** (§The case verbs): `/mail`, the CSV export and the daily report pass the live
+store's `CaseStore.closure()` to `mailverdicts.effective_disposition`, whose `keeper_released`
+then requires every case the mail is on — as its record names them AND as the store holds it now,
+so a moved mail must have both cases closed — to have been closed at or after aish first READ the
+mail (`recorded_at`, aish's clock; a sender-written Date never decides it, and a record without
+`recorded_at` stays held). Mail that arrives on a
+case after he closed it stays held. Nothing here invents a closure: there is still no deterministic
+closure (delivery confirmed, trip ended), and a keeper on NO case — a document from a sender with
+no key and no Reader case — can never be released and holds for good. The backtest's scratch store
+has no owner acts, so it holds there. `TestCaseClosureReleases`, `TestClosureReleasesTheKeeperClamp`.
 
 ### The surfaces
 
@@ -986,6 +1030,130 @@ meta, unread, the kept note outside the task string, no model call, live == cold
 `TestTheChatFindings` (each delivery-review finding pinned);
 `tests/test_mailreport_service.py` (the plist).
 
+## The case verbs (2026-10-31) — the `cases` tool, `mailcasetool.py`
+
+**Why.** The owner's review of the first report chat (epic #142, 2026-10-29): the chat had no case
+memory it could use — the model fell back to raw mail searches and then shell-probed the state
+dir — and he could not say *"I picked these up"* in a way that changed anything. His design
+(2026-10-29): verbs in the voice of a human assistant, owner-only change, owner close as the
+closure the keeper clamp waits for.
+
+**LOOK — free, read-only, outside content.** `cases` `list` (open cases by default; `include`
+closed, dismissed or all) and `show` (title, status, keys, parties, admitted senders, the mails
+oldest-first with date, sender, subject and the Reader's one line, notes, reminders, his acts on
+it). Every mail-borne string goes through `mailcasetool._safe` — controls marked, whitespace
+flattened, every link disarmed (`mailreport.safe`), capped — and a cautioned mail's summary is
+withheld exactly as in the report (`mailreport.caution_marks`). The agent returns it as aish's
+heading (`LOOK_NOTE`) above the untrusted banner (`web.UNTRUSTED_NOTE`) with markers disarmed;
+`Agent._brings_outside_content` taints on any `cases` call, `_what_a_source_is` names it e-mail and
+`_may_be_mail` is true for it. Tool results are never folded into owner hosts
+(`note_owner_hosts` reads only owner-typed text). A title code derives (`Case.display_title`) is
+the first key's kind and the key — regex output, never a subject.
+
+**CHANGE and CREATE — his act, every one.** `close`, `reopen`, `merge` (one case absorbs
+another's keys, mails, parties, senders, admitted senders and account history; the absorbed case's
+file is KEPT with `merged_into` and no longer observed; no undo verb), `move` (one mail from a case
+to another), `rename`, `dismiss` ("not a case": hidden from `list`, nothing deleted, correlation
+unchanged) and `restore`, `note`, `remind` (a due date and text, stored and shown — **nothing
+delivers reminders yet**), and `create` (a title and optional keys he gives; mail carrying such a
+key joins the case wherever it says it — `OWNER_KEY`, `_says_key` — and opens nothing). There is
+no delete verb.
+
+- **Provenance — refused, no card, unless a person sent the task.** `Agent.task_from_owner` is set
+  by the server before EVERY task from `_run_task`'s `owner_sent` (typed, a chip tapped, Retry),
+  so in a report chat (origin `schedule`) his message is his, and a trigger's prompt, an
+  automation's run or a restart's replay is not (`CASES_CHANGE_NOT_FROM_OWNER`, decision
+  `blocked`). The CLI default is true: every terminal task is typed. **Retry and a pressed
+  continuation re-run the task before them, so they inherit whether a person sent THAT task**
+  (`Session.last_task_from_owner`, `server._task_sender`): Retry on an e-mail trigger's prompt
+  re-runs words a mail may have written, and stays refused; a chat reopened cold presumes his
+  only when he started it (origin `user`). **A chip tap is a task a
+  person sent**: the server cannot tell it from typing (`app.js` sends both as one `task`), and a
+  model in a tainted chat can write the chip's text — the card still stands between, and that
+  card's words are code's.
+- **The card's one sentence is code-composed from the typed fields** (`mailcasetool.plan` →
+  `_sentence`): code's words, the case's title and any title, note or subject quoted and passed
+  through `_safe`, with any quote marks of their own made plain so a value cannot close aish's.
+  Nothing the model wrote beyond the typed fields reaches it — the card's arguments are the typed
+  fields alone, pinned. Example: *Close case “order SH-90210” (2 mails). Keeper documents on it
+  that aish has already read stop being held visible — unless also on another open case — in
+  /mail, the CSV and the daily report; nothing in your mailboxes is moved or deleted.* The tool's
+  answer afterwards says the verb was applied and repeats what the card said.
+- **No cardless licence covers it**, in any origin, kept note or not (`server._auto_safe` returns
+  None for `cases`, pinned). In report chats the origin-scoped licence is withheld anyway.
+- **Applied through the one writer, under the store's lock.** `mailcasetool.apply` takes
+  `mailcases.store_lock` — the SAME `watch.lock` a watcher pass and the backfill hold — waiting up
+  to `STORE_LOCK_WAIT_S` (20 s) and otherwise refusing with nothing changed — saying another
+  aish-mailwatch process held it, a pass or a backfill, and that aish does not know which; then
+  re-checks the
+  act against a FRESH load (`CaseStore.check`) and writes it with `CaseStore.act` (`atomic_write`,
+  per-case files). Without the lock, a pass that loaded the store before the card would overwrite
+  his close when it saved the case.
+- **Recorded twice.** `CaseStore.act` appends `{at, verb, by, case, …}` to
+  `<state>/mail/case-acts.jsonl` (the history `show` prints, `read_acts`); the agent emits a
+  renderless `case_act` record (trace contract §3.23) for every proposed change, whatever became
+  of it.
+- **Wired into the report chat's menu.** A chat holding a kept outside note (the daily report)
+  gets `cases` as a `required` tool (`docs/tool-menu.md`), however he words his request.
+
+**What closing changes, precisely.** Only what aish WOULD do, in shadow mode: a keeper-clamped
+mail whose cases are all closed reads with the Reader's own disposition again (after the live
+clamp) — in `/mail` (`would: archive [keeper clamp from archive RELEASED: … — you closed its
+case]`), in the CSV's `disposition_effective` and `keeper_clamped` (`…; released: you closed its
+case`), and in the daily report, where such a mail leaves *May interest you*. *Needs your action*
+does not read dispositions and is unchanged. **No mailbox is touched**: the cleanup lane (trash /
+archive on closure, the owner's 2026-10-28 directive) is NOT built — nothing moves, labels or
+deletes mail, and nothing in this slice can.
+
+`tests/test_mailcase_verbs.py` — `TestTheStoreVerbs`, `TestClosureReleasesTheKeeperClamp`,
+`TestTheTool`, `TestTheServerSetsWhoSentIt`.
+
+## The live backfill (2026-10-31) — `aish-mailwatch --backfill DAYS`
+
+**Why.** On 2026-10-28 the live index held 0 of his sent messages: the watcher lists a window of
+`DEFAULT_DAYS` (2) days and only began on 2026-10-25, so the report's Follow-ups had nothing to
+work from (*For the driver* 3e). The backfill reaches back once, deterministically.
+
+**What it does** (`mailwatch.backfill`): every source's INBOX and Sent for DAYS — the same
+listing and fetch as a pass (`_collect`), up to `BACKFILL_LIMIT` (5000) per listing unless
+`--max` says otherwise — each fetched mail added to the index as soon as it is fetched; then,
+from a fresh load of the index, every index mail inside the window folded through the case store
+in position order (`CaseStore.observe`). That is all: the ledger's grades and the report's
+Follow-ups are computed from those two stores at read time, so nothing else is written.
+
+- **No Reader, structurally — in the backfill itself.** `backfill` takes no model spec and no
+  chat seam, `--backfill` loads no charter, and it records no verdict. Pinned with
+  `mailreader.read` replaced by a function that fails the test. **The watcher's next pass is
+  another matter**: it assesses every inbox mail in ITS window (`DEFAULT_DAYS`, up to `--max`)
+  that has no verdict, held or not, so backfilled mail from the last two days that the watcher had
+  not yet read is read then — mail it would have read anyway — and becomes report news as usual.
+  Older backfilled mail is never assessed and never news.
+- **The watcher's unfetched ledger is neither read nor written** (`_collect(ledger=None)`): a mail
+  the ledger names is ASSESSED when the watcher next fetches it, so a backfill failure recorded
+  there would buy a Reader call on old mail.
+- **Paced on Gmail only**: through `GwsMailbox._call`'s token bucket and retry policy (a quota
+  exhaustion stops that source asking for the rest of the run). Tuta has no pacing: one himalaya
+  process (one bridge connection) per call, back to back, no `--seen` — as the backtest's Tuta
+  enumeration already runs.
+- **Idempotent and resumable.** A held mail is never fetched again (Gmail by provider id, Tuta by
+  Message-ID AND sender AND subject). Observation covers every index mail in the window that is on
+  no case and that he never moved (`case-acts.jsonl`), so a run interrupted after fetching is
+  finished by the next one, and a re-run can neither undo his `move` (re-appending the mail to the
+  case its key names) nor add a case's amounts and accounts twice — pinned.
+- **One pass at a time**: it takes `pass_lock`, so a launchd watcher pass during it skips (exit 3).
+- **Recorded**: a `mail_backfill` line (and the vocabulary tallies) in `runs-YYYYMMDD.jsonl`, and
+  the summary printed as JSON — `indexed`, `observed`, `cases_before`/`cases_after`, `admitted`, per
+  source the listing, held, fetched, failures. It does not write `watch_health.json`: it is not a
+  watcher pass.
+- **Stated limits.** Late observation is as-of-correct (every case query is positional) but not
+  identical to having watched live: a case opened by a later mail that was observed first keeps
+  that later creation position, and an older mail joins it as a member. Tuta mail already in the
+  index from before 2026-10-31 is held, so it is not re-fetched and gains no bridge observation
+  (§Both inboxes). Gmail's listing is `in:inbox` / `in:sent`: mail he archived out of the inbox
+  is not listed.
+
+`tests/test_mailwatch_backfill.py` — `TestTheBackfill`, `TestTheCommand`.
+
 ## The backtest — `aish-mailbacktest`
 
 **Frozen clocks.** Index and case store are built in arrival order inside a SCRATCH run
@@ -1044,9 +1212,21 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **The clamp protects continuations only.** The 8 archive-on-replied misses it was built after
   were all openers (§S1.6); for those only the teaching acts, and whether it does is a
   re-admission and a backtest away — not measured here.
-- **The keeper clamp has no release.** It is released by case closure, and the case store has no
-  closure until S3: every keeper clamp holds, and a keeper on no case holds for good, whatever
-  closure later exists.
+- **The keeper clamp is released only by HIS close.** There is no deterministic closure (delivery
+  confirmed, a trip's end date passed): until he closes a case, its keeper clamps hold; a keeper on
+  no case holds for good; and mail arriving on a case after he closed it stays held.
+- **A chip tap counts as his message.** `task_from_owner` is true for any task a person sent; the
+  server cannot tell a tapped chip from typed text, and in a tainted chat a model writes chip text.
+  The case card, code-composed, is what stands between such a chip and a change.
+- **Case verbs wait for the watcher.** A verb applied while a watcher pass or the backfill holds the
+  store's lock waits up to 20 s and is then refused with nothing changed; during a long backfill no
+  case can be changed.
+- **Reminders and notes are stored, not delivered.** `remind` writes a due date onto the case and
+  `show` prints it; nothing reads it to tell him anything yet (the follow-up queue is the
+  preferences slice's).
+- **A moved mail keeps its keys on the case it came from**, so a later mail carrying the same key
+  still joins the old case; and a merge has no undo verb (the absorbed file is kept, so it is
+  recoverable by hand).
 - **The keeper clamp's judged signal is most of its cost** — 722 of 849 extra visible mails in run
   20261025-204111 rest on `reader_case` alone (§The keeper clamp). It is restrict-only by
   construction; its price is his attention, measured, not argued.
@@ -1068,10 +1248,16 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
   is admitted, only admitted senders' accounts count.
 - **Coarse registrable domain.** `link_text_mismatch` compares the last two labels, so
   `a.co.uk` and `b.co.uk` read as one; it only ever fails to flag, never grants.
-- **The case store has no owner surface yet** — no list, no delete path. The design requires one
-  (S3). Until then it is a store he cannot see or shred, written only by this CLI.
+- **The case store's owner surface is the `cases` tool in a chat** — no `/mail cases` view in the
+  terminal or a web sheet, and no delete path (dismiss hides; nothing shreds a case).
 - **The lookalike flag needs admitted domains**, and admission now needs his act toward a sender,
   so early on it has few to compare against.
+- **Tuta authentication rests on the bridge's guarantee, checked only structurally.** aish
+  verifies position and copy count; that the value reflects Tuta's real `authStatus` is the
+  bridge's claim (#16's acceptance, observed by the owner on a sample, not by this repository). A
+  bridge bug that wrote `authenticated` for a spoof would authenticate it. And Tuta mail indexed
+  before 2026-10-31 carries no observation and stays unauthenticated: held mail is never
+  re-fetched, so its cases, grades and admissions are not reconsidered.
 - **Tuta's `at` is sender-written.** The Date header is all this gateway gives. It is bounded —
   an inbound unauthenticated mail opens no case and moves no grade, and since the squatting fix
   it can no longer displace a Gmail copy — but a forged Date still reorders the index and the
@@ -1123,7 +1309,7 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **Act.** No label, no archive, no trash, no push, no chip, no proposal, no draft. There is no
   code path to a mutating Gmail call (`READ_ONLY_CALLS`).
 - **Judge the sender's pattern.** The Gate's judged half is S2.
-- **Close cases, follow up, snooze, or show the case store** — S3.
+- **Close cases deterministically, follow up, or snooze** — his close and the `cases` tool exist (§The case verbs); a closure rule from evidence, the follow-up queue and snoozing do not.
 - **Open any trust lane** — S4, by his explicit per-lane act, never a threshold.
 - **Match interests** — S5. The Reader never sees the interest profile.
 - **Run inside aish-web** — S2.
@@ -1182,6 +1368,15 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    (130 messages since 2026-10-23, Gmail 28, Tuta 102), so Follow-ups currently says it cannot be
    computed. Why the watcher indexes no sent mail is not established here — the next thing to
    look at before Follow-ups can mean anything.
+3f. **The live backfill** (2026-10-31), once, with the bridge running and aish-web's env:
+   ```sh
+   aish-mailwatch --backfill 60 --account pawel@wenda.eu --owner pawel@wenda.email \
+     --source gmail --source tuta
+   ```
+   No model, no Reader call; the printed JSON says what was indexed and observed. Re-run the same
+   command after an interruption or a quota stop — it fetches only what the index lacks. Then
+   `aish-mailreport --dry-run --account pawel@wenda.eu` shows whether Follow-ups now has sent mail
+   to work from.
 4. **The mined replay scenario** — a real courier/store pair from his inbox — goes in the private
    tree (`~/.config/aish/evals/<name>/`, `docs/replay.md`), never here: find the pair in the
    backtest run's verdict store (`case_choice` on the courier mail), and replay it end to end
