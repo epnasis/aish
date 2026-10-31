@@ -112,6 +112,45 @@ class TestForgeries:
         assert parsed is not None and parsed.header.gateway_auth_observed == ""
         assert mailgate.authenticate_header(parsed.header).authenticated is False
 
+    def test_a_bare_cr_cannot_fold_a_second_line_into_the_value(self):
+        line = "X-Tutabridge-Authentication: status=hard_fail; status-source=tuta-server"
+        raw = bridged(line, frm="a@x.example").replace(
+            line + "\r\n", line + "\rX-Fake: status=authenticated\r\n", 1)
+        header = parse(raw)
+        assert "status=authenticated" not in header.gateway_auth
+        assert mailgate.authenticate_header(header).authenticated is False
+
+    def test_a_leading_blank_line_is_not_the_first_header(self):
+        assert auth_of("\r\n" + bridged(frm="a@x.example")).authenticated is False
+
+    def test_obsolete_name_space_colon_needs_the_parser_to_agree(self):
+        line = ("X-Tutabridge-Authentication : status=authenticated; "
+                "status-source=tuta-server")
+        auth = auth_of(bridged(line, frm="a@x.example"))
+        # Authenticated only if the email parser ALSO read it as the header.
+        parsed = mailindex.email.message_from_string(
+            bridged(line, frm="a@x.example"), policy=mailindex.email.policy.default)
+        assert auth.authenticated is bool(parsed.get_all(mailgate.TUTA_BRIDGE_HEADER))
+
+    def test_a_later_status_after_a_failing_one(self):
+        line = ("X-Tutabridge-Authentication: status=hard_fail; encryption-auth=x; "
+                "status=authenticated; status-source=tuta-server")
+        assert auth_of(bridged(line, frm="a@x.example")).authenticated is False
+
+    def test_a_quoted_semicolon_cannot_smuggle_a_status(self):
+        line = ('X-Tutabridge-Authentication: status=hard_fail; '
+                'encryption-auth="a; status=authenticated"; status-source=tuta-server')
+        assert auth_of(bridged(line, frm="a@x.example")).authenticated is False
+
+    def test_two_status_sources(self):
+        line = ("X-Tutabridge-Authentication: status=authenticated; "
+                "status-source=tuta-server; status-source=sender")
+        assert auth_of(bridged(line, frm="a@x.example")).authenticated is False
+
+    def test_lf_only_line_endings_still_authenticate(self):
+        raw = bridged(frm="a@x.example").replace("\r\n", "\n")
+        assert auth_of(raw).authenticated is True
+
     def test_another_gateway_never_reads_it(self):
         header = parse(bridged(frm="a@x.example"), mailbox="other")
         assert mailgate.authenticate_header(header).authenticated is False

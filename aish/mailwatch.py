@@ -640,8 +640,14 @@ def backfill(
     store = mailcases.CaseStore(state_dir)
     result.cases_before = len(store.cases)
     floor = now() - days * 86400
+    # Mail already on a case was observed, and mail he MOVED is where he put
+    # it: re-observing either would append it again to the case its key names
+    # — undoing his move, and adding its amounts and accounts twice.
+    placed = {p[1] for c in (*store.cases.values(), *store.merged.values()) for p in c.mails}
+    placed |= {str(a.get("mail")) for a in mailcases.read_acts(state_dir)
+               if a.get("verb") == mailcases.MOVE}
     for header in sorted(index.by_digest.values(), key=lambda h: h.position):
-        if header.at < floor:
+        if header.at < floor or header.digest in placed:
             continue
         body = index.body(header.digest) or ""
         auth = mailgate.authenticate_header(header)

@@ -519,12 +519,15 @@ def first_header_observation(raw: str, name: str, parsed_count: int) -> tuple[st
     raw message's very first line is that header AND exactly one copy exists
     anywhere in the header block — counted on the raw lines (a name followed
     by optional blanks and a colon, any case) and again by the email parser
-    (`parsed_count`), so a copy either reading misses is still a second copy.
+    (`parsed_count`), so a copy either reading misses is still a second copy, and
+    the first line counts only when the parser ALSO read it as the header.
     A copy in the BODY is not a header and is never read. `observed` says what
     was seen, in code's words; the value is "" whenever it is not
     `FIRST_AND_ONLY`."""
-    head = re.split(r"\r?\n\r?\n", raw, maxsplit=1)[0]
-    lines = re.split(r"\r?\n", head)
+    # Lines split as the email parser splits them (CRLF, CR or LF), so a bare
+    # CR can never fold a later line into the first header's value.
+    head = re.split(r"(?:\r\n|\r(?!\n)|\n)(?:\r\n|\r(?!\n)|\n)", raw, maxsplit=1)[0]
+    lines = re.split(r"\r\n|\r|\n", head)
     starts = re.compile(r"^" + re.escape(name) + r"[ \t]*:", re.I)
     copies = [n for n, line in enumerate(lines) if starts.match(line)]
     count = max(len(copies), parsed_count)
@@ -533,8 +536,13 @@ def first_header_observation(raw: str, name: str, parsed_count: int) -> tuple[st
     if count > 1:
         return "", f"{count} copies of {name} in the header block"
     if copies != [0]:
-        where = f"header line {copies[0] + 1}" if copies else "a place the raw scan did not find"
+        where = (f"line {copies[0] + 1} of the raw text" if copies
+                 else "a place the raw scan did not find")
         return "", f"{name} is not the first header line (it is at {where})"
+    if parsed_count != 1:
+        # The raw scan saw it first; the parser did not read it as a header
+        # at all (`Name :`, obsolete syntax). Both must agree.
+        return "", f"the email parser did not read the first line as a {name} header"
     value = lines[0].split(":", 1)[1]
     for line in lines[1:]:
         if line[:1] not in (" ", "\t"):

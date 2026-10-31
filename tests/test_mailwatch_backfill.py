@@ -92,6 +92,20 @@ class TestTheBackfill:
         assert [c for c in box.calls if c[0] == "get"] == []
         assert len(mailcases.CaseStore(tmp_path).cases) == 1
 
+    def test_a_backfill_never_undoes_his_move_or_doubles_a_case(self, tmp_path):
+        box = FakeMailbox(history())
+        fill(tmp_path, [box])
+        (case,) = mailcases.CaseStore(tmp_path).cases.values()
+        other = mailcases.CaseStore(tmp_path).act(
+            "create", {"title": "Elsewhere"}, by="owner", now=NOW)["case"]
+        moved = case.mails[-1][1]
+        mailcases.CaseStore(tmp_path).act("move", {"case": case.id, "into": other,
+                                                    "mail": moved}, by="owner", now=NOW)
+        before = {p.name: p.read_bytes() for p in (tmp_path / "mail" / "cases").glob("*.json")}
+        fill(tmp_path, [box])
+        after = {p.name: p.read_bytes() for p in (tmp_path / "mail" / "cases").glob("*.json")}
+        assert before == after
+
     def test_the_watchers_ledger_is_neither_read_nor_written(self, tmp_path):
         ledger = mailsource.UnfetchedLedger(tmp_path)
         ledger.missed("gmail", "owed", "inbox",
