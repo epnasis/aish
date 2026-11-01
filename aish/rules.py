@@ -2466,6 +2466,167 @@ def urls_acted_on(calls: Iterable[dict]) -> set[str]:
     return acted
 
 
+# A link a page aish DROVE carried to ANOTHER page of the same site. The
+# owner's call (2026-11-01), reversing #249: on his IMDb list the answer linked
+# six titles, every one sitting on the list page as IMDb's own link, and the
+# rule refused all six; the model opened one and deleted the rest. A site
+# linking to its own page is the site's word that the page exists — unlike a
+# search page linking out, which is why another site's links never count.
+#
+# Only a driven page, and only its CONTROLS — both facts handed in by the
+# agent from aish's OWN browse state, never read out of the result, because
+# the result is mostly page text:
+# - `page` is the address the browser is actually on (the view's snapshot).
+#   read_url's header names the address ASKED for, so after a redirect the
+#   landing site's links would speak for the asking one; it vouches for nothing.
+# - `nonce` is the one aish minted for this render. A link is a
+#   `[label](press:cN·nonce) → address` reference carrying THAT nonce. It is
+#   random per render, so page text cannot forge a reference; electing it from
+#   the text instead was invertible — fifty forged references outvote five real
+#   ones (found in review). An arrow in the page's prose is somebody's text.
+PAGE_LINK_PREFIX = "page:"
+PAGE_LINKS_MAX = 1500
+_CONTROL_LINK_RE = re.compile(
+    r"\]\(press:c\d+·(?P<nonce>[0-9a-f]+)\) → (?:https?://)?(?P<address>[^\s…]+)(?P<cut>…)?"
+)
+_HOSTISH_RE = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:[/?]|$)", re.IGNORECASE)
+_TRAILING_PUNCTUATION = ",.;:!?"
+
+
+def _without_trailing_punctuation(address: str) -> str:
+    """Prose punctuation after an inline reference is not the address — but a
+    `)` closing a `(` inside it is (`wiki/Coherence_(film)`)."""
+    while address:
+        if address[-1] in _TRAILING_PUNCTUATION:
+            address = address[:-1]
+        elif address[-1] == ")" and address.count(")") > address.count("("):
+            address = address[:-1]
+        else:
+            break
+    return address
+
+
+def _site(parts: urllib.parse.SplitResult) -> str:
+    """Host and port, `www.` ignored: another port is another server. "" for
+    an address urllib cannot read (a port past 65535, a broken IPv6 literal):
+    unreadable vouches for nothing and is vouched by nothing — never a crash."""
+    try:
+        port = parts.port
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").casefold().removeprefix("www.")
+    if not host:
+        return ""
+    return f"{host}:{port}" if port else host
+
+
+def _split(url: str) -> urllib.parse.SplitResult | None:
+    raw = str(url or "").strip()
+    try:
+        return urllib.parse.urlsplit(raw if "://" in raw else f"//{raw}")
+    except ValueError:
+        return None
+
+
+def page_link_key(url: str) -> str:
+    """A link's identity for the page-link join: site, path and query, with
+    scheme, fragment and trailing slash dropped (browse drops the scheme).
+    Only the host is case-folded — a path is the server's to compare. "" for
+    a link carrying userinfo (nobody saw that string on a page) or one that
+    cannot be read."""
+    parts = _split(url)
+    if parts is None or parts.username is not None or parts.password is not None:
+        return ""
+    if not (site := _site(parts)):
+        return ""
+    key = f"{site}{parts.path.rstrip('/')}"
+    if parts.query:
+        key += f"?{parts.query}"
+    return PAGE_LINK_PREFIX + key
+
+
+def _reading_keys(address: str, site: str, cut: bool) -> tuple[str, ...]:
+    """The keys one page address yields: full and path-only, or path-only when
+    the renderer cut its query short. None when it is not a same-site address."""
+    if not _HOSTISH_RE.match(address) or (cut and "?" not in address):
+        return ()
+    parts = _split(address)
+    if parts is None or parts.username is not None or _site(parts) != site:
+        return ()
+    if not (full := page_link_key(address)):
+        return ()
+    path_only = full.split("?", 1)[0]
+    return (path_only,) if cut else (full, path_only)
+
+
+def page_links(result: str, page: str, nonce: str) -> list[str]:
+    """Same-site links the driven page in `result` carried, as page_link_keys.
+
+    Each link yields its full key AND its key without the query, because
+    the page writes `title/tt2866360/?ref_=ls_t_6` and an answer writes
+    `title/tt2866360/`: dropping a tracking query is the same page, so a link
+    with no query matches by path — but one WITH a query must match exactly,
+    or a model could append any query it liked. A link the renderer elided
+    mid-path is skipped: its address is not on the page."""
+    page_parts = _split(page)
+    site = _site(page_parts) if page_parts is not None else ""
+    if not site or not nonce:
+        return []
+    keys: list[str] = []
+    for match in _CONTROL_LINK_RE.finditer(result or ""):
+        if match.group("nonce") != nonce:
+            continue
+        address, cut = match.group("address"), bool(match.group("cut"))
+        # Both readings of a closing `)`: the page's own (`Coherence_(film)`)
+        # and the one the answer's link pattern takes, which ends at the first
+        # `)` — so the page side must match either.
+        readings = (
+            [address] if cut
+            else dict.fromkeys([_without_trailing_punctuation(address),
+                                address.rstrip(_TRAILING_PUNCTUATION + ")")])
+        )
+        for reading in readings:
+            for key in _reading_keys(reading, site, cut):
+                if key not in keys:
+                    keys.append(key)
+        if len(keys) >= PAGE_LINKS_MAX:
+            break
+    return keys
+
+
+PAGE_LINK_PAGES_MAX = 200
+
+
+def restamped_page_links(call: dict, seen: dict[str, set[str]]) -> set[str]:
+    """This call's page links, plus every link its page carried at an earlier
+    read of this chat — `seen` is that memory, page → keys, updated here.
+
+    Because a re-read of a page already shown comes back as `[unchanged,
+    already shown in this chat]` placeholders, with no links on it: without
+    this, the ledger's day-long horizon would lapse on a list the chat is
+    still reading, and the only way back would be opening every title."""
+    if not _ran(call):
+        return set()
+    keys = set(call.get("links") or ())
+    if not (page := str(call.get("page") or "")):
+        return keys
+    page = normalise_url(page)
+    held = seen.pop(page, set()) | keys
+    if len(held) > PAGE_LINKS_MAX:
+        # One address whose content keeps changing (a single-page app) would
+        # otherwise collect every link it ever showed, re-stamped forever.
+        held = keys
+    seen[page] = held  # re-inserted, so the oldest page is the first out
+    while len(seen) > PAGE_LINK_PAGES_MAX:
+        seen.pop(next(iter(seen)))
+    return set(held)
+
+
+def links_on_pages_read(calls: Iterable[dict]) -> set[str]:
+    """Page-link keys carried by the SUCCESSFUL calls in these records."""
+    return {key for call in calls if _ran(call) for key in call.get("links") or ()}
+
+
 def _acted_on(evidence: TurnEvidence) -> set[str]:
     """Everything that counts as opened when this answer is graded: what ran
     THIS turn, plus what this CHAT opened before it (#267).
@@ -2482,7 +2643,11 @@ def _acted_on(evidence: TurnEvidence) -> set[str]:
     happened NOW, and both stay turn-scoped — see _pages_read, which
     deliberately does not read the ledger.
     """
-    return urls_acted_on(evidence.calls) | set(evidence.opened_before)
+    return (
+        urls_acted_on(evidence.calls)
+        | links_on_pages_read(evidence.calls)
+        | set(evidence.opened_before)
+    )
 
 
 def _verify_links(
@@ -2509,7 +2674,10 @@ def _verify_links(
         return None  # nothing claimed, nothing to verify
     acted = _acted_on(evidence)
     unverified = [
-        url for url in linked if normalise_url(url) not in acted and not is_local_link(url)
+        url for url in linked
+        if normalise_url(url) not in acted
+        and (page_link_key(url) or None) not in acted
+        and not is_local_link(url)
     ]
     if not unverified:
         return None
@@ -2520,7 +2688,8 @@ def _verify_links(
         # and the chat's ledger together (#267), not the turn's calls alone.
         # Sampled at 8, so it is a witness for the refusal, never the ledger.
         {"named": NAMED_UNVERIFIED_LINKS, "linked": linked[:8],
-         "opened": sorted(acted)[:8], "unverified": unverified[:8]},
+         "opened": sorted(u for u in acted if not u.startswith(PAGE_LINK_PREFIX))[:8],
+         "unverified": unverified[:8]},
         UNVERIFIED_LINKS_ASK.format(
             count=f"{len(unverified)} of them" if len(unverified) > 1 else "one",
             shown=shown, **common,

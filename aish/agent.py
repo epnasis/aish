@@ -3278,7 +3278,12 @@ OPENED_LINK_TTL = 24 * 3600
 # Oldest first out. A shopping chat opens dozens of pages and a research one
 # hundreds, so this is a memory bound rather than a policy — a trimmed URL is
 # re-read once, which is exactly what happened before the ledger existed.
-OPENED_LINKS_MAX = 500
+# Sized for the page links it also holds (rules.page_links): one list page can
+# carry a few hundred, and they must not evict the pages actually opened first.
+OPENED_LINKS_MAX = 5000
+# The tools whose result is a DRIVEN page — the only ones whose header names
+# the address the browser is really on (rules.page_links).
+PAGE_READERS = frozenset({"browse", "browse_act", "browse_fill"})
 # How many stubbed-message references a `trim` record lists before it says how
 # many more there were. A trim that hits fifty results is real and the reader
 # needs to know its shape, not fifty rows of it.
@@ -4253,6 +4258,9 @@ class Agent:
         # and the fetch does not un-happen when the model stops talking. A
         # reopened chat refills it from its own log; see restore_opened_links.
         self._opened_links: dict[str, float] = {}
+        # Page → the links it carried, so a re-read shown as unchanged still
+        # re-stamps them (rules.restamped_page_links).
+        self._page_links_seen: dict[str, set[str]] = {}
         # Has the model said anything to the user yet this task? The only input
         # `must_first: answer` needs.
         self._said_something = False
@@ -9015,6 +9023,14 @@ class Agent:
         # carry, which ran anyway (#444 H1). Never an unknown-tool outcome.
         if off_menu:
             step["off_menu"] = True
+        # The page's same-site links (rules.page_links), so a reopened chat's
+        # ledger can vouch for them as the live one did. Path keys only: they
+        # are what an answer's cleaned-up link matches, at half the bytes.
+        if ok and name in PAGE_READERS and (page := self._driven_page()):
+            step["driven_page"] = page
+            keys = rules.page_links(result, page, self._render_nonce())
+            if paths := sorted({key.split("?", 1)[0] for key in keys}):
+                step["page_links"] = paths
         _scrub_page_console(step)
         if not ok and self._run_meta is None:
             # Non-run_command failure (a read_url/web_search error, a gate
@@ -14326,6 +14342,7 @@ class Agent:
         never tried", and a verify check that conflated them would ask the
         model to do something the harness had just forbidden."""
         status, decision = _call_facts(result, self._run_meta)
+        page = self._driven_page() if name in PAGE_READERS else ""
         record = {
             "tool": name,
             "args": dict(args or {}),
@@ -14341,9 +14358,22 @@ class Agent:
             # price sat 6 000 in. A price check that read the stored result
             # would refuse every correct answer it was shown.
             "figures": rules.money_figures(str(result)),
+            # Derived here for the same reason: a list page's links run past
+            # any cap, and they are what lets the answer link its titles.
+            "page": page,
+            "links": rules.page_links(str(result), page, self._render_nonce()) if page else [],
         }
         self._turn_calls.append(record)
         self._remember_opened(record)
+
+    def _driven_page(self) -> str:
+        """The address THIS browse call left the browser on — "" when it
+        rendered nothing, since the view clears it at every call's start."""
+        return self._browse_view.frame_url
+
+    def _render_nonce(self) -> str:
+        """The nonce aish minted for the newest render it recorded."""
+        return next(reversed(self._browse_view.refs), "")
 
     def _remember_opened(self, call: dict) -> None:
         """Add whatever this call successfully opened to the chat's ledger.
@@ -14352,7 +14382,8 @@ class Agent:
         `rules.urls_acted_on`, so "opened" has one definition: the ledger can
         never vouch for something the turn-local check would have refused."""
         now = time.time()
-        for url in rules.urls_acted_on([call]):
+        vouched = rules.restamped_page_links(call, self._page_links_seen)
+        for url in rules.urls_acted_on([call]) | vouched:
             self._opened_links.pop(url, None)  # re-insert, so trimming is by age
             self._opened_links[url] = now
         self._trim_opened_links()
@@ -14426,7 +14457,8 @@ class Agent:
         for call, when in calls:
             if not when:
                 continue
-            for url in rules.urls_acted_on([call]):
+            vouched = rules.restamped_page_links(call, self._page_links_seen)
+            for url in rules.urls_acted_on([call]) | vouched:
                 self._opened_links.pop(url, None)
                 self._opened_links[url] = float(when)
         self._trim_opened_links()

@@ -1975,6 +1975,8 @@ class SessionLog:
                     # spelling of the same verdict, kept so old logs read alike.
                     "status": step.get("status") or ("ok" if step.get("ok") else "failed"),
                     "decision": step.get("decision"),
+                    "page": str(step.get("driven_page") or ""),
+                    "links": [str(key) for key in step.get("page_links") or ()],
                 },
                 when or at,
             ))
