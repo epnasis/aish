@@ -125,7 +125,7 @@ The distributions overlap in the 0.28–0.32 band, so no floor separates them; t
 
 **Recall records no scores** — the `knowledge` record covers preflight only — so recalibration means replaying labelled probes (`skills.score_entries` + `SemanticIndex.scores` over `load_entries`, with a temp `state_dir`), never adjusting by taste. `TestSemanticRecall` pins the incident shape, the 0.282 phone-number shape, the 0.313 survivor, and the lexical exemption, and asserts the constant sits between the evidence.
 
-`recall` also searches past sessions, except in an unattended session, where that half is dropped (see the origin gates in `docs/agent-core.md`).
+`recall` also searches past sessions, except in a task no person sent (`task_from_owner` false), where that half is dropped (see Egress #178 P0-2 in `docs/agent-core.md`).
 
 ---
 

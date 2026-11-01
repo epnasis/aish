@@ -1072,7 +1072,9 @@ no delete verb.
   only when he started it (origin `user`). **A chip tap is a task a
   person sent**: the server cannot tell it from typing (`app.js` sends both as one `task`), and a
   model in a tainted chat can write the chip's text — the card still stands between, and that
-  card's words are code's.
+  card's words are code's. The same flag scopes `recall`'s past-session archive, so "see the
+  previous inbox review" typed in a report chat searches earlier report chats
+  (`docs/agent-core.md`, Egress #178 P0-2).
 - **The card's one sentence is code-composed from the typed fields** (`mailcasetool.plan` →
   `_sentence`): code's words, the case's title and any title, note or subject quoted and passed
   through `_safe`, with any quote marks of their own made plain so a value cannot close aish's.
