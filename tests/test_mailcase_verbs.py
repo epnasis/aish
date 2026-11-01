@@ -389,6 +389,62 @@ class TestTheServerSetsWhoSentIt:
             session = server.sessions[name]
             assert session.agent.task_from_owner is False
 
+    def test_recall_reaches_the_archive_only_for_his_task(self, app_env, monkeypatch):
+        """#178 P0-2, composed through the real server: a trigger's task that
+        calls recall never touches the past-session archive; his typed message
+        in the SAME chat does."""
+        import aish.agent as agent_module
+
+        searched: list[str] = []
+        monkeypatch.setattr(
+            agent_module.SessionLog, "recall_sessions",
+            staticmethod(lambda state_dir, q, exclude=None: (searched.append(q), "")[1]),
+        )
+        client, _ = make_client(app_env, [
+            model_says(tool_calls=[tool_call("recall", query="inbox review")]),
+            model_says("done"),
+            model_says(tool_calls=[tool_call("recall", query="previous review")]),
+            model_says("here it is"),
+        ], token="secret")
+        with client:
+            server = client.app.state.server
+            name = client.post("/trigger?token=secret",
+                               json={"prompt": "look back at old reviews", "origin": "email"}
+                               ).json()["session"]
+            wait_idle(server, name)
+            assert searched == []
+            with connected(client, f"/ws?token=secret&session={name}") as (ws, _, _):
+                ws.send_json({"type": "task", "text": "Zobacz poprzednie inbox review"})
+                recv_until(ws, "done")
+        assert searched == ["previous review"]
+
+    def test_every_model_task_the_server_starts_goes_through_run_task(self):
+        """`task_from_owner` is trusted by the case verbs and recall's archive
+        gate, and only `_run_task` assigns it per task; an Agent keeps the last
+        value. So a new ingress calling the agent's task entry directly would
+        inherit the previous task's sender — a stale True after his message
+        would hand an unattended task his rights. This fences that structurally."""
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(server_module))
+        entries = {"run_task", "present"}
+        outside = []
+
+        def walk(node, inside):
+            for child in ast.iter_child_nodes(node):
+                scope = inside
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    scope = child.name
+                if (isinstance(child, ast.Attribute) and child.attr in entries
+                        and isinstance(child.value, ast.Attribute)
+                        and child.value.attr == "agent" and scope != "_run_task"):
+                    outside.append((scope, child.lineno))
+                walk(child, scope)
+
+        walk(tree, "")
+        assert outside == []
+
     def test_a_cold_reopened_triggered_chat_presumes_nothing(self):
         session = type("S", (), {"last_task_from_owner": None, "origin": "email"})()
         assert server_module._task_sender(session) is False
