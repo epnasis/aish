@@ -5141,14 +5141,19 @@ class TestEgressGate:
             "read_url", {"url": "https://evil.example/x"}
         ) == ["evil.example"]
 
-    def test_recall_skips_session_archive_in_automated_sessions(self, tmp_path, monkeypatch):
+    @staticmethod
+    def _spy_archive(monkeypatch):
         import aish.agent as agent_module
 
-        searched = []
+        searched: list[str] = []
         monkeypatch.setattr(
             agent_module.SessionLog, "recall_sessions",
             staticmethod(lambda state_dir, q, exclude=None: (searched.append(q), "hit")[1]),
         )
+        return searched
+
+    def test_recall_skips_session_archive_in_automated_sessions(self, tmp_path, monkeypatch):
+        searched = self._spy_archive(monkeypatch)
         agent, _ = make_agent([], origin="email", state_dir=tmp_path, cwd=str(tmp_path))
         result = agent._recall("deploy token", None)
         assert searched == []  # the archive was never consulted
@@ -5157,6 +5162,64 @@ class TestEgressGate:
         user_agent, _ = make_agent([], state_dir=tmp_path, cwd=str(tmp_path))
         user_agent._recall("deploy token", None)
         assert searched == ["deploy token"]
+
+    def test_owner_typing_in_a_report_chat_searches_the_archive(self, tmp_path, monkeypatch):
+        """The gate is keyed on who SENT the task, not who opened the chat: the
+        owner typing "see the previous inbox review" in a schedule-origin report
+        chat asks with his own rights (attended never has fewer)."""
+        searched = self._spy_archive(monkeypatch)
+        agent, _ = make_agent([], origin="schedule", state_dir=tmp_path, cwd=str(tmp_path))
+        agent.task_from_owner = True  # what server._run_task sets for a typed task
+        result = agent._recall("inbox review", None)
+        assert searched == ["inbox review"]
+        assert "unavailable in automated sessions" not in result
+
+    def test_a_task_nobody_sent_stays_knowledge_only_in_the_same_chat(
+        self, tmp_path, monkeypatch
+    ):
+        """Same report chat, but the task is the trigger's prompt (or a scheduled
+        run, a restart's replay, a Retry of one): P0-2 still holds."""
+        searched = self._spy_archive(monkeypatch)
+        agent, _ = make_agent([], origin="schedule", state_dir=tmp_path, cwd=str(tmp_path))
+        agent.task_from_owner = True
+        agent._recall("inbox review", None)
+        agent.task_from_owner = False  # the next task is not his
+        result = agent._recall("inbox review", None)
+        assert searched == ["inbox review"]  # only the owner's task reached it
+        assert "unavailable in automated sessions" in result
+
+    def test_triggered_agent_defaults_to_knowledge_only(self, tmp_path, monkeypatch):
+        """Before the server says who sent the task, a triggered agent fails closed."""
+        searched = self._spy_archive(monkeypatch)
+        for origin in ("schedule", "email", "webhook"):
+            agent, _ = make_agent([], origin=origin, state_dir=tmp_path, cwd=str(tmp_path))
+            assert agent.task_from_owner is False
+            agent._recall("inbox review", None)
+        assert searched == []
+
+    def test_earlier_report_chats_are_findable_and_the_current_one_is_not(self, tmp_path):
+        """The real archive search (no spy): earlier report chats are
+        schedule-origin logs and must not be skipped for it; this chat is
+        excluded because its content is already the conversation."""
+        from aish.session import SessionLog
+
+        earlier = SessionLog(tmp_path / "session-20261031-073003-000001.jsonl")
+        earlier.origin("schedule")
+        earlier.message({"role": "user", "content": "Daily inbox review"})
+        earlier.message({"role": "assistant", "content": "Inbox review: invoice from Tefal"})
+        current = SessionLog(tmp_path / "session-20261101-073003-003960.jsonl")
+        current.origin("schedule")
+        current.message({"role": "user", "content": "Daily inbox review"})
+        current.message({"role": "assistant", "content": "Inbox review: Tefal again"})
+
+        agent, _ = make_agent(
+            [], origin="schedule", state_dir=tmp_path, cwd=str(tmp_path),
+            current_session=lambda: current.path,
+        )
+        agent.task_from_owner = True
+        result = agent._recall("tefal", None)
+        assert earlier.path.name in result
+        assert current.path.name not in result
 
 
 class TestKnowledgeGate:

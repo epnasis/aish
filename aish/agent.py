@@ -3925,14 +3925,18 @@ class Agent:
         # triggered sessions, set by the server's open_session. A non-user
         # origin gates outbound reads (web_search/read_url to hosts the owner
         # never mentioned — see _egress_gate), gates knowledge writes (see
-        # _knowledge_gate, #196), and scopes recall to knowledge entries only.
+        # _knowledge_gate, #196). Recall's archive scope is keyed on
+        # `task_from_owner` below, not on this.
         self.origin = origin
         # Did a PERSON send the task now running — typed it, tapped a chip,
         # pressed Retry? Per task, not per session: the server sets it before
         # every task (`server._run_task`'s `owner_sent`), so the owner typing
         # in a report chat (origin "schedule") is his, and a trigger's prompt
         # or a restart's replay is not. The default covers the CLI, where every
-        # task is typed. Only the case verbs read it (#142 W5).
+        # task is typed. Read by the case verbs (#142 W5) and by `_recall`'s
+        # past-session archive gate (#178 P0-2). Nothing here resets it between
+        # tasks, so every server task must enter through `_run_task` — pinned by
+        # `test_every_model_task_the_server_starts_goes_through_run_task`.
         self.task_from_owner = origin == "user"
         # Which caption language read_media reads. EMPTY BY DEFAULT, and that
         # is the setting: empty means "the language the recording is spoken
@@ -9848,12 +9852,15 @@ class Agent:
         # P1-9), not only preflight — same fallback discipline: scores()
         # failing → None → recall_text is byte-identical to pure lexical.
         semantic = self.semantic.scores if self.semantic is not None else None
-        if self.origin != "user":
-            # A triggered session must not search the whole past-session
-            # archive (#178 P0-2): recall over every conversation ever held is
-            # a far larger read capability than this unattended task needs,
-            # and it is the read half of the injected read→exfiltrate chain.
-            # Knowledge entries (skills/memories) stay available.
+        if not self.task_from_owner:
+            # A task nobody sent must not search the whole past-session archive
+            # (#178 P0-2): recall over every conversation ever held is a far
+            # larger read capability than an unattended task needs, and it is
+            # the read half of the injected read→exfiltrate chain. Keyed on who
+            # SENT this task, not who opened the chat: the owner typing in a
+            # report chat (origin "schedule") is attended and asks with his own
+            # rights, while a trigger's prompt, a scheduled run or a restart's
+            # replay stays knowledge-only. Skills/memories stay available.
             return (
                 skills.recall_text(
                     self.cwd, self.lessons_path, query, name=name, semantic=semantic
