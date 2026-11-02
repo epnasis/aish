@@ -336,10 +336,15 @@ def links_from_evidence(run: RunRecord) -> Verdict:
             undated.append(task.index)
             continue
         cutoff = task.answer_at or 0
-        opened = rules.urls_acted_on(call for call, when in run.ran if when <= cutoff)
+        before = [call for call, when in run.ran if when <= cutoff]
+        # The rule's own two halves: what was fetched, and the same-site links
+        # the pages read carried (#249's reversal) — one definition of opened.
+        opened = rules.urls_acted_on(before) | rules.links_on_pages_read(before)
         local += sum(rules.is_local_link(u) for u in links)
         unopened += [(task.index, u) for u in links
-                     if rules.normalise_url(u) not in opened and not rules.is_local_link(u)]
+                     if rules.normalise_url(u) not in opened
+                     and (rules.page_link_key(u) or None) not in opened
+                     and not rules.is_local_link(u)]
     if not unopened and undated:
         return Verdict(name, None, f"answers of tasks {undated} carry links but no "
                                    "timestamp, so when they were written is unknown")

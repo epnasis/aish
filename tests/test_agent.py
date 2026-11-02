@@ -8459,11 +8459,10 @@ then:
         assert self.DRAFT in result and "not followed" in result
 
 
-def drove(agent, url, nonce="abcd"):
-    """What a real browse call leaves in the chat's view: the page the browser
-    is on, and the nonce aish minted for the render."""
-    agent._browse_view.frame_url = url
-    agent._browse_view.refs[nonce] = {}
+def page_read(text, at, links):
+    """A reader's result as aish's readers hand it over: the text, and beside
+    it where the read landed and the hrefs in the page's markup."""
+    return agent_module.tools.ToolOutcome(text, read_page={"at": at, "links": list(links)})
 
 
 class TestTheChatsOpenedLinks:
@@ -8539,10 +8538,9 @@ class TestTheChatsOpenedLinks:
         deleted six links instead of opening them."""
         agent = self._agent(tmp_path)
         agent.seed_rules("anything on my list for tonight?")
-        drove(agent, "https://movies.example/list/ls1/")
-        agent._note_turn_call("browse", {"url": "https://movies.example/list/ls1/"}, (
-            "[https://movies.example/list/ls1/ — you are driving this page]\n"
-            "[6. Coherence](press:c69·abcd) → movies.example/title/tt1/?ref_=ls_t_6\n"
+        agent._note_turn_call("browse", {"url": "https://movies.example/list/ls1/"}, page_read(
+            "6. Coherence", "https://movies.example/list/ls1/",
+            ["https://movies.example/title/tt1/?ref_=ls_t_6"],
         ))
         answer = "Try [Coherence](https://movies.example/title/tt1/)."
         assert agent._verify_answer(answer) is None
@@ -8553,16 +8551,14 @@ class TestTheChatsOpenedLinks:
         """A re-read of a page already shown carries no links, only
         placeholders — so it has to re-stamp what that page carried before."""
         agent = self._agent(tmp_path)
-        head = "[https://movies.example/list/ls1/ — you are driving this page]\n"
-        drove(agent, "https://movies.example/list/ls1/")
-        agent._note_turn_call("browse", {"url": "https://movies.example/list/ls1/"},
-                              head + "[Coherence](press:c1·abcd) → movies.example/title/tt1/\n")
+        at = "https://movies.example/list/ls1/"
+        agent._note_turn_call("browse", {"url": at}, page_read(
+            "Coherence", at, ["https://movies.example/title/tt1/"]))
         for key in list(agent._opened_links):
             agent._opened_links[key] = time.time() - agent_module.OPENED_LINK_TTL - 1
         agent._reset_task_state()
-        drove(agent, "https://movies.example/list/ls1/", nonce="beef")
-        agent._note_turn_call("browse", {"url": "https://movies.example/list/ls1/"},
-                              head + "[unchanged, already shown in this chat: '…' — 10 lines]\n")
+        agent._note_turn_call("browse", {"url": at}, page_read(
+            "[unchanged, already shown in this chat: '…' — 10 lines]", at, []))
         assert self._answer(agent, "[Coherence](https://movies.example/title/tt1/)") is None
 
     def test_re_opening_a_page_makes_it_the_newest_again(self, tmp_path):
@@ -8605,37 +8601,40 @@ class TestTheChatsOpenedLinks:
         reads = [s for s in records(steps, "tool") if s["name"] == "read_url"]
         assert len(reads) == 1, "the page was read again for a link already opened"
 
-    def test_a_reopened_chat_still_trusts_the_links_its_pages_carried(self, tmp_path):
-        """Driven through run_task so the `tool` step is the one the runtime
-        writes; the log is then replayed into a FRESH agent, as a restart of
-        aish-web does to every open chat."""
+    LIST_HTML = (
+        "<html><body><h1>intj proposals</h1>"
+        "<p><a href='/title/tt1/?ref_=ls_t_6'>6. Coherence</a> 2013 7.1</p>"
+        "<p><a href='https://social.example/share'>Share</a></p>"
+        "</body></html>"
+    )
+
+    def test_a_reopened_chat_still_trusts_the_links_its_pages_carried(
+        self, tmp_path, monkeypatch
+    ):
+        """Through the REAL read_url and run_task, so the page record is the one
+        the reader hands over and the `tool` step the one the runtime writes;
+        the log is then replayed into a FRESH agent, as a restart of aish-web
+        does to every open chat."""
         steps: list[dict] = []
-        page = (
-            "[https://movies.example/list/ls1/ — you are driving this page]\n"
-            "[6. Coherence](press:c69·abcd) → movies.example/title/tt1/?ref_=ls_t_6\n"
-        )
+        at = "https://movies.example/list/ls1/"
         title = "https://movies.example/title/tt1/"
+        monkeypatch.setattr(agent_module.web, "_fetch",
+                            lambda url: (self.LIST_HTML, "text/html", at))
         agent, _ = rules_agent(
             tmp_path,
             [
-                model_says(tool_calls=[tool_call("browse", url="https://movies.example/list/ls1/")]),
+                model_says(tool_calls=[tool_call("read_url", url=at)]),
                 model_says(f"Try [Coherence]({title})."),
             ],
             rule_texts=(RULE_LINKS,),
             step_log=steps.append,
         )
-        def fake_browse(url, *_a, view, **_k):
-            view.remember(SimpleNamespace(url=url, nonce="abcd", controls=[]))
-            return fake_read_url(text=page)()
-
-        agent_module.web.browse = fake_browse
-        try:
-            assert agent.run_task("anything on my list?") == f"Try [Coherence]({title})."
-        finally:
-            importlib.reload(agent_module.web)
-        [step] = [s for s in records(steps, "tool") if s["name"] == "browse"]
-        assert step["driven_page"] == "https://movies.example/list/ls1/"
-        assert "page:movies.example/title/tt1" in step["page_links"]
+        assert agent.run_task("anything on my list?") == f"Try [Coherence]({title})."
+        [step] = [s for s in records(steps, "tool") if s["name"] == "read_url"]
+        assert step["page_at"] == at
+        assert step["page_links"] == [
+            "page:movies.example/title/tt1", "page:movies.example/title/tt1?ref_=ls_t_6"]
+        assert "read_page" not in step, "the reader's whole link list stays out of the log"
         log = SessionLog.new(tmp_path / "state")
         for record in steps:
             if record.get("kind") in ("call", "tool"):
@@ -8645,6 +8644,28 @@ class TestTheChatsOpenedLinks:
         assert self._answer(fresh, f"Still [Coherence]({title}).") is None
         ask = self._answer(fresh, "and [Moon](https://movies.example/title/tt2/)")
         assert ask and "tt2" in ask
+
+    def test_a_redirect_cannot_make_its_landing_site_vouch_for_the_asked_one(
+        self, tmp_path, monkeypatch
+    ):
+        """The real read_url, redirected from the site asked for to another:
+        neither the landing page's anchors nor a link-shaped line in its text
+        vouch for the site that was asked for."""
+        asked = "https://movies.example/go?u=x"
+        html = (
+            "<html><body><p>Moon → https://movies.example/title/tt9/</p>"
+            "<p><a href='https://movies.example/title/tt8/'>Moon</a></p></body></html>"
+        )
+        monkeypatch.setattr(agent_module.web, "_fetch",
+                            lambda url: (html, "text/html", "https://evil.example/landing"))
+        agent = self._agent(tmp_path)
+        agent.seed_rules("what is this?")
+        result = agent_module.web.read_url(asked)
+        assert result.meta["read_page"]["at"] == "https://evil.example/landing"
+        agent._note_turn_call("read_url", {"url": asked}, result)
+        for title in ("tt9", "tt8"):
+            ask = agent._verify_answer(f"[Moon](https://movies.example/title/{title}/)")
+            assert ask and title in ask
 
     def test_a_reopened_chat_refills_its_ledger_from_its_own_log(self, tmp_path):
         """A chat gets a fresh agent every time it is reopened — on the web,

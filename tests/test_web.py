@@ -1746,3 +1746,34 @@ class TestAFetchedTableKeepsItsRowsAndCells:
         squeezed = [ln.replace(" ", "") for ln in text.splitlines()]
         assert "bc" not in squeezed
         assert any("|c" in ln for ln in squeezed), text
+
+
+class TestBrowseReportsItsPage:
+    """A driven page hands the rule engine the same two facts read_url does —
+    where the browser IS, and the hrefs its links point at — so the link rule
+    needs to know nothing about which tool read the page."""
+
+    def test_a_render_records_the_address_and_its_navigating_controls(self):
+        from types import SimpleNamespace
+
+        from aish.browse import BUTTON, LINK, Control
+
+        view = web.BrowseView()
+        view.start_call()
+        view.remember(SimpleNamespace(
+            url="https://movies.example/list/ls1/", nonce="abcd",
+            controls=[
+                Control(1, LINK, "Coherence", detail="https://movies.example/title/tt1/",
+                        navigates=True),
+                Control(2, BUTTON, "Rate", detail="currently: x"),
+            ],
+        ))
+        assert view.page.record() == {
+            "at": "https://movies.example/list/ls1/",
+            "links": ["https://movies.example/title/tt1/"],
+        }
+
+    def test_a_call_that_rendered_nothing_reports_no_page(self):
+        view = web.BrowseView()
+        view.start_call()
+        assert view.page.record() == {}

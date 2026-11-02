@@ -2466,44 +2466,21 @@ def urls_acted_on(calls: Iterable[dict]) -> set[str]:
     return acted
 
 
-# A link a page aish DROVE carried to ANOTHER page of the same site. The
+# A link a page aish READ carried to ANOTHER page of the same site. The
 # owner's call (2026-11-01), reversing #249: on his IMDb list the answer linked
 # six titles, every one sitting on the list page as IMDb's own link, and the
 # rule refused all six; the model opened one and deleted the rest. A site
 # linking to its own page is the site's word that the page exists — unlike a
 # search page linking out, which is why another site's links never count.
 #
-# Only a driven page, and only its CONTROLS — both facts handed in by the
-# agent from aish's OWN browse state, never read out of the result, because
-# the result is mostly page text:
-# - `page` is the address the browser is actually on (the view's snapshot).
-#   read_url's header names the address ASKED for, so after a redirect the
-#   landing site's links would speak for the asking one; it vouches for nothing.
-# - `nonce` is the one aish minted for this render. A link is a
-#   `[label](press:cN·nonce) → address` reference carrying THAT nonce. It is
-#   random per render, so page text cannot forge a reference; electing it from
-#   the text instead was invertible — fifty forged references outvote five real
-#   ones (found in review). An arrow in the page's prose is somebody's text.
+# Tool-agnostic: whatever read the page — read_url's fetch, its browser
+# render, a browse — hands over the same two facts on its envelope
+# (web.PageSeen): the address it LANDED on, and the hrefs in the page's
+# markup. Both come from the reader, never from the result text, which is
+# mostly page text: a line there that looks like a link is anybody's, and a
+# header naming the address ASKED for would let a redirect's landing site speak
+# for the asking one.
 PAGE_LINK_PREFIX = "page:"
-PAGE_LINKS_MAX = 1500
-_CONTROL_LINK_RE = re.compile(
-    r"\]\(press:c\d+·(?P<nonce>[0-9a-f]+)\) → (?:https?://)?(?P<address>[^\s…]+)(?P<cut>…)?"
-)
-_HOSTISH_RE = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:[/?]|$)", re.IGNORECASE)
-_TRAILING_PUNCTUATION = ",.;:!?"
-
-
-def _without_trailing_punctuation(address: str) -> str:
-    """Prose punctuation after an inline reference is not the address — but a
-    `)` closing a `(` inside it is (`wiki/Coherence_(film)`)."""
-    while address:
-        if address[-1] in _TRAILING_PUNCTUATION:
-            address = address[:-1]
-        elif address[-1] == ")" and address.count(")") > address.count("("):
-            address = address[:-1]
-        else:
-            break
-    return address
 
 
 def _site(parts: urllib.parse.SplitResult) -> str:
@@ -2521,19 +2498,17 @@ def _site(parts: urllib.parse.SplitResult) -> str:
 
 
 def _split(url: str) -> urllib.parse.SplitResult | None:
-    raw = str(url or "").strip()
     try:
-        return urllib.parse.urlsplit(raw if "://" in raw else f"//{raw}")
+        return urllib.parse.urlsplit(str(url or "").strip())
     except ValueError:
         return None
 
 
 def page_link_key(url: str) -> str:
     """A link's identity for the page-link join: site, path and query, with
-    scheme, fragment and trailing slash dropped (browse drops the scheme).
-    Only the host is case-folded — a path is the server's to compare. "" for
-    a link carrying userinfo (nobody saw that string on a page) or one that
-    cannot be read."""
+    scheme, fragment and trailing slash dropped. Only the host is case-folded —
+    a path is the server's to compare. "" for a link carrying userinfo (nobody
+    saw that string on a page) or one that cannot be read."""
     parts = _split(url)
     if parts is None or parts.username is not None or parts.password is not None:
         return ""
@@ -2545,56 +2520,35 @@ def page_link_key(url: str) -> str:
     return PAGE_LINK_PREFIX + key
 
 
-def _reading_keys(address: str, site: str, cut: bool) -> tuple[str, ...]:
-    """The keys one page address yields: full and path-only, or path-only when
-    the renderer cut its query short. None when it is not a same-site address."""
-    if not _HOSTISH_RE.match(address) or (cut and "?" not in address):
-        return ()
-    parts = _split(address)
-    if parts is None or parts.username is not None or _site(parts) != site:
-        return ()
-    if not (full := page_link_key(address)):
-        return ()
-    path_only = full.split("?", 1)[0]
-    return (path_only,) if cut else (full, path_only)
+def page_links(page: dict | None) -> list[str]:
+    """The same-site links a page carried, as page_link_keys, from the
+    envelope's `page` record ({"at": landed address, "links": hrefs}).
 
-
-def page_links(result: str, page: str, nonce: str) -> list[str]:
-    """Same-site links the driven page in `result` carried, as page_link_keys.
-
-    Each link yields its full key AND its key without the query, because
-    the page writes `title/tt2866360/?ref_=ls_t_6` and an answer writes
+    Each link yields its full key AND its key without the query, because the
+    page writes `title/tt2866360/?ref_=ls_t_6` and an answer writes
     `title/tt2866360/`: dropping a tracking query is the same page, so a link
     with no query matches by path — but one WITH a query must match exactly,
-    or a model could append any query it liked. A link the renderer elided
-    mid-path is skipped: its address is not on the page."""
-    page_parts = _split(page)
-    site = _site(page_parts) if page_parts is not None else ""
-    if not site or not nonce:
+    or a model could append any query it liked."""
+    page = page or {}
+    at = _split(str(page.get("at") or ""))
+    site = _site(at) if at is not None else ""
+    if not site:
         return []
-    keys: list[str] = []
-    for match in _CONTROL_LINK_RE.finditer(result or ""):
-        if match.group("nonce") != nonce:
+    keys: dict[str, None] = {}  # ordered and O(1): a listing carries thousands
+    for href in page.get("links") or ():
+        parts = _split(str(href))
+        if parts is None or parts.username is not None or _site(parts) != site:
             continue
-        address, cut = match.group("address"), bool(match.group("cut"))
-        # Both readings of a closing `)`: the page's own (`Coherence_(film)`)
-        # and the one the answer's link pattern takes, which ends at the first
-        # `)` — so the page side must match either.
-        readings = (
-            [address] if cut
-            else dict.fromkeys([_without_trailing_punctuation(address),
-                                address.rstrip(_TRAILING_PUNCTUATION + ")")])
-        )
-        for reading in readings:
-            for key in _reading_keys(reading, site, cut):
-                if key not in keys:
-                    keys.append(key)
-        if len(keys) >= PAGE_LINKS_MAX:
-            break
-    return keys
+        if full := page_link_key(str(href)):
+            keys[full] = None
+            keys[full.split("?", 1)[0]] = None
+    return list(keys)
 
 
 PAGE_LINK_PAGES_MAX = 200
+# Keys one page may hold in the chat's memory — about the 2000 links a result
+# carries (web.PAGE_LINKS_KEPT), each giving a full and a path-only key.
+PAGE_LINK_KEYS_MAX = 4000
 
 
 def restamped_page_links(call: dict, seen: dict[str, set[str]]) -> set[str]:
@@ -2612,7 +2566,7 @@ def restamped_page_links(call: dict, seen: dict[str, set[str]]) -> set[str]:
         return keys
     page = normalise_url(page)
     held = seen.pop(page, set()) | keys
-    if len(held) > PAGE_LINKS_MAX:
+    if len(held) > PAGE_LINK_KEYS_MAX:
         # One address whose content keeps changing (a single-page app) would
         # otherwise collect every link it ever showed, re-stamped forever.
         held = keys

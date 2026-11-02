@@ -3278,12 +3278,9 @@ OPENED_LINK_TTL = 24 * 3600
 # Oldest first out. A shopping chat opens dozens of pages and a research one
 # hundreds, so this is a memory bound rather than a policy — a trimmed URL is
 # re-read once, which is exactly what happened before the ledger existed.
-# Sized for the page links it also holds (rules.page_links): one list page can
-# carry a few hundred, and they must not evict the pages actually opened first.
-OPENED_LINKS_MAX = 5000
-# The tools whose result is a DRIVEN page — the only ones whose header names
-# the address the browser is really on (rules.page_links).
-PAGE_READERS = frozenset({"browse", "browse_act", "browse_fill"})
+# Sized for the page links it also holds (rules.page_links): one listing can
+# carry hundreds, and they must not evict the pages actually opened first.
+OPENED_LINKS_MAX = 20000
 # How many stubbed-message references a `trim` record lists before it says how
 # many more there were. A trim that hits fifty results is real and the reader
 # needs to know its shape, not fifty rows of it.
@@ -9030,11 +9027,16 @@ class Agent:
         # The page's same-site links (rules.page_links), so a reopened chat's
         # ledger can vouch for them as the live one did. Path keys only: they
         # are what an answer's cleaned-up link matches, at half the bytes.
-        if ok and name in PAGE_READERS and (page := self._driven_page()):
-            step["driven_page"] = page
-            keys = rules.page_links(result, page, self._render_nonce())
-            if paths := sorted({key.split("?", 1)[0] for key in keys}):
-                step["page_links"] = paths
+        # The reader's page record, whole, would put every link of a listing —
+        # other sites' included — in the log on every read. What a reopened
+        # chat needs is the address and the same-site keys, so that is what is
+        # kept: all of them, full and path-only, since a shop answer links with
+        # its query (`?offerId=…`) and a path-only key would refuse it.
+        if page := step.pop("read_page", None):
+            if ok and (at := str(page.get("at") or "")):
+                step["page_at"] = at
+                if keys := sorted(rules.page_links(page)):
+                    step["page_links"] = keys
         _scrub_page_console(step)
         if not ok and self._run_meta is None:
             # Non-run_command failure (a read_url/web_search error, a gate
@@ -14349,7 +14351,7 @@ class Agent:
         never tried", and a verify check that conflated them would ask the
         model to do something the harness had just forbidden."""
         status, decision = _call_facts(result, self._run_meta)
-        page = self._driven_page() if name in PAGE_READERS else ""
+        page = (getattr(result, "meta", None) or {}).get("read_page") or {}
         record = {
             "tool": name,
             "args": dict(args or {}),
@@ -14367,20 +14369,14 @@ class Agent:
             "figures": rules.money_figures(str(result)),
             # Derived here for the same reason: a list page's links run past
             # any cap, and they are what lets the answer link its titles.
-            "page": page,
-            "links": rules.page_links(str(result), page, self._render_nonce()) if page else [],
+            # What the reader handed over beside the text (web.PageSeen): the
+            # address it landed on and its same-site links — never parsed out of
+            # the result, which is mostly page text.
+            "page": str(page.get("at") or ""),
+            "links": rules.page_links(page),
         }
         self._turn_calls.append(record)
         self._remember_opened(record)
-
-    def _driven_page(self) -> str:
-        """The address THIS browse call left the browser on — "" when it
-        rendered nothing, since the view clears it at every call's start."""
-        return self._browse_view.frame_url
-
-    def _render_nonce(self) -> str:
-        """The nonce aish minted for the newest render it recorded."""
-        return next(reversed(self._browse_view.refs), "")
 
     def _remember_opened(self, call: dict) -> None:
         """Add whatever this call successfully opened to the chat's ledger.

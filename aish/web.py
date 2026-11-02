@@ -23,7 +23,8 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any, NamedTuple
 
@@ -251,6 +252,48 @@ class SignInSeen:
         return block
 
 
+# How many of a page's links ride a result's envelope. A memory bound: the
+# envelope is held for the turn and the links are reduced to same-site keys at
+# once (rules.page_links); past it, the rest of the page vouches for nothing.
+PAGE_LINKS_KEPT = 2000
+
+
+@dataclass
+class PageSeen:
+    """The page ONE read or browse call ended on, as the reader saw it: the
+    address it actually LANDED on and the links in its markup.
+
+    Facts handed to the rule engine beside the result, never parsed back out
+    of it (#249's reversal): the result is mostly page text, where a line that
+    looks like a link is anybody's, and a header written from the address ASKED
+    for would let a redirect's landing site speak for the asking one. One per
+    tool call and never module state, the same reason as SignInSeen."""
+
+    at: str = ""
+    links: list[str] = field(default_factory=list)
+
+    def saw(self, at: str, hrefs: "Iterable[str]") -> None:
+        """Each href as the markup wrote it AND as the model was shown it
+        (`clean_link`: same-host unwrapped, tracking stripped) — the shown one
+        is what an answer copies."""
+        self.at = str(at or "")
+        kept: dict[str, None] = {}
+        for href in (str(h) for h in hrefs):
+            if not href.startswith(("http://", "https://")):
+                continue
+            kept[href] = None
+            try:
+                kept[clean_link(href)] = None
+            except ValueError:
+                pass  # an href urllib cannot read is kept only as written
+            if len(kept) >= PAGE_LINKS_KEPT:
+                break
+        self.links = list(kept)
+
+    def record(self) -> dict:
+        return {"at": self.at, "links": list(self.links)} if self.at else {}
+
+
 def sealed(
     text: str,
     cut: PageCut | None,
@@ -266,6 +309,7 @@ def sealed(
     unchanged: bool = False,
     phases: "dict | None" = None,
     pressed: "dict | None" = None,
+    page: "PageSeen | None" = None,
 ) -> str:
     """The result, with the cut and the evidence frame recorded on it — or
     unchanged when there is neither.
@@ -352,6 +396,8 @@ def sealed(
         meta["pressed"] = dict(pressed)
     if signin is not None and (block := signin.record()):
         meta["signin"] = block
+    if page is not None and (seen_page := page.record()):
+        meta["read_page"] = seen_page
     if not meta:
         return text
     return tools.ToolOutcome(text, **meta)
@@ -1138,7 +1184,9 @@ def image_note(images: list[str]) -> str:
     )
 
 
-def _extract(html: str, base_url: str = "") -> tuple[str, str, list[str]]:
+def _extract(
+    html: str, base_url: str = "", links_out: "list[str] | None" = None
+) -> tuple[str, str, list[str]]:
     """(visible text, page title, declared image URLs).
 
     Image URLs are absolutised against `base_url`, because `og:image` is
@@ -1179,6 +1227,8 @@ def _extract(html: str, base_url: str = "") -> tuple[str, str, list[str]]:
         (label, urllib.parse.urljoin(base_url, href) if base_url else href)
         for label, href in extractor.links
     ]
+    if links_out is not None:
+        links_out.extend(href for _label, href in links)
     text = merge_links(
         "\n".join(out).strip(),
         [(label, href) for label, href in links if href.startswith(("http://", "https://"))],
@@ -1933,6 +1983,7 @@ def _browser_read(
     *,
     renew: bool = True,
     signin_seen: "SignInSeen | None" = None,
+    page_seen: "PageSeen | None" = None,
 ) -> tuple[tuple[str, list[str], list[str], bool, str] | None, str]:
     """(text, images, declared, signin, renewal) as a REAL browser renders the
     page, or None if it could not be used.
@@ -1991,7 +2042,7 @@ def _browser_read(
         outcome = _renew_session(url, seen=signin_seen)
         if outcome is not None:
             if outcome.ok:
-                again, why = _browser_read(url, renew=False)
+                again, why = _browser_read(url, renew=False, page_seen=page_seen)
                 if again is None:
                     return None, why
                 # The re-read's OWN live password test (`again[3]`), asked
@@ -2035,6 +2086,10 @@ def _browser_read(
     # After the wall check, never before: annotating a challenge screen's links
     # would only make a block page look more like a page.
     text = merge_links(text, page.links)
+    if page_seen is not None:
+        # Never `or url`: a render that cannot say where it landed vouches for
+        # nothing, rather than lending its links to the address ASKED for.
+        page_seen.saw(page.url, (href for _label, href in page.links))
     _remember_title(url, page.title)
     if host:
         BROWSER_HOSTS.add(host)
@@ -2321,8 +2376,10 @@ def read_url(
     # inside a `read_url` exactly as it can inside a `browse` — and the picture
     # of it belongs on whichever step it happened under.
     signin_seen = SignInSeen()
+    page_seen = PageSeen()
     return sealed(
-        _read_url(url, topic, cut=cut, signin_seen=signin_seen), cut, signin=signin_seen
+        _read_url(url, topic, cut=cut, signin_seen=signin_seen, page_seen=page_seen),
+        cut, signin=signin_seen, page=page_seen,
     )
 
 
@@ -2332,6 +2389,7 @@ def _read_url(
     *,
     cut: PageCut | None = None,
     signin_seen: SignInSeen | None = None,
+    page_seen: PageSeen | None = None,
 ) -> str:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
@@ -2366,7 +2424,7 @@ def _read_url(
     login_host = browser.host_of(url) if browser.host_of(url) in browser.seen_signed_in() else ""
     anonymous_why = ""
     if browser.host_of(url) in BROWSER_HOSTS or login_host:
-        rendered, why = _browser_read(url, signin_seen=signin_seen)
+        rendered, why = _browser_read(url, signin_seen=signin_seen, page_seen=page_seen)
         if rendered is not None:
             return _present_rendered(
                 url, rendered, topic=topic, login_host=login_host, cut=cut
@@ -2395,7 +2453,7 @@ def _read_url(
         # it did not work, and a second launch in one read buys nothing but
         # seconds.
         if exc.code in _BLOCKED_CODES and not anonymous_why:
-            rendered, why = _browser_read(url, signin_seen=signin_seen)
+            rendered, why = _browser_read(url, signin_seen=signin_seen, page_seen=page_seen)
             if rendered is not None:
                 return _present_rendered(
                 url, rendered, topic=topic, login_host=login_host, cut=cut
@@ -2412,7 +2470,7 @@ def _read_url(
         # socket timeout, and the escalation — wired only to 403/429/503 —
         # never ran.
         if _worth_rendering(exc) and not anonymous_why:
-            rendered, why = _browser_read(url, signin_seen=signin_seen)
+            rendered, why = _browser_read(url, signin_seen=signin_seen, page_seen=page_seen)
             if rendered is not None:
                 return _present_rendered(
                 url, rendered, topic=topic, login_host=login_host, cut=cut
@@ -2438,7 +2496,10 @@ def _read_url(
         # never offered, written into the offered-links record as if it had.
         # Only resolution moves; the source header and the title stay keyed
         # by the address the call named, which is what they are lookups of.
-        text, title, images = _extract(text, base_url=landed or url)
+        page_links: list[str] = []
+        text, title, images = _extract(text, base_url=landed or url, links_out=page_links)
+        if page_seen is not None:
+            page_seen.saw(landed or url, page_links)
         _remember_title(url, title)
     elif content_type == "application/pdf":
         # Not a dead end any more (#219): this was the one content type aish
@@ -2467,7 +2528,7 @@ def _read_url(
         # the sites that actively block automation.
         browser_why = anonymous_why
         if not anonymous_why:
-            rendered, why = _browser_read(url, signin_seen=signin_seen)
+            rendered, why = _browser_read(url, signin_seen=signin_seen, page_seen=page_seen)
             if rendered is not None:
                 return _present_rendered(
                 url, rendered, topic=topic, login_host=login_host, cut=cut
@@ -2492,7 +2553,7 @@ def _read_url(
         # to name the host. The page asking for a password is the signal, and it
         # needs no list: it is true for a site aish has never seen, and false
         # for one wrongly recorded.
-        rendered, why = _browser_read(url, signin_seen=signin_seen)
+        rendered, why = _browser_read(url, signin_seen=signin_seen, page_seen=page_seen)
         if rendered is not None:
             host = browser.host_of(url)
             if not rendered[3]:
@@ -2715,6 +2776,7 @@ class BrowseView:
         # the timings of the call before it.
         self.phases: dict = {}
         self.pressed: dict = {}
+        self.page = PageSeen()
 
     def start_call(self) -> None:
         """A new browse call begins: this chat has been shown nothing yet."""
@@ -2728,6 +2790,7 @@ class BrowseView:
         self.unchanged = False
         self.phases = {}
         self.pressed = {}
+        self.page = PageSeen()
 
     def remember(self, snapshot: Any) -> None:
         was = str(getattr(self.shown, "url", "") or "")
@@ -2746,6 +2809,10 @@ class BrowseView:
         self.problem = str(getattr(snapshot, "problem", "") or "")
         self.phases = dict(getattr(snapshot, "phases", None) or {})
         self.pressed = dict(getattr(snapshot, "pressed", None) or {})
+        self.page.saw(self.frame_url, (
+            c.detail for c in (getattr(snapshot, "controls", None) or [])
+            if getattr(c, "navigates", False)
+        ))
         self._record_refs(snapshot)
 
     def _record_refs(self, snapshot: Any) -> None:
@@ -3515,6 +3582,7 @@ def browse(
         unchanged=seen.unchanged,
         phases=seen.phases,
         signin=signin_seen,
+        page=seen.page,
     )
 
 
@@ -3688,6 +3756,7 @@ def browse_act(
         phases=seen.phases,
         pressed=seen.pressed,
         signin=signin_seen,
+        page=seen.page,
     )
 
 
@@ -3834,6 +3903,7 @@ def browse_fill(
         unchanged=seen.unchanged,
         phases=seen.phases,
         signin=signin_seen,
+        page=seen.page,
     )
 
 
