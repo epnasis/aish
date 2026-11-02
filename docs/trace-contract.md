@@ -1028,6 +1028,39 @@ Written by `Agent._cases` through `_emit_record` for every CHANGE or CREATE the 
 
 Written by `Agent._inbox_preferences` through `_emit_record` for every add, edit or remove the model proposed, whatever became of it, and **renderless** (`RENDERLESS_STEPS`). `outcome` has `case_act`'s vocabulary: `blocked` (not a task a person sent — `why` says so; no card), `denied`, `held`, `applied`, `not_applied` (approved, then refused at save time: the store changed since the card, or its lock was held). `pref_kind` is the typed kind; `id` the saved or removed preference (empty unless applied). A `list` writes none. The act with its typed fields and the session + turn it came from is ALSO appended by the store's one writer to `<state>/mail/preference-acts.jsonl` (`mailprefs.read_acts`). **What it does NOT establish:** what `task_from_owner` does not (§3.23).
 
+### 3.25 · `item_act` — an owner resolve / restore proposed through `inbox_items` (#142 W5)
+
+```json
+{"kind": "item_act", "turn": 3, "verb": "resolve", "anchor": "3e2e…", "outcome": "applied", "items": ["yours|3e2e…|tenant@flat.example"]}
+```
+
+Written by `Agent._inbox_items` through `_emit_record` for every resolve or restore the model proposed, whatever became of it, and **renderless** (`RENDERLESS_STEPS`). `outcome` has `case_act`'s vocabulary: `blocked` (not a task a person sent — `why` says so; no card), `denied`, `held`, `applied`, `not_applied` (approved, then refused at save time: the item changed since the card, or the item acts' lock was held). `anchor` is the item's anchor digest (absent on `blocked`, which plans nothing); `items` the item keys (`kind|anchor|counterparty`) the act covered, only when applied. A `list` writes none. The act — verb, anchor, item keys, the card's sentence, `by: owner`, the session and turn — is ALSO appended by the one writer to `<state>/mail/item-acts.jsonl` (`mailitems.read_acts`), which is what `mailitems.Context.state_of` reads. **What it does NOT establish:** what `task_from_owner` does not (§3.23); and that the matter is done in the world — only that he said so.
+
+### 3.26 · `item_settlement` — one settlement judgement on one (item, candidate) pair (#142 W5)
+
+**Where it is written:** ONLY in the judgement store, `<state>/mail/settlements/<aa>/<anchor digest>.json` under `judged`, keyed `item key|candidate digest|charter digest`, by the watcher's settlement step (`mailsettle.settle_pass`, under the pass lock). No session log carries one. The record has no `kind` field: the store is its only home.
+
+```json
+{"item": "needs|bfe9…|club@swim.example", "kind": "needs", "candidate": "1fc5…",
+ "charter": "item-settler", "charter_version": "1", "charter_digest": "5d2a…",
+ "model": "gemini:<flash>", "at": 1793549000.0, "ending": "ok", "why": "",
+ "answer": "settled_by", "reason": "…", "citations": ["m1", "k1"],
+ "tier": "same counterparty", "ties": ["counterparty"],
+ "input_digest": "c7d2…", "attempts": 1, "usage": {"input": 900, "output": 60}}
+```
+
+| field | why |
+|---|---|
+| `item`, `kind`, `candidate` | The pair: the item key and the later mail code tied to it. |
+| `charter_*`, `model` | Which judge, examined against which text: a charter edit is a new judgement (idempotence is per item, candidate and charter digest). |
+| `ending` | `ok` or `invalid` — only final endings are written; `unavailable` and `unadmitted` write nothing and are retried. |
+| `answer`, `citations` | The validated answer (`mailsettle.Settlement`): `settled_by` (always `k1`, the candidate), `still_open` or `cannot_tell`. |
+| `reason` | The judge's capped, de-linked sentence — for the driver's audit. **NEVER rendered**: the report's evidence line is composed by code from `tier`, the candidate's sender, first-read time and STORED amounts. |
+| `tier`, `ties` | What code saw when it chose to ask: the tier rule's answer and the tie signals. Re-verified by code on every read (`mailitems.Context._judged`) — a candidate that later carries a caution, fails the tier rule, or is followed by newer mail settles nothing. |
+| `input_digest` | The bundle's bytes are in the evidence store. |
+
+**What it does NOT establish:** that the matter is settled. A `settled_by` demotes the item into the report's named "Probably settled" line; only his word removes it.
+
 ### 3.20 · `mail_verdict` — the inbox assistant's verdict on one mail (#142 W5)
 
 **BUILT 2026-10-24 (slice S1, shadow).** Rationale and fences: `docs/mail-assistant.md`. One record per (mail, Reader model), written by `mailverdicts.build_record` for every inbound mail a shadow pass or a backtest arm assessed — gated, unadmitted and failed readings included (§0 corollary 2: a mail that was not read says so).
@@ -1077,6 +1110,7 @@ Written by `Agent._inbox_preferences` through `_emit_record` for every add, edit
 | `owner_wrote_days` | S1.6, additive, `v` kept. Days from his latest message in this conversation at or before the mail to the mail, or `null` for never — code's past-facing fact, counted over the whole conversation (`mailreader.owner_wrote_days`). Absent on records written before it and on `error` records: absent is "not recorded", never "never". |
 | `clamped` | S1.6, additive, `v` kept. Code's live-conversation override, `{from, to, owner_wrote_days, limit}`, or `null`: a filing disposition (`archive`, `expire_after_grace`) on a conversation he wrote in within `limit` days is `surface`. Written BESIDE `verdict`, which is never rewritten; `mailverdicts.effective_disposition` is the one reader of what the pipeline would do. |
 | `keeper_clamped` | 2026-10-27, additive, `v` kept. Code's keeper-document override, `{from, to, signals, cases}`, or `null`: a filing disposition on a mail carrying a case key or a document attachment from an authenticated, non-gated sender, or placed on a case by the Reader (`signals`: `case_key`, `document_attachment`, `reader_case`), is `surface` until every case in `cases` closes (`mailreader.keeper_clamp`, `keeper_released`). Never on a newsletter-gated mail. Written BESIDE `verdict`, never rewriting it; absent on records written before it, which read as no clamp. |
+| `late_read` | 2026-11-02, additive, `v` kept. Present only on a reading the watcher made LATE because an open your-turn follow-up rested on this answer and it had no reading (`mailwatch.settle`, `mailitems.gaps`); its value is code's sentence saying so. The report names a row such a reading closed (`mailitems.Derived.closed_by_late_reading`). |
 | `case_choice` | The chosen ref resolved to a case id, or the word (`new`, `no_case`, `cannot_tell`). |
 | `case_flags` | CODE's comparisons, not the Reader's: an account the linked case never had, a sender outside the case's admitted senders. |
 | `coordinates` | Accounts the Reader extracted (each verified present in its cited message) and those code's checksum regex found, separately. |

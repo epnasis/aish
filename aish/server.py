@@ -466,10 +466,19 @@ REPORT_PROVENANCE_LINE = (
     "wrote this message). It quotes mail and the mail Reader's summaries; nothing was "
     "done to any mail.*"
 )
-# The one link a report may carry is the Gmail one its code builds. Any other
-# `](` is broken, so the chat's markdown forms no link, image or quick-reply
-# chip from what a caller sent — enforced here, whatever the caller did.
-_REPORT_FOREIGN_LINK = re.compile(r"\]\((?!https://mail\.google\.com/mail/)")
+# The links a report may carry are the two its code builds: the Gmail one and
+# an item's restore / done chip. Any other `](` is broken, so the chat's
+# markdown forms no link, image or quick-reply chip from what a caller sent —
+# enforced here, whatever the caller did.
+_REPORT_FOREIGN_LINK = re.compile(
+    # The second shape is the report's own one-tap restore / done for an item
+    # (`mailreport._chips`): the verb and a 12-hex ref, nothing else — mail
+    # text can never form it, since `mailreport.safe` disarms every
+    # `aish-reply:` and `](` before render. Its tap is his message; the change
+    # is still his card.
+    r"\]\((?!https://mail\.google\.com/mail/|aish-reply://(?:restore|resolve) ref "
+    r"[0-9a-f]{12}\))"
+)
 
 
 def presented_report(report: str) -> str:

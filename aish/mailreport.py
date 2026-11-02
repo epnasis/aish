@@ -88,6 +88,10 @@ BOT_ADDRESSES = frozenset({"aish@wenda.eu", "bot@wenda.eu"})
 NEEDS_SHOWN = 30
 FOLLOWUPS_SHOWN = 30
 INTEREST_SHOWN = 20
+SETTLED_SHOWN = 20
+#: "Probably settled" is cut by its own cap, never by the sections' — a
+#: demoted item must not vanish because the report was long (design change 11).
+SETTLED_MAX_CHARS = 5_000
 #: Under `server.REPORT_NOTE_MAX_CHARS` (pinned by test): the note stays in
 #: every later turn's context, so it is kept small.
 REPORT_MAX_CHARS = 18_000
@@ -324,6 +328,13 @@ class Item:
     header: mailindex.Header | None
     pinned: str = ""  # the show_first preference that put it first
     despite: list[tuple[str, list[str]]] = field(default_factory=list)  # (pref id, why shown)
+    # The item it is (`mailitems.OpenItem`) and its state (`mailitems.State`).
+    open_item: Any = None
+    state: Any = None
+    important: str = ""  # the `important` preference that put it under Needs
+    twins: list[str] = field(default_factory=list)  # near-duplicate digests shown with it
+    twins_differ: bool = False  # their texts are not byte-identical
+    unweighed: list[Any] = field(default_factory=list)  # tied later mail the tier rule refused
 
 
 @dataclass
@@ -342,6 +353,9 @@ class FollowUp:
     newest: float = 0.0  # the newest message of HIS or THEIRS it rests on
     pinned: str = ""
     despite: list[tuple[str, list[str]]] = field(default_factory=list)
+    open_item: Any = None  # `mailitems.OpenItem`
+    state: Any = None  # `mailitems.State`
+    unweighed: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -378,15 +392,32 @@ class Report:
     reminders: list[Due] = field(default_factory=list)
     prefs_unreadable: int = 0
     corrections: int = 0
+    # Settlement (`mailitems`): items a judgement or his own mail settled,
+    # demoted into "Probably settled"; what his word took out; what is not
+    # yet judged or could not be weighed; his own copies; rows a late
+    # reading closed; and what he did since the last report.
+    settled: list[Item | FollowUp] = field(default_factory=list)
+    resolved: int = 0
+    unjudged: int = 0
+    not_weighed: int = 0
+    body_not_recorded: int = 0
+    judgements_unreadable: int = 0
+    own_copies: list[tuple[str, str, str]] = field(default_factory=list)  # copy, original, subj
+    late_closed: list[str] = field(default_factory=list)
+    since_acts: dict[str, int] = field(default_factory=dict)
+    since_acts_from: float = 0.0
 
     def counts(self) -> dict[str, int]:
         return {"needs_action": len(self.needs), "your_turn": len(self.yours),
-                "their_turn": len(self.theirs), "may_interest": len(self.interest)}
+                "their_turn": len(self.theirs), "may_interest": len(self.interest),
+                "probably_settled": len(self.settled)}
 
     def shown_digests(self) -> list[str]:
         """The new mail this report SHOWS — never again in a later report.
-        Items over a section's cap are not shown, so they stay eligible."""
-        shown = [*self.needs[:NEEDS_SHOWN], *self.interest[:INTEREST_SHOWN]]
+        Items over a section's cap are not shown, so they stay eligible. A
+        needs item shown under "Probably settled" was shown."""
+        settled = [i for i in self.settled[:SETTLED_SHOWN] if isinstance(i, Item)]
+        shown = [*self.needs[:NEEDS_SHOWN], *self.interest[:INTEREST_SHOWN], *settled]
         digests = {i.reading.digest for i in shown}
         for digest in list(digests):
             digests.update(self.siblings.get(digest, ()))  # its other inbox's copy
@@ -431,83 +462,6 @@ def _effective_at(header: mailindex.Header, readings: dict[str, Reading]) -> flo
     if header.at_source == "provider" or reading is None or not reading.first_seen:
         return header.at
     return min(header.at, reading.first_seen) if header.at else reading.first_seen
-
-
-def follow_ups(
-    index: mailindex.MailIndex,
-    readings: dict[str, Reading],
-    now: float,
-    *,
-    skip: frozenset[str] = frozenset(),
-) -> tuple[list[FollowUp], list[FollowUp]]:
-    """(your turn, their turn), from the thread index plus the stored readings
-    of the answers. Per counterparty: for each address he wrote to in a
-    conversation, his LAST message to it and what THAT address sent after.
-
-    Per counterparty, not per conversation, because a conversation is a union
-    any mail can join by naming a Message-ID (`docs/mail-assistant.md`
-    §Residuals): a stranger who joins one is not someone he wrote to, so it
-    can neither make it his turn nor hide a real answer behind his last word
-    to somebody else. The subject shown is HIS message's.
-
-    No model judgement is made here; the one judged input is the Reader's
-    `wanted` on an answer, and a missing or undecided one counts as an ask.
-    Newsletter-gated and one-time-code answers are not answers. Only
-    conversations whose newest message is inside `FOLLOWUP_WINDOW_DAYS`; both
-    inboxes, in the one index. `skip`: mail already under Needs your action."""
-    mine = owner_addresses(index)
-    # Addresses that mail him from a mailing list are not people waiting on him.
-    listy = {h.from_addr for h in index.by_digest.values()
-             if h.direction == "in" and (h.list_id or h.list_unsubscribe)}
-    window = now - FOLLOWUP_WINDOW_DAYS * 86400
-    # The newest mail from each address anywhere in the index: an answer in a
-    # NEW thread (no reply headers) is still an answer, so it is never "their
-    # turn" — it is just not a follow-up this code can place.
-    last_from: dict[str, float] = {}
-    for h in index.by_digest.values():
-        if h.direction == "in" and h.from_addr:
-            when = _effective_at(h, readings)
-            last_from[h.from_addr] = max(last_from.get(h.from_addr, 0.0), when)
-    yours: list[FollowUp] = []
-    theirs: list[FollowUp] = []
-    for conversation in index.conversations():
-        if conversation[-1].at < window:
-            continue
-        outs = [h for h in conversation if h.direction == "out"]
-        members = frozenset(h.digest for h in conversation)
-        parties = sorted({c for h in outs for c in h.correspondents} - mine - listy - {""})
-        for party in parties:
-            his = [h for h in outs if party in h.correspondents][-1]
-            answers = [h for h in conversation
-                       if h.direction == "in" and h.from_addr == party
-                       and _effective_at(h, readings) > his.at]
-            if not answers:
-                if (now - his.at >= THEIR_TURN_DAYS * 86400 and his.at >= window
-                        and last_from.get(party, 0.0) <= his.at):
-                    theirs.append(FollowUp("theirs", party, his.at, his,
-                                       conversation=members, newest=his.at))
-                continue
-            asking: list[tuple[mailindex.Header, Reading | None]] = []
-            for header in answers:
-                reading = readings.get(header.digest)
-                kind = classify(reading, header)
-                if kind in (GATED_OUT, OTP_OUT):
-                    continue
-                if kind == NO_READING or (
-                    reading is not None
-                    and str(reading.verdict.get("wanted")) in YOUR_TURN_WANTED
-                ):
-                    asking.append((header, reading))
-            if not asking or any(h.digest in skip for h, _ in asking):
-                continue
-            latest, reading = asking[-1]
-            yours.append(FollowUp("yours", party, _effective_at(asking[0][0], readings), his,
-                                  reading, latest, len(asking), conversation=members,
-                                  newest=_effective_at(latest, readings),
-                                  asked=tuple(readings.get(h.digest) for h in answers)))
-    yours.sort(key=lambda f: f.since)
-    theirs.sort(key=lambda f: f.since)
-    return yours, theirs
 
 
 def _one_copy(items: list[Item]) -> tuple[list[Item], dict[str, list[str]]]:
@@ -729,15 +683,12 @@ class _Preferences:
         return not answered and now - last >= days * 86400
 
 
-def build(
-    state_dir: os.PathLike | str,
-    *,
-    now: float,
-    since: float | None = None,
-    clean: Clean,
-) -> Report:
-    """The whole report from the stores. Reads only — the verdict store, the
-    index, the watcher's health file and this report's own ledger."""
+def news_window(
+    state_dir: os.PathLike | str, now: float, since: float | None = None
+) -> tuple[float, str, float, frozenset[str] | None]:
+    """(since, since_from, floor, shown): what counts as news for the next
+    report — the one definition the report and the watcher's settlement pass
+    share, so the pass judges exactly the mail the report could show."""
     ledger = read_ledger(state_dir)
     strict = since is not None
     if since is None:
@@ -751,6 +702,19 @@ def build(
         d for line in ledger if line.get("status") in SHOWN_STATUSES
         for d in line.get("digests") or () if isinstance(d, str))
     floor = since - LATE_GRACE_DAYS * 86400 if since_from == "the last report" else since
+    return since, since_from, floor, shown
+
+
+def build(
+    state_dir: os.PathLike | str,
+    *,
+    now: float,
+    since: float | None = None,
+    clean: Clean,
+) -> Report:
+    """The whole report from the stores. Reads only — the verdict store, the
+    index, the watcher's health file and this report's own ledger."""
+    since, since_from, floor, shown = news_window(state_dir, now, since)
     report = Report(now=now, since=since, since_from=since_from)
     report.watcher_warnings = [
         text for severity, text in mailview.health_lines(mailview.read_health(state_dir),
@@ -765,15 +729,37 @@ def build(
         1 for h in index.by_digest.values()
         if h.direction == "out" and h.at >= now - FOLLOWUP_WINDOW_DAYS * 86400
     )
+    from . import mailitems, mailsettle  # both read this module's helpers
+
+    store = mailcases.CaseStore(state_dir)
     # His case closures release keeper-clamped mail (`mailcases.Closure`).
-    closure = mailcases.CaseStore(state_dir).closure()
+    closure = store.closure()
+    ctx = mailitems.Context(state_dir, now=now, index=index, readings=readings, store=store)
+    report.judgements_unreadable = ctx.judgements_unreadable
+    # The ONE derivation the watcher's settlement pass uses too.
+    derived = ctx.derive(needs_since=min(floor, now - FOLLOWUP_WINDOW_DAYS * 86400))
+    report.late_closed = derived.closed_by_late_reading
+    needs_by = {i.reading.digest: i for i in derived.needs}
+    # A needs item he RESTORED stays in front of him after it was shown once:
+    # his word that it is still open outranks "news".
+    restored = {a for a, act in ctx.acts.items() if act.get("verb") == mailitems.RESTORE}
     needs: list[Item] = []
     interest: list[Item] = []
     for reading in readings.values():
-        if not _eligible(reading, floor, shown):
+        news = _eligible(reading, floor, shown)
+        if reading.digest in needs_by and (news or reading.digest in restored):
+            needs.append(needs_by[reading.digest])
+            continue
+        if not news:
             continue
         header = index.get(reading.digest)
         if header is not None and header.direction != "in":
+            continue
+        if reading.digest in ctx.copies:
+            # His own sent mail as delivered to his other inbox: mints nothing,
+            # named in the footer (`mailitems.own_copies`).
+            report.own_copies.append((reading.digest, ctx.copies[reading.digest],
+                                      header.subject if header is not None else ""))
             continue
         kind = classify(reading, header)
         if kind != OK:
@@ -783,11 +769,9 @@ def build(
                     _bump(report.no_reading_endings, ending)
             continue
         wanted = str(reading.verdict.get("wanted") or "")
-        if wanted in WANTS_ACTION:
-            needs.append(Item(reading, header))
-        elif (wanted == "nothing"
-              and mailverdicts.effective_disposition(reading.record or {}, closure=closure)
-              == "surface"):
+        if (wanted == "nothing"
+                and mailverdicts.effective_disposition(reading.record or {}, closure=closure)
+                == "surface"):
             interest.append(Item(reading, header))
         else:
             # In no section, and COUNTED: the Reader could not tell what it
@@ -797,22 +781,120 @@ def build(
                   .get(wanted, QUIET))
     needs, needs_siblings = _one_copy(needs)
     interest, interest_siblings = _one_copy(interest)
-    report.siblings = {**needs_siblings, **interest_siblings}
-    report.duplicates = sum(len(v) for v in report.siblings.values())
+    report.duplicates = sum(len(v) for v in (*needs_siblings.values(),
+                                             *interest_siblings.values()))
+    needs, needs_twins = mailitems.near_duplicates(needs, ctx.first_read)
+    interest, interest_twins = mailitems.near_duplicates(interest, ctx.first_read)
+    siblings: dict[str, list[str]] = {}
+    for table in (needs_siblings, interest_siblings, needs_twins, interest_twins):
+        for kept, dropped in table.items():
+            held = siblings.setdefault(kept, [])
+            held.extend(d for d in dropped if d not in held)
+    report.siblings = siblings
+    for item in (*needs, *interest):
+        item.twins = [*needs_twins.get(item.reading.digest, ()),
+                      *interest_twins.get(item.reading.digest, ())]
+        item.twins_differ = _texts_differ(index, item.reading.digest, item.twins)
     prefs = _Preferences(state_dir, report, readings, index)
+    digest = mailsettle.charter_digest()
 
     def sender(item: Item) -> str:
         return item.header.from_addr if item.header is not None else item.reading.digest[:12]
 
-    report.needs = prefs.items(sorted(needs, key=_needs_key), sender)
+    open_needs, settled_needs = _settle(ctx, report, digest, sorted(needs, key=_needs_key))
+    report.needs = prefs.items(open_needs, sender)
     report.interest = prefs.items(sorted(interest, key=lambda i: -i.reading.when), sender)
-    yours, theirs = follow_ups(
-        index, readings, now,
-        skip=frozenset(i.reading.digest for i in report.needs[:NEEDS_SHOWN]),
-    )
-    report.yours, report.theirs = prefs.follow_ups(yours), prefs.follow_ups(theirs)
+    shown_needs = frozenset(i.reading.digest for i in report.needs[:NEEDS_SHOWN])
+    # A conversation whose answer already sits under Needs is not repeated.
+    yours = [f for f in derived.yours
+             if not (f.open_item is not None and set(f.open_item.rests_on) & shown_needs)]
+    open_yours, settled_yours = _settle(ctx, report, digest, yours)
+    open_theirs, settled_theirs = _settle(ctx, report, digest, derived.theirs)
+    report.yours, report.theirs = prefs.follow_ups(open_yours), prefs.follow_ups(open_theirs)
+    # A demoted item obeys his hides like any other.
+    report.settled = [*prefs.items(settled_needs, sender),
+                      *prefs.follow_ups(settled_yours), *prefs.follow_ups(settled_theirs)]
+    _candidates(ctx, report, digest, [*report.needs, *report.yours, *report.theirs])
     report.reminders = prefs.reminders(state_dir, index, now, clean)
+    report.since_acts_from = (since if since_from != "first report"
+                              else now - FIRST_RUN_DAYS * 86400)
+    report.since_acts = acts_since(state_dir, report.since_acts_from)
     return report
+
+
+def _texts_differ(index: mailindex.MailIndex, digest: str, twins: list[str]) -> bool:
+    """Do near-duplicates carry different texts? Said on the line, so a second
+    distinct ask under one subject is never mistaken for a copy."""
+    if not twins:
+        return False
+    bodies = {(h.body_digest if (h := index.get(d)) is not None else "")
+              for d in (digest, *twins)}
+    return len(bodies) > 1 or "" in bodies
+
+
+def _settle(ctx: Any, report: Report, digest: str,
+            rows: list[Any]) -> tuple[list[Any], list[Any]]:
+    """(still open, probably settled) — each row's state from `mailitems`.
+    His word takes a row out (counted); a judgement or his own mail demotes it
+    into "Probably settled"."""
+    keep: list[Any] = []
+    settled: list[Any] = []
+    for row in rows:
+        item = row.open_item
+        if item is None:
+            keep.append(row)
+            continue
+        state = ctx.state_of(item)
+        row.state = state
+        if state.by_owner:
+            report.resolved += 1
+            continue
+        if state.probably:
+            settled.append(row)
+            continue
+        keep.append(row)
+    return keep, settled
+
+
+def _candidates(ctx: Any, report: Report, digest: str, rows: list[Any]) -> None:
+    """For each open row the report SHOWS — after his preferences, so exactly
+    the rows the watcher's settlement step weighs (`mailsettle.showable`) —
+    count the tied later mail not yet judged, and keep what the tier rule
+    refused, for its line."""
+    from . import mailitems, mailsettle
+
+    for row in rows:
+        item = row.open_item
+        if item is None or row.state is None:
+            continue
+        for candidate in ctx.candidates(item, restored_at=row.state.restored_at):
+            if not candidate.tier:
+                report.not_weighed += 1
+                row.unweighed.append(candidate)
+            elif candidate.body_missing:
+                report.body_not_recorded += 1
+            else:
+                judged = ctx.judged.get(mailitems.pair_key(item.key, candidate.header.digest,
+                                                           digest))
+                if judged is None or judged.get("ending") not in mailsettle.FINAL_ENDINGS:
+                    report.unjudged += 1
+
+
+def acts_since(state_dir: os.PathLike | str, since: float) -> dict[str, int]:
+    """What HE did since `since`, each count a filter over its own acts ledger:
+    items he resolved (`item-acts.jsonl`), cases he closed (`case-acts.jsonl`),
+    preferences he saved or changed (`preference-acts.jsonl`, the seed excluded)."""
+    from . import mailitems, mailprefs
+
+    resolved = sum(1 for a in mailitems.read_acts(state_dir)
+                   if a.get("verb") == mailitems.RESOLVE and _f(a.get("at")) > since)
+    closed = sum(1 for a in mailcases.read_acts(state_dir)
+                 if a.get("verb") == mailcases.CLOSE and a.get("by") == "owner"
+                 and _f(a.get("at")) > since)
+    saved = sum(1 for a in mailprefs.read_acts(state_dir)
+                if a.get("action") in ("add", "edit") and _f(a.get("at")) > since
+                and not (a.get("source") or {}).get("seed"))
+    return {"resolved": resolved, "closed": closed, "saved": saved}
 
 
 # ---------------------------------------------------------------- the text
@@ -884,26 +966,63 @@ def _where(header: mailindex.Header | None, at: float, clean: Clean, account: st
     return f"{box}, {_when(at)}" + (f" — [open in Gmail]({link})" if link else "")
 
 
-def _needs_line(item: Item, clean: Clean, account: str) -> str:
+def _wanted_words(item: Item, clean: Clean) -> str:
+    """What the item asks, as the Reader's closed word — or, for mail his
+    `important` preference placed here, that preference and nothing more: aish
+    never writes a want the Reader did not record."""
     verdict = item.reading.verdict
-    wanted = safe(clean, verdict.get("wanted"), WORD_CHARS).upper()
+    wanted = str(verdict.get("wanted") or "")
+    if item.important and wanted not in WANTS_ACTION:
+        return f"HERE BECAUSE OF YOUR PREFERENCE {safe(clean, item.important, 40)}"
+    word = safe(clean, wanted, WORD_CHARS).upper()
     deadline = safe(clean, verdict.get("deadline") or "", WORD_CHARS)
-    due = ""
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", deadline):
-        due = f" by {deadline}"
-    elif deadline == mailreader.CANNOT_TELL:
-        due = " (deadline: cannot tell)"
-    return (f"- {_pinned(item.pinned)}{_cautions(item.reading.record)}{wanted}{due} — "
-            f"{_who(item.header, clean)} — {_subject(item.header, clean)} — "
+        return f"{word} by {deadline}"
+    if deadline == mailreader.CANNOT_TELL:
+        return f"{word} (deadline: cannot tell)"
+    return word
+
+
+def _twins(item: Item) -> str:
+    """A near-duplicate shown once, every copy's ref on the line so each stays
+    nameable — and whether their texts differ, so a second distinct ask under
+    one subject is not taken for a copy."""
+    if not item.twins:
+        return ""
+    refs = ", ".join(d[:REF_CHARS] for d in item.twins)
+    differ = "; their texts differ" if item.twins_differ else ""
+    return f" (×{len(item.twins) + 1} — also ref {refs}{differ})"
+
+
+def _unweighed(rows: list[Any], clean: Clean) -> str:
+    """Later mail code tied to the item that the tier rule does not let settle
+    it — named so the connection is visible and why aish did not use it. Code's
+    words and an address only: never the later mail's subject or text."""
+    if not rows:
+        return ""
+    first = rows[0]
+    header = first.header
+    who = ("your own mail" if header.direction == "out"
+           else safe(clean, header.from_addr or "(no address)", ADDRESS_CHARS))
+    more = f" (+{len(rows) - 1} more)" if len(rows) > 1 else ""
+    return (f" — later mail aish did not weigh: from {who} ({_when(header.at)}): "
+            f"{safe(clean, first.refused, 200)}{_ref(header.digest)}{more}")
+
+
+def _needs_line(item: Item, clean: Clean, account: str) -> str:
+    return (f"- {_pinned(item.pinned)}{_cautions(item.reading.record)}"
+            f"{_wanted_words(item, clean)} — "
+            f"{_who(item.header, clean)} — {_subject(item.header, clean)}{_twins(item)} — "
             f"{_summary(item.reading, clean)} — "
             f"{_where(item.header, item.reading.when, clean, account)}"
-            f"{_ref(item.reading.digest)}{_despite(item.despite)}")
+            f"{_ref(item.reading.digest)}{_despite(item.despite)}"
+            f"{_unweighed(item.unweighed, clean)}")
 
 
 def _interest_line(item: Item, clean: Clean, account: str) -> str:
     return (f"- {_pinned(item.pinned)}{_cautions(item.reading.record)}"
             f"{_who(item.header, clean)} — "
-            f"{_subject(item.header, clean)} — {_summary(item.reading, clean)} — "
+            f"{_subject(item.header, clean)}{_twins(item)} — {_summary(item.reading, clean)} — "
             f"{_where(item.header, item.reading.when, clean, account)}"
             f"{_ref(item.reading.digest)}{_despite(item.despite)}")
 
@@ -936,13 +1055,152 @@ def _yours_line(f: FollowUp, now: float, clean: Clean, account: str) -> str:
             f"on you — {safe(clean, f.counterparty, ADDRESS_CHARS)} sent {more} after your "
             f"{_subject(f.his, clean)} (the Reader: {wanted}) — "
             f"{_where(f.latest, f.latest.at if f.latest else f.since, clean, account)}"
-            f"{_ref(f.latest.digest if f.latest else '')}{_despite(f.despite)}")
+            f"{_ref(_anchor(f))}{_despite(f.despite)}{_unweighed(f.unweighed, clean)}")
+
+
+def _anchor(row: Item | FollowUp) -> str:
+    """The digest an item is named by: the one `resolve` / `restore` take."""
+    item = row.open_item
+    if item is not None:
+        return str(item.anchor)
+    if isinstance(row, Item):
+        return row.reading.digest
+    return row.latest.digest if row.latest is not None else row.his.digest
 
 
 def _theirs_line(f: FollowUp, now: float, clean: Clean, account: str) -> str:
     return (f"- {_pinned(f.pinned)}{_days(now - f.since)} day(s) with no reply — you wrote to "
             f"{safe(clean, f.counterparty, ADDRESS_CHARS)}: {_subject(f.his, clean)} — "
-            f"{_where(f.his, f.his.at, clean, account)}{_ref(f.his.digest)}")
+            f"{_where(f.his, f.his.at, clean, account)}{_ref(f.his.digest)}"
+            f"{_unweighed(f.unweighed, clean)}")
+
+
+def _amounts(amounts: Any) -> str:
+    out = []
+    for currency, cents in amounts or ():
+        whole, part = divmod(int(cents), 100)
+        out.append(f"{whole:,}".replace(",", " ") + f",{part:02d} {currency}")
+    return ", ".join(out)
+
+
+def _chips(anchor: str) -> str:
+    """The one-tap restore and done — code-built from the anchor's hex alone,
+    the second link shape a report may carry (`server.presented_report`). A tap
+    sends the words as his message; the change itself is still his card."""
+    ref = anchor[:REF_CHARS]
+    if not re.fullmatch(r"[0-9a-f]{12}", ref):
+        return ""
+    return (f" — [restore](aish-reply://restore ref {ref}) · "
+            f"[done](aish-reply://resolve ref {ref})")
+
+
+def _evidence(row: Item | FollowUp, clean: Clean) -> str:
+    """What settled it, from code-verified fields only — who, when, the stored
+    amount, the evidence mail's ref. Never the judge's prose."""
+    from . import mailitems
+
+    state = row.state
+    ev = state.evidence
+    when = _when(ev.when) if ev.when and ev.when != float("inf") else "an unknown time"
+    if state.source == mailitems.RULE:
+        to = ", ".join(safe(clean, a, ADDRESS_CHARS) for a in ev.to[:3]) or "them"
+        return f"you wrote to {to} on {when}{_ref(ev.digest)}"
+    who = ("your own mail" if ev.tier == "his act"
+           else f"mail from {safe(clean, ev.sender or '(no address)', ADDRESS_CHARS)}")
+    tier = {"same counterparty": "the same party", "third party": "a third party with history",
+            "his act": "your own act"}.get(ev.tier, safe(clean, ev.tier, 40))
+    money = _amounts(ev.amounts)
+    return (f"{who} dated {when} ({tier}{'; ' + money if money else ''}), as aish's settlement "
+            f"judge read it{_ref(ev.digest)}")
+
+
+def _settled_line(row: Item | FollowUp, now: float, clean: Clean) -> str:
+    if isinstance(row, Item):
+        what = (f"{_wanted_words(row, clean)} — {_who(row.header, clean)} — "
+                f"{_subject(row.header, clean)} ({_when(row.reading.when)})")
+    elif row.turn == "yours":
+        what = (f"{safe(clean, row.counterparty, ADDRESS_CHARS)} waiting on you since "
+                f"{_when(row.since)}, after your {_subject(row.his, clean)}")
+    else:
+        what = (f"you wrote to {safe(clean, row.counterparty, ADDRESS_CHARS)}: "
+                f"{_subject(row.his, clean)} ({_when(row.his.at)})")
+    anchor = _anchor(row)
+    return (f"- {what}{_ref(anchor)} — probably settled: {_evidence(row, clean)}"
+            f"{_chips(anchor)}")
+
+
+SETTLED_NOTE = (
+    "aish connected these to later mail and moved them out of the sections above; nothing "
+    "was done to any mail. Tap restore if one is still open, done if it is — only your word "
+    "takes an item off this list."
+)
+
+
+def _settled_section(report: Report, clean: Clean) -> str:
+    """Rendered inside the report's size cap but never cut by it: the sections
+    are cut first, then this has its own cap (design change 11)."""
+    if not report.settled:
+        return ""
+    lines = ["", f"## Probably settled ({len(report.settled)})", SETTLED_NOTE]
+    lines += [_settled_line(r, report.now, clean) for r in report.settled[:SETTLED_SHOWN]]
+    if len(report.settled) > SETTLED_SHOWN:
+        lines.append(f"(+{len(report.settled) - SETTLED_SHOWN} more, not shown)")
+    text = "\n".join(lines)
+    if len(text) > SETTLED_MAX_CHARS:
+        text = text[: SETTLED_MAX_CHARS - 60] + "\n(this section was cut here, at its size cap)"
+    return text
+
+
+def _since_line(report: Report) -> str:
+    """Continuity: what he did since the last report, each count a filter over
+    its acts ledger (`acts_since`)."""
+    acts = report.since_acts
+    start = ("the last report" if report.since_from == "the last report"
+             else _when(report.since_acts_from))
+    return (f"Since {start}: you resolved {acts.get('resolved', 0)} item(s), closed "
+            f"{acts.get('closed', 0)} case(s), saved {acts.get('saved', 0)} preference(s).")
+
+
+def _settlement_lines(report: Report, clean: Clean) -> list[str]:
+    """The footer's account of settlement: what his word took out, what is
+    not yet judged or cannot be, his own copies, and rows a late reading
+    closed. Never silent."""
+    out = []
+    if report.resolved:
+        out.append(f"{report.resolved} item(s) you resolved, or whose case you closed, are not "
+                   "listed (new mail in their conversation brings them back).")
+    parts = []
+    if report.unjudged:
+        parts.append(f"{report.unjudged} settlement candidate(s) not yet judged — those items "
+                     "stay open")
+    if report.not_weighed:
+        parts.append(f"{report.not_weighed} later mail(s) the tier rule does not let settle "
+                     "anything (named on the item)")
+    if report.body_not_recorded:
+        parts.append(f"{report.body_not_recorded} that cannot be judged because a body is not "
+                     "recorded")
+    if report.judgements_unreadable:
+        parts.append(f"{report.judgements_unreadable} judgement file(s) could not be read")
+    if parts:
+        out.append("Settlement: " + "; ".join(parts) + ".")
+    if report.own_copies:
+        named = ", ".join(f"{_q_subject(subject, clean)} (ref {copy[:REF_CHARS]}, your sent "
+                          f"mail ref {original[:REF_CHARS]})"
+                          for copy, original, subject in report.own_copies[:HIDDEN_NAMED])
+        more = (f" +{len(report.own_copies) - HIDDEN_NAMED}"
+                if len(report.own_copies) > HIDDEN_NAMED else "")
+        out.append(f"{len(report.own_copies)} copy(ies) of your own sent mail, as delivered to "
+                   f"your other inbox, not listed: {named}{more}.")
+    if report.late_closed:
+        named = ", ".join(safe(clean, a, ADDRESS_CHARS) for a in report.late_closed[:5])
+        more = f" +{len(report.late_closed) - 5}" if len(report.late_closed) > 5 else ""
+        out.append(f"{len(report.late_closed)} follow-up(s) left Your turn because aish read "
+                   f"the answer late and it asks nothing: {named}{more}.")
+    return out
+
+
+def _q_subject(subject: str, clean: Clean) -> str:
+    return "“" + safe(clean, subject or "(no subject)", SUBJECT_CHARS) + "”"
 
 
 #: The collapsed line names at most this many hidden senders per preference.
@@ -992,12 +1250,16 @@ def headline(report: Report) -> str:
     head = f"Inbox report — {day_words(report.now)}: "
     if report.watcher_warnings:
         head += "THE MAIL WATCHER IS NOT HEALTHY, this report may be incomplete; "
-    if not any(c.values()):
-        return head + "nothing needs you."
+    if not any(v for k, v in c.items() if k != "probably_settled"):
+        demoted = c["probably_settled"]
+        return head + "nothing needs you" + (
+            f" ({demoted} probably settled)." if demoted else ".")
+    settled = (f", {c['probably_settled']} probably settled" if c['probably_settled']
+               else "")
     return head + (f"{c['needs_action']} need(s) your action, "
                    f"{c['your_turn'] + c['their_turn']} follow-up(s) "
                    f"({c['your_turn']} your turn, {c['their_turn']} their turn), "
-                   f"{c['may_interest']} may interest you.")
+                   f"{c['may_interest']} may interest you{settled}.")
 
 
 def _section(title: str, rows: list[str], shown: int, empty: str, note: str = "") -> list[str]:
@@ -1048,6 +1310,7 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
         lines.append(f"{report.unreadable_verdicts} verdict file(s) and "
                      f"{report.unreadable_index} index file(s) could not be read and are "
                      "not in this report.")
+    lines.append(_since_line(report))
     lines += _section(
         "Needs your action",
         [_needs_line(i, clean, account) for i in report.needs], NEEDS_SHOWN,
@@ -1077,6 +1340,7 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
            if report.duplicates else "")
         + ". `/mail` lists every reading."
     )
+    lines += _settlement_lines(report, clean)
     lines += _preference_lines(report, clean)
     window = {"the last report": f"since the last report ({_when(report.since)})",
               "first report": f"since {_when(report.since)} (first report: "
@@ -1095,10 +1359,11 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
     if len(footer) > FOOTER_MAX_CHARS:
         footer = footer[: FOOTER_MAX_CHARS - 60] + "\n(the footer was cut here, at its size cap)"
     text = "\n".join(body)
-    room = REPORT_MAX_CHARS - len(footer) - 1
+    settled = _settled_section(report, clean)
+    room = REPORT_MAX_CHARS - len(footer) - len(settled) - 2
     if len(text) > room:
         text = text[: room - 60] + "\n(the report was cut here, at its size cap)"
-    return text + "\n" + footer
+    return text + ("\n" + settled if settled else "") + "\n" + footer
 
 
 # ---------------------------------------------------------------- the ledger

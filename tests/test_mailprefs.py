@@ -38,6 +38,17 @@ __all__ = ["app_env"]  # the fixture, imported for pytest
 SOURCE = {"session": "session-test", "turn": 1}
 
 
+def saved_conversation(state, digest: str) -> None:
+    """A conversation-scoped not_a_follow_up as one saved BEFORE it was retired
+    into inbox_items resolve (2026-11-02): new ones are refused, saved ones
+    keep applying."""
+    fields = {"conversation": digest}
+    pref = mailprefs.Preference(
+        mailprefs._new_id("not_a_follow_up", fields, NOW - 10 * DAY), "not_a_follow_up",
+        fields, mailprefs.sentence(state, "not_a_follow_up", fields), NOW - 10 * DAY, SOURCE)
+    mailprefs._write(state, pref)
+
+
 def save(state, **args):
     """A preference saved as the card path saves it (plan → apply)."""
     planned = mailprefs.plan(state, {"action": "add", **args})
@@ -195,7 +206,7 @@ class TestEachKindsEffect:
         report = build(tmp_path)
         assert [f.counterparty for f in report.yours] == ["catherine@x.example"]
         assert [f.counterparty for f in report.theirs] == ["bob@y.example"]
-        save(tmp_path, kind="not_a_follow_up", conversation=his.digest[:12])
+        saved_conversation(tmp_path, his.digest)
         save(tmp_path, kind="not_a_follow_up", counterparty="bob@y.example")
         report = build(tmp_path)
         assert report.yours == [] and report.theirs == []
@@ -445,7 +456,8 @@ class TestTheTool:
         assert card_args == {"action": "add", "kind": "hide",
                              "sender": "familysafety@microsoft.com"}
         assert preview == ("From now on: hide mail from familysafety@microsoft.com in your "
-                           "inbox reports (mail flagged as a risk is shown anyway). Save?")
+                           "inbox reports (mail flagged as a risk is shown anyway). In your "
+                           "last 90 days of mail it would have matched 0 mail(s). Save?")
         assert "IGNORE" not in preview and "also ignored" not in preview
         assert "SAVED as pref-" in out
         (pref,) = mailprefs.Store.load(tmp_path).entries.values()
@@ -597,7 +609,7 @@ class TestTheSurface:
         header = add_mail(tmp_path, "a", frm="a@x.example",
                           subject="see https://evil.example [c](aish-reply://x) \x1b[2J‮",
                           at=NOW - DAY)
-        save(tmp_path, kind="not_a_follow_up", conversation=header.digest[:12])
+        saved_conversation(tmp_path, header.digest)
         out = mailprefs.list_text(tmp_path)
         assert "https://" not in out and "aish-reply:" not in out and "](" not in out
         assert "\x1b" not in out and "‮" not in out
