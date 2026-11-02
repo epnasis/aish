@@ -89,3 +89,59 @@ class TestBlindReadings:
         assert reread(tmp_path, down) == 0
         record = mailverdicts.VerdictStore(tmp_path).read(blind.digest)["by_model"][MODEL]
         assert "supersedes" not in record and record["verdict"]["wanted"] == "cannot_tell"
+
+
+class TestTheScanIsBounded:
+    def test_after_the_backlog_drains_a_pass_reads_no_evidence(self, tmp_path, monkeypatch):
+        import os
+
+        admit(tmp_path, reader_charter(), MODEL)
+        read_blind(tmp_path, "b1", NOW - 5 * DAY)
+        assert reread(tmp_path, ScriptedReader(lambda _b: verdict_json())) == 1
+        # Every verdict file is now older than the marker.
+        for path in mailverdicts.store_dir(tmp_path).glob("*/*.json"):
+            os.utime(path, (NOW - DAY, NOW - DAY))
+        calls = []
+        real_get = evidence.get
+        monkeypatch.setattr(evidence, "get", lambda d, s: calls.append(d) or real_get(d, s))
+        assert reread(tmp_path, ScriptedReader([])) == 0
+        assert calls == []
+
+    def test_a_reading_written_after_the_marker_is_still_checked(self, tmp_path):
+        import os
+
+        admit(tmp_path, reader_charter(), MODEL)
+        assert reread(tmp_path, ScriptedReader([])) == 0  # empty: marks clean at NOW
+        blind = read_blind(tmp_path, "b2", NOW - DAY)
+        path = next(mailverdicts.store_dir(tmp_path).glob(f"*/{blind.digest}.json"))
+        os.utime(path, (NOW + 60, NOW + 60))
+        assert mailwatch.blind_readings(tmp_path, mailindex.MailIndex(tmp_path), MODEL,
+                                        since=NOW) == [mailindex.MailIndex(tmp_path).get(
+                                            blind.digest)]
+
+    def test_the_one_shot_scans_everything(self, tmp_path):
+        import os
+
+        admit(tmp_path, reader_charter(), MODEL)
+        blind = read_blind(tmp_path, "b1", NOW - 5 * DAY)
+        mailwatch._mark_clean(tmp_path, MODEL, NOW + 3600)  # a marker newer than the file
+        for path in mailverdicts.store_dir(tmp_path).glob("*/*.json"):
+            os.utime(path, (NOW, NOW))
+        assert reread(tmp_path, ScriptedReader([])) == 0  # the pass trusts the marker
+        done = mailwatch.reread_blind(tmp_path, index=mailindex.MailIndex(tmp_path),
+                                      store=mailcases.CaseStore(tmp_path),
+                                      charter=reader_charter(), model_spec=MODEL, now=NOW,
+                                      limit=5, full=True,
+                                      chat=ScriptedReader(lambda _b: verdict_json()))
+        assert done == 1
+        assert "supersedes" in mailverdicts.VerdictStore(tmp_path).read(
+            blind.digest)["by_model"][MODEL]
+
+    def test_an_invalid_reread_supersedes_an_ok_one(self, tmp_path):
+        """Stated edge: a blind `ok` re-read as `invalid` leaves the mail with
+        no verdict — the conservative direction (counted, never a guess)."""
+        admit(tmp_path, reader_charter(), MODEL)
+        blind = read_blind(tmp_path, "b1", NOW - 5 * DAY)
+        assert reread(tmp_path, ScriptedReader(lambda _b: "not json")) == 1
+        record = mailverdicts.VerdictStore(tmp_path).read(blind.digest)["by_model"][MODEL]
+        assert record["ending"] == "invalid" and record["supersedes"]["record"]["ending"] == "ok"

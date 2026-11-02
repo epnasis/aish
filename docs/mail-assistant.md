@@ -1351,10 +1351,16 @@ from that sender may speak for that kind of matter.
   Every act is a line in `<state>/mail/settler-vouch-acts.jsonl`; the current set is the newest act
   per (domain, meaning); permanent until revoked; listed by `inbox_items` list. Membership is an
   exact string compare (the `vouches.py` law).
-- **Meanings are code's** (`mailvouch.MEANINGS`, decided per item by
-  `mailitems.Context.settle_meanings` from recorded facts): `delivery` — the later mail's text
-  names the item's counterparty (a display name, or its domain's label: the carrier saying whose
-  parcel it is); `payment` — one of the item's own mails carries a recorded money fact.
+- **Meanings are predicates of the ITEM, over recorded facts on its own mails**
+  (`mailvouch.MEANINGS`, `mailitems.Context.settle_meanings`): `delivery` — one of them is on a case
+  whose RECORDED keys (`mailcases`, extracted at ingest) include an order or tracking key
+  (`DELIVERY_KEY_KINDS`); `payment` — one of them carries a recorded money fact. **Never a property
+  of the later mail** (round-2 review, blocking): the first version made `delivery` "the later mail
+  names the counterparty", which is the entity tie itself, so a (domain, delivery) vouch would have
+  let that domain settle ANY kind of item whose counterparty it names — on the real index it
+  offered *let clsu.pl settle delivery items* on an insurance offer. The tie stays a reason to
+  ASK; the chip is offered only when the item satisfies the meaning.
+  `test_naming_the_counterparty_does_not_make_an_item_a_delivery`.
 - **What it grants is eligibility, nothing more**: a vouched (domain, meaning) is tier
   `vouched sender`, an alternative to the third-party history rule, which is unchanged. The
   candidate must still be authenticated, read, tied by code, free of any caution, later on both
@@ -1364,7 +1370,8 @@ from that sender may speak for that kind of matter.
   `Candidate.vouchable`, and the item's *later mail aish did not weigh* line ends with a one-tap
   chip `[let <domain> settle <meaning> items](aish-reply://vouch settler <domain> <meaning>)` —
   the report's third link shape, built from a validated domain and a closed meaning
-  (`mailvouch.chip_text`) and the only extra shape `server._REPORT_FOREIGN_LINK` keeps. A tap
+  (`mailvouch.chip_text`) and the only extra shape `server._REPORT_FOREIGN_LINK` keeps — its
+  meanings derived from `mailvouch.MEANINGS`, the one authority, never a second literal. A tap
   sends the words as his message; the grant is still his card.
 
 `TestTheGrant`, `TestTheOffer` and the vouch verbs' `TestTheVerbs` in `tests/test_mailvouch.py`.
@@ -1529,7 +1536,13 @@ the owner's 454 Gmail index bodies read as absent.
   (`mailreport._with_superseded`), so a re-read never makes an old mail look new.
 - **Bounded, oldest mail first**: `REREAD_PER_PASS` (10, a choice) in every `--once` pass, before
   the settlement step; the backlog in one run is `aish-mailwatch --reread-blind --model <spec>
-  [--max N]` (driver step 3i).
+  [--max N]` (driver step 3i), which scans the whole store.
+- **The scan is bounded too**: once a pass finds no blind reading left, it records *none found
+  since <at>* per model (`<state>/mail/reread-marker.json`), and later passes evidence-read only
+  verdict files written after it (`blind_readings(since=…)`; `TestTheScanIsBounded`). A body
+  restored to the store later for an OLDER reading is found only by the one-shot.
+- **Stated edge: an `invalid` re-read supersedes an `ok` blind one**, leaving the mail with no
+  verdict — counted under "with no reading", never a guess; the conservative direction.
 
 `TestBlindReadings` in `tests/test_mailreread.py`.
 
@@ -1814,6 +1827,11 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
   *"thanks"* shows as *their turn* after 5 days, and a thread he finished by phone keeps showing
   until the settlement judge connects later mail to it, he says *done* (`inbox_items resolve`), or
   it leaves the 60-day window. The section's footer says so.
+- **Mail he sends only to himself is never his "copy".** A Gmail mail whose To and Cc are all his
+  own addresses is a mail TO him (a note to self across inboxes), so it is excluded from the
+  own-copy law and read like any other (`test_mail_he_sends_only_to_himself_is_not_a_copy`). The
+  owner addresses are `mailreport.owner_addresses`: an alias of his that never sent mail and is
+  not in `recipients.OWNER_ADDRESSES` is not known to be his.
 - **His own mail is recognised only Tuta-side.** A Tuta copy of his Gmail SENT mail is matched
   (§Open items and settlement); a Gmail inbound copy of mail he sent from Tuta is not — no such
   pair was observed, and none is matched.

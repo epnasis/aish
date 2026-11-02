@@ -87,6 +87,12 @@ class TestHisOwnCopy:
         tuta_copy(tmp_path, sent, gid="other-subject", subject="Re: Offer (2)")
         assert mailitems.own_copies(mailindex.MailIndex(tmp_path)) == {}
 
+    def test_mail_he_sends_only_to_himself_is_not_a_copy(self, tmp_path):
+        """Mail to only his own addresses is a mail TO him, read like any other."""
+        self_note = his_sent(tmp_path, "s2", to=OWNER, at=NOW - DAY, subject="Note to self")
+        tuta_copy(tmp_path, self_note, gid="self-copy")
+        assert mailitems.own_copies(mailindex.MailIndex(tmp_path)) == {}
+
     def test_a_copy_is_never_an_item_and_never_observed_into_a_case(self, tmp_path):
         sent = his_sent(tmp_path, "s1", to="agent@broker.example", cc="me@tuta.example",
                         at=NOW - DAY, subject="Re: Order 77123")

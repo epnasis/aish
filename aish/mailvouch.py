@@ -16,8 +16,9 @@ domain and meaning, he answers a card that code composed.
 - **Exact domain.** `paczkomaty.pl` vouched does not vouch
   `paczkomaty.pl.example`, `inpost.paczkomaty.pl` or a lookalike: membership
   is an exact string compare (the `vouches.py` law).
-- **A closed meaning** (`MEANINGS`), each defined by code over recorded facts
-  in `mailitems.Context.settle_meanings`: never a word the model chose.
+- **A closed meaning** (`MEANINGS`) — what kind of ITEM, decided by code over
+  recorded facts on the item's own mails (`mailitems.Context.settle_meanings`):
+  never a word the model chose, and never a property of the later mail.
 - **Permanent until revoked**, visible (`inbox_items` list), every act a line
   in `<state>/mail/settler-vouch-acts.jsonl`; the current set is the newest act
   per (domain, meaning).
@@ -39,11 +40,12 @@ from . import mailindex
 
 VOUCH, REVOKE = "vouch", "revoke"
 VERBS = (VOUCH, REVOKE)
-#: What a vouched domain's mail may settle — each defined by code
-#: (`mailitems.Context.settle_meanings`): `delivery` — the later mail names the
-#: item's counterparty (the carrier says whose parcel); `payment` — the item's
-#: own mails carry a recorded money fact (the Reader read a pay, the case store
-#: recorded an amount or an account).
+#: What kind of ITEM a vouched domain's mail may settle — each a predicate of
+#: the item over recorded facts on its own mails
+#: (`mailitems.Context.settle_meanings`): `delivery` — one of them is on a case
+#: whose recorded keys include an order or tracking key; `payment` — one of them
+#: carries a recorded money fact (the Reader read a pay, the case store recorded
+#: an amount or an account).
 MEANINGS = ("delivery", "payment")
 ACTS_NAME = "settler-vouch-acts.jsonl"
 

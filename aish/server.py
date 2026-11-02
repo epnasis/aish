@@ -70,6 +70,7 @@ from . import (
     files,
     learning,
     mailprefs,
+    mailvouch,
     notify,
     objective,
     owner_ua,
@@ -480,7 +481,8 @@ _REPORT_FOREIGN_LINK = re.compile(
     # is still his card.
     r"\]\((?!https://mail\.google\.com/mail/|aish-reply://(?:restore|resolve) ref "
     r"[0-9a-f]{12}\)|aish-reply://vouch settler [a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])? "
-    r"(?:delivery|payment)\))"
+    # The meanings come from their one authority, never a second literal.
+    + "(?:" + "|".join(re.escape(m) for m in mailvouch.MEANINGS) + r")\))"
 )
 
 

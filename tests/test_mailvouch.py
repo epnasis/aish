@@ -19,12 +19,19 @@ from test_mailreport import NOW, add_mail, add_verdict, fresh_health
 from aish import mailitems, mailreport, mailvouch, server
 
 
-def parcel_item(state):
-    """He wrote to a shop about a broken parcel locker; nobody answered."""
-    his_sent(state, "o1", to="shop@baskets.example", at=NOW - 6 * DAY,
-             subject="Re: Broken parcel locker")
-    add_mail(state, "s1", frm="Baskets <shop@baskets.example>", subject="Order 773 shipped",
+def parcel_item(state, *, order_key: bool = True):
+    """He wrote to a shop about a broken parcel locker for an order; nobody
+    answered. With `order_key`, his mail carries the order number and the case
+    store recorded it — the item is a delivery by recorded fact."""
+    from aish import mailcases, mailindex
+
+    subject = "Re: Broken parcel locker" + (" — order AB77310" if order_key else "")
+    his = his_sent(state, "o1", to="shop@baskets.example", at=NOW - 6 * DAY, subject=subject)
+    add_mail(state, "s1", frm="Baskets <shop@baskets.example>", subject="Your basket shipped",
              at=NOW - 20 * DAY)
+    index = mailindex.MailIndex(state)
+    mailcases.CaseStore(state).observe(index.get(his.digest), index.body(his.digest) or "",
+                                       True, index)
     (item,) = [i for i in ctx(state).derive().items() if i.kind == mailitems.THEIRS]
     return item
 
@@ -65,6 +72,22 @@ class TestTheGrant:
         vouch(tmp_path, "courier.example", "delivery")
         mail = pickup(tmp_path, frm=sender)
         assert candidate_of(tmp_path, item, mail.digest).tier == ""
+
+    def test_naming_the_counterparty_does_not_make_an_item_a_delivery(self, tmp_path):
+        """Round-2 review, blocking: the later mail naming the counterparty is
+        the entity tie — a reason to ask — and must not make the ITEM a
+        delivery (the insurance item offered "settle delivery items")."""
+        item = parcel_item(tmp_path, order_key=False)
+        vouch(tmp_path, "courier.example", "delivery")
+        mail = pickup(tmp_path)
+        found = candidate_of(tmp_path, item, mail.digest)
+        assert "entity" in found.ties
+        assert found.tier == "" and found.vouchable is None
+        assert ctx(tmp_path).settle_meanings(item) == []
+        fresh_health(tmp_path)
+        text = mailreport.render(mailreport.build(tmp_path, now=NOW, clean=lambda t: t),
+                                 clean=lambda t: t)
+        assert "vouch settler" not in text
 
     def test_a_meaning_code_does_not_find_grants_nothing(self, tmp_path):
         item = parcel_item(tmp_path)
@@ -144,6 +167,13 @@ class TestTheOffer:
                 "(aish-reply://vouch settler courier.example delivery)")
         assert chip in line
         assert chip in server.presented_report("Head\n" + line)
+
+    def test_the_server_reads_the_meanings_from_their_one_authority(self, monkeypatch):
+        for meaning in mailvouch.MEANINGS:
+            chip = f"[a](aish-reply://vouch settler x.example {meaning})"
+            assert chip in server.presented_report("Head\n" + chip)
+        assert "[a] (aish" in server.presented_report(
+            "Head\n[a](aish-reply://vouch settler x.example refund)")
 
     def test_the_server_keeps_only_that_shape(self):
         shown = server.presented_report(

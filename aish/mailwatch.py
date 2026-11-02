@@ -103,6 +103,9 @@ REREAD_PER_PASS = 10
 #: The text a bundle carries for a body the store did not yield
 #: (`mailreader._message_entry`).
 BODY_NOT_RECORDED = "[body not recorded]"
+#: Per model: when a scan last found no blind reading left. Verdict files not
+#: rewritten since are not evidence-read again (`blind_readings(since=…)`).
+REREAD_MARKER = "reread-marker.json"
 GWS_TIMEOUT = 60
 SOURCES = ("gmail", "tuta")
 
@@ -619,8 +622,24 @@ def run_once(
     return result
 
 
+def _reread_marker(state_dir: os.PathLike | str) -> dict[str, Any]:
+    try:
+        raw = json.loads((mailindex.mail_dir(state_dir) / REREAD_MARKER).read_text())
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _mark_clean(state_dir: os.PathLike | str, model_spec: str, at: float) -> None:
+    marker = _reread_marker(state_dir)
+    marker[model_spec] = {"none_found_at": at}
+    atomic_write.publish(mailindex.mail_dir(state_dir) / REREAD_MARKER,
+                         json.dumps(marker, sort_keys=True))
+
+
 def blind_readings(
-    state_dir: os.PathLike | str, index: mailindex.MailIndex, model_spec: str
+    state_dir: os.PathLike | str, index: mailindex.MailIndex, model_spec: str,
+    *, since: float | None = None,
 ) -> list[mailindex.Header]:
     """The mails whose final reading by `model_spec` was made WITHOUT their
     body although the evidence store yields it now — oldest mail first.
@@ -634,7 +653,18 @@ def blind_readings(
     from . import evidence
 
     out: list[mailindex.Header] = []
-    for record in mailverdicts.iter_store(state_dir):
+    for path in sorted(mailverdicts.store_dir(state_dir).glob("*/*.json")):
+        # Files not rewritten since the last clean scan were all checked then.
+        try:
+            if since is not None and path.stat().st_mtime <= since:
+                continue
+            raw = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        record = ((raw.get("by_model") or {}).get(model_spec)
+                  if isinstance(raw, dict) else None)
+        if not isinstance(record, dict):
+            continue
         if record.get("model") != model_spec or record.get("ending") not in (
                 mailverdicts.FINAL_ENDINGS - {mailreader.GATED}):
             continue
@@ -670,13 +700,18 @@ def reread_blind(
     now: float,
     limit: int,
     chat: Callable[..., Any] | None = None,
+    full: bool = False,
 ) -> int:
     """Re-read up to `limit` blind readings (`blind_readings`), in arrival
     order. The old record is never deleted: the new one carries it whole under
     `supersedes`, with code's sentence for why. Returns how many were read."""
     verdicts = mailverdicts.VerdictStore(state_dir)
+    since = None if full else (_reread_marker(state_dir).get(model_spec) or {}).get(
+        "none_found_at")
+    found = blind_readings(state_dir, index, model_spec,
+                           since=float(since) if since is not None else None)
     done = 0
-    for header in blind_readings(state_dir, index, model_spec)[:limit]:
+    for header in found[:limit]:
         old = (verdicts.read(header.digest) or {}).get("by_model", {}).get(model_spec)
         try:
             record = assess(index, store, header, charter=charter, model_spec=model_spec,
@@ -692,6 +727,11 @@ def reread_blind(
         }
         verdicts.write(record)
         done += 1
+    if done == len(found):
+        # Nothing blind is left as of `now`: later passes check only what is
+        # written after it. A body restored to the store later for an older
+        # reading is the one-shot `--reread-blind`'s (it scans everything).
+        _mark_clean(state_dir, model_spec, now)
     return done
 
 
@@ -1125,7 +1165,7 @@ def _main_reread(state_dir: Path, model_spec: str, limit: int | None) -> int:
         found = len(blind_readings(state_dir, index, model_spec))
         done = reread_blind(state_dir, index=index, store=mailcases.CaseStore(state_dir),
                             charter=charter, model_spec=model_spec, now=started,
-                            limit=limit or found)
+                            limit=limit or found, full=True)
         flush_run(state_dir, "mail_reread", {"blind": found, "reread": done}, started)
     print(json.dumps({"blind": found, "reread": done}, sort_keys=True))
     return 0

@@ -100,6 +100,9 @@ ENTITY_TOKEN_MIN = 4
 THIRD_PARTY_MIN_CASES = 2
 THIRD_PARTY_MIN_AGE_DAYS = 30
 
+#: The case-key kinds (`mailcases._KEY_KINDS`) that make an item a delivery.
+DELIVERY_KEY_KINDS = ("order", "tracking")
+
 ACTS_NAME = "item-acts.jsonl"
 LOCK_NAME = "items.lock"
 SETTLEMENTS_DIRNAME = "settlements"
@@ -195,9 +198,13 @@ def own_copies(index: mailindex.MailIndex) -> dict[str, str]:
 
     A copy whose original is not in the index is not recognised, and stays an
     ordinary mail — the visible direction."""
+    mine = mailreport.owner_addresses(index)
     originals: dict[tuple[str, str], list[mailindex.Header]] = {}
     for h in index.by_digest.values():
-        if h.mailbox == "gmail" and h.direction == "out" and h.from_addr:
+        # Mail he sends only to HIMSELF (one inbox to another) is a mail to
+        # him, not a copy of a mail to someone else: never matched.
+        if (h.mailbox == "gmail" and h.direction == "out" and h.from_addr
+                and not set(h.to) | set(h.cc) <= mine):
             originals.setdefault((h.from_addr, h.subject), []).append(h)
     out: dict[str, str] = {}
     for h in index.by_digest.values():
@@ -513,17 +520,23 @@ class Context:
             out.add("documents")
         return frozenset(out)
 
-    def settle_meanings(self, item: OpenItem, header: mailindex.Header) -> list[str]:
-        """Which `mailvouch.MEANINGS` a later mail could settle this item AS —
-        code over recorded facts only: `payment` when one of the item's own
-        mails carries a recorded money fact (`meanings`); `delivery` when the
-        later mail's text names the item's counterparty (a display name or its
-        domain's label: the carrier saying whose parcel it is)."""
+    def settle_meanings(self, item: OpenItem) -> list[str]:
+        """Which `mailvouch.MEANINGS` this ITEM is — a predicate of the item
+        over RECORDED facts on its own mails (`rests_on`), never of the later
+        mail that might settle it (round-2 review, blocking: "the later mail
+        names the counterparty" is the entity tie, a reason to ASK, never part
+        of a grant):
+
+        - `payment` — one of its mails carries a recorded money fact
+          (`meanings`: a Reader pay, a stored amount or account);
+        - `delivery` — one of its mails is on a case whose RECORDED keys
+          (`mailcases`, extracted at ingest) include an order or tracking key."""
         out = []
         if any("money" in self.meanings(d) for d in item.rests_on):
             out.append("payment")
-        text = (self.text(header.digest) or header.subject or "").casefold()
-        if any(token in text for token in self.entity_tokens(item.counterparty)):
+        if any(info.get("kind") in DELIVERY_KEY_KINDS
+               for d in item.rests_on for case in self.cases_of(d)
+               for info in case.keys.values()):
             out.append("delivery")
         return out
 
@@ -808,7 +821,7 @@ class Context:
             return found
         # His vouch: this exact domain may settle this kind of item. An
         # alternative grant by HIS act — the history rule below is unchanged.
-        meanings = self.settle_meanings(item, header)
+        meanings = self.settle_meanings(item)
         allowed = [m for m in meanings if (domain, m) in self.vouched]
         if allowed:
             found.tier, found.meaning = "vouched sender", allowed[0]
