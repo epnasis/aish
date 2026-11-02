@@ -60,6 +60,10 @@ ACTS_NAME = "case-acts.jsonl"
 
 OPEN = "open"
 CLOSED = "closed"
+# How an address became a party of a case (its `via`). Only one HE addressed
+# — or a domain admitted by his act toward it — is someone he dealt with.
+OWNER_ADDRESSED = "owner"
+INBOUND = "inbound"
 # The kind of a key he typed when he created a case: matched literally
 # (`_says_key`), where an extracted key needs its introducing word.
 OWNER_KEY = "yours"
@@ -269,7 +273,10 @@ class Case:
             "created_by": self.created_by,
             "keys": {k: {**v, "at": list(v["at"])} for k, v in self.keys.items()},
             "mails": [list(p) for p in self.mails],
-            "parties": {a: {**v, "at": list(v["at"])} for a, v in self.parties.items()},
+            "parties": {a: {**v, "at": list(v["at"]),
+                            **({"addressed": list(v["addressed"])}
+                               if v.get("addressed") is not None else {})}
+                        for a, v in self.parties.items()},
             "domains": {d: list(p) for d, p in self.domains.items()},
             "admitted": {d: {**v, "at": list(v["at"])} for d, v in self.admitted.items()},
             "owner_acts": [list(p) for p in self.owner_acts],
@@ -290,13 +297,17 @@ class Case:
         def stamped(name: str) -> dict[str, dict[str, Any]]:
             return {k: {**v, "at": _pos(v["at"])} for k, v in (raw.get(name) or {}).items()}
 
+        parties = stamped("parties")
+        for info in parties.values():
+            if info.get("addressed") is not None:
+                info["addressed"] = _pos(info["addressed"])
         return cls(
             id=str(raw["id"]),
             created=_pos(raw["created"]),
             created_by=str(raw["created_by"]),
             keys=stamped("keys"),
             mails=[_pos(p) for p in raw.get("mails") or ()],
-            parties=stamped("parties"),
+            parties=parties,
             domains={d: _pos(p) for d, p in (raw.get("domains") or {}).items()},
             admitted=stamped("admitted"),
             owner_acts=[_pos(p) for p in raw.get("owner_acts") or ()],
@@ -351,6 +362,34 @@ class Case:
             if c["at"] < as_of and (not admitted or c.get("domain") in admitted)
         }
 
+    def dealt_with_at(self, address: str, admitted: set[str] | frozenset[str],
+                      index: mailindex.MailIndex | None = None) -> Position | None:
+        """When this party became someone he dealt with on the case: he
+        addressed it, or its domain is admitted (by his act toward it)."""
+        addressed = self.addressed_at(address, index)
+        domain = mailindex.domain_of(address)
+        via_admission = (self.admitted[domain]["at"] if domain in admitted
+                         and domain in self.admitted else None)
+        options = [p for p in (addressed, via_admission) if p is not None]
+        return min(options) if options else None
+
+    def addressed_at(self, address: str, index: mailindex.MailIndex | None = None
+                     ) -> Position | None:
+        """When he first ADDRESSED this party on this case, or None. A party
+        recorded before provenance existed (no `via`) is derived from his own
+        outbound mail on the case when an index is at hand — never assumed."""
+        info = self.parties.get(address)
+        if info is None:
+            return None
+        if info.get("addressed") is not None:
+            return tuple(info["addressed"])  # type: ignore[return-value]
+        if "via" in info or index is None:
+            return None
+        his = [p for p in self.mails
+               if (h := index.get(p[1])) is not None and h.direction == "out"
+               and address in h.correspondents]
+        return min(his) if his else None
+
     def last_before(self, as_of: Position) -> Position | None:
         earlier = [p for p in self.mails if p < as_of]
         return max(earlier) if earlier else None
@@ -401,8 +440,14 @@ def _absorb(into: Case, other: Case) -> None:
             into.keys[key] = info
     into.mails = sorted(set(into.mails) | set(other.mails))
     for addr, info in other.parties.items():
-        if addr not in into.parties or info["at"] < into.parties[addr]["at"]:
-            into.parties[addr] = info
+        held = into.parties.get(addr)
+        if held is None or info["at"] < held["at"]:
+            into.parties[addr] = {**info}
+        kept = into.parties[addr]
+        marks = [p for p in (info.get("addressed"), (held or {}).get("addressed")) if p]
+        if marks:
+            kept["addressed"] = min(tuple(p) for p in marks)
+            kept["via"] = OWNER_ADDRESSED
     for domain, seen in other.domains.items():
         into.domains[domain] = min(seen, into.domains.get(domain, seen))
     for domain, info in other.admitted.items():
@@ -572,12 +617,21 @@ class CaseStore:
                 if case.created != position:
                     case.owner_acts.append(position)
                 for addr in header.correspondents:
-                    case.parties.setdefault(addr, {"at": position, "name": ""})
+                    info = case.parties.setdefault(
+                        addr, {"at": position, "name": "", "via": OWNER_ADDRESSED})
+                    # A party that joined inbound becomes one he ADDRESSED only
+                    # from this act of his, never earlier.
+                    if "addressed" not in info or tuple(info["addressed"]) > position:
+                        info["addressed"] = position
                 admitted += self._admit_toward(case, header, index)
             else:
+                # An inbound sender is a party by joining, which is not trust:
+                # its provenance is kept, so nothing counts it as someone he
+                # dealt with (`addressed_at`).
                 case.parties.setdefault(
                     header.from_addr,
-                    {"at": position, "name": mailindex.display_name(header.from_value)},
+                    {"at": position, "name": mailindex.display_name(header.from_value),
+                     "via": INBOUND, "authenticated": bool(authenticated)},
                 )
                 if authenticated:
                     domain = mailindex.domain_of(header.from_addr)
@@ -819,8 +873,15 @@ class CaseStore:
     def admitted_domains(self, as_of: Position) -> frozenset[str]:
         return frozenset(d for c in self.cases.values() for d in c.admitted_before(as_of))
 
-    def owner_case_parties(self, as_of: Position) -> dict[str, list[float]]:
-        """address -> times at which a case the owner transacted on included it."""
+    def owner_case_parties(self, as_of: Position,
+                           index: mailindex.MailIndex | None = None
+                           ) -> dict[str, list[float]]:
+        """address -> times at which a case the owner transacted on included it
+        AS SOMEONE HE DEALT WITH: a party he addressed on that case, or one at
+        a domain admitted there by his act toward it — never a sender that
+        merely joined by quoting a key (round-3 review: an authenticated
+        stranger quoting his real order number earned a "case" act, so the
+        grade `known`, and third-party history)."""
         out: dict[str, list[float]] = {}
         for case in self.cases.values():
             if not case.transacted_before(as_of):
@@ -828,9 +889,11 @@ class CaseStore:
             since = case.created if case.created_by == "owner" else min(
                 p for p in case.owner_acts if p < as_of
             )
-            for addr, info in case.parties.items():
-                if info["at"] < as_of:
-                    out.setdefault(addr, []).append(max(since, info["at"])[0])
+            admitted = case.admitted_before(as_of)
+            for addr in case.parties:
+                when = case.dealt_with_at(addr, admitted, index)
+                if when is not None and when < as_of:
+                    out.setdefault(addr, []).append(max(since, when)[0])
         return out
 
 

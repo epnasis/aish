@@ -842,16 +842,21 @@ class Context:
         return found
 
     def history(self, domain: str, header: mailindex.Header) -> int:
-        """Distinct cases he transacted on (as of the mail) where this domain
-        was seen at least `THIRD_PARTY_MIN_AGE_DAYS` before it."""
+        """Distinct cases he transacted on (as of the mail) where he DEALT with
+        this domain at least `THIRD_PARTY_MIN_AGE_DAYS` before it: he addressed
+        a party at it, or it is admitted by his act toward it
+        (`Case.dealt_with_at`). Never a sighting alone — a sender that merely
+        joined a case by quoting its key is no history (round-3 review)."""
         limit = header.at - THIRD_PARTY_MIN_AGE_DAYS * 86400
         count = 0
         for case in self.store.cases.values():
             if not case.transacted_before(header.position):
                 continue
-            seen = [p[0] for d, p in case.domains.items() if d == domain]
-            seen += [i["at"][0] for a, i in case.parties.items()
-                     if mailindex.domain_of(a) == domain]
+            admitted = case.admitted_before(header.position)
+            seen = [when[0] for a in case.parties if mailindex.domain_of(a) == domain
+                    if (when := case.dealt_with_at(a, admitted, self.index)) is not None]
+            if domain in admitted:
+                seen.append(case.admitted[domain]["at"][0])
             if seen and min(seen) <= limit:
                 count += 1
         return count

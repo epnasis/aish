@@ -350,17 +350,19 @@ class TestTheTierRule:
 class TestTheThirdPartyTier:
     def test_history_and_a_stored_amount_admit_a_third_party(self, tmp_path):
         """Authenticated, on a case the owner transacted on beside the item,
-        with a STORED equal amount, and the domain on two of his cases first
-        seen 30+ days before: tier (c)."""
+        with a STORED equal amount, and the domain on two of his cases he DEALT
+        with it on (he wrote to it there) 30+ days before: tier (c)."""
         store = mailcases.CaseStore(tmp_path)
         index = mailindex.MailIndex(tmp_path)
-        for n in (1, 2):  # history: two owner cases the courier was seen on
+        for n in (1, 2):  # history: two owner cases on which he wrote to the courier
             his = his_sent(tmp_path, f"h{n}", to=f"shop{n}@store.example",
                            at=NOW - 90 * DAY + n, subject=f"Order AB{n}0001")
             seen = add_mail(tmp_path, f"c{n}", frm="info@courier.example",
                             subject=f"Parcel for order AB{n}0001", at=NOW - 80 * DAY + n)
+            asked = his_sent(tmp_path, f"q{n}", to="info@courier.example",
+                             at=NOW - 79 * DAY + n, subject=f"Re: Parcel for order AB{n}0001")
             index = mailindex.MailIndex(tmp_path)
-            for header in (his, seen):
+            for header in (his, seen, asked):
                 store.observe(header, index.body(header.digest) or "", True, index)
         his = his_sent(tmp_path, "h3", to="shop@store.example", at=NOW - 5 * DAY,
                        subject="Order XY77001")
@@ -512,3 +514,56 @@ class TestEvidenceMustBeAuthenticatedAndRead:
             "item": item.key, "candidate": thanks.digest, "charter_digest": "d", "at": NOW,
             "ending": "ok", "answer": "settled_by"})
         assert ctx(tmp_path).state_of(item).state == mailitems.OPEN
+
+
+
+class TestJoiningACaseIsNotTrust:
+    """Round-3 review: an inbound sender that joins a case by quoting its key
+    was recorded as a party, which minted a "case" owner act (grade KNOWN) and
+    third-party history. Pinned: an AUTHENTICATED stranger quoting his real
+    order keys on two owner cases, 30+ days old, gains no grade, no history and
+    settles nothing."""
+
+    def build(self, state):
+        store = mailcases.CaseStore(state)
+        for n in (1, 2):
+            his = his_sent(state, f"h{n}", to=f"shop{n}@store.example", at=NOW - 90 * DAY + n,
+                           subject=f"Order AB{n}0001")
+            quote = add_mail(state, f"x{n}", frm="billing@stranger.example",
+                             subject=f"About order AB{n}0001", at=NOW - 80 * DAY + n)
+            index = mailindex.MailIndex(state)
+            for header in (his, quote):
+                store.observe(header, index.body(header.digest) or "", True, index)
+        return mailcases.CaseStore(state)
+
+    def test_no_case_act_and_no_grade(self, tmp_path):
+        store = self.build(tmp_path)
+        assert all(info.get("via") == "inbound"
+                   for c in store.cases.values()
+                   for a, info in c.parties.items() if a == "billing@stranger.example")
+        index = mailindex.MailIndex(tmp_path)
+        parties = store.owner_case_parties((NOW, ""), index)
+        assert "billing@stranger.example" not in parties
+        assert {"shop1@store.example", "shop2@store.example"} <= set(parties)
+        later = add_mail(tmp_path, "x9", frm="billing@stranger.example", subject="Invoice",
+                         at=NOW - DAY)
+        index = mailindex.MailIndex(tmp_path)
+        auth = mailgate.authenticate_header(later)
+        grade = mailgate.grade(index, later, auth, store.owner_case_parties(later.position,
+                                                                           index))
+        assert grade.grade == "first-contact"
+
+    def test_no_history_and_no_settlement(self, tmp_path):
+        self.build(tmp_path)
+        ask = add_mail(tmp_path, "n1", frm="shop@store.example", subject="Pay order XY77001",
+                       at=NOW - 4 * DAY, body="Pay 120,00 zł for order XY77001.")
+        add_verdict(tmp_path, ask, wanted="pay", recorded_at=NOW - 4 * DAY)
+        claim = add_mail(tmp_path, "k1", frm="billing@stranger.example",
+                         subject="Payment for order XY77001 received", at=NOW - 2 * DAY,
+                         body="We received 120,00 zł for order XY77001 from Shop.")
+        add_verdict(tmp_path, claim, recorded_at=NOW - 2 * DAY)
+        context = ctx(tmp_path)
+        assert context.history("stranger.example", claim) == 0
+        item = next(i for i in context.derive().items() if i.anchor == ask.digest)
+        for candidate in context.candidates(item):
+            assert candidate.tier == ""

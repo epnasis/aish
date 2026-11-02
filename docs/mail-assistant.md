@@ -141,7 +141,15 @@ did with it, split by which header gated it — so the gate can be narrowed on e
   Membership of the same conversation is not enough: a hostile mail can put an owner thread's
   Message-IDs in its References and join it, and his earlier replies there must not become
   acts toward it;
-- `case` — a case he transacted on includes the address (from the case store, as of).
+- `case` — a case he transacted on includes the address AS SOMEONE HE DEALT WITH (from the case
+  store, as of): a party he addressed on that case, or one at a domain admitted there by his act
+  toward it. **Since 2026-11-02 a party records its provenance** (`via`: `owner` or `inbound`,
+  `authenticated`, and `addressed` — when he first addressed it): a sender that merely JOINED a
+  case by quoting its key is a party, never a `case` act (`Case.dealt_with_at`,
+  `CaseStore.owner_case_parties`). Before it, an authenticated stranger quoting his real order
+  number earned the grade `known` and third-party history (round-3 review). A party recorded
+  before provenance existed is resolved from his own outbound mail on the case when the index is
+  at hand. `TestJoiningACaseIsNotTrust` in `tests/test_mailitems.py`.
 
 `established` needs `ESTABLISHED_MIN_ACTS` (2) acts on distinct days and the first at least
 `ESTABLISHED_MIN_AGE_DAYS` (30) days before. **Inbound volume is recorded and read by no line**
@@ -1398,8 +1406,9 @@ model-free.
   outbound mail; (b) the same counterparty — the item's counterparty, **an address he wrote to in
   the item's conversation**, or a domain admitted on a case the anchor is on; (c) a third party
   only if authenticated AND tied by a case it shares with the anchor or an equal stored amount AND
-  with history — its domain seen on `THIRD_PARTY_MIN_CASES` (2) distinct cases he transacted on,
-  first seen `THIRD_PARTY_MIN_AGE_DAYS` (30) before the candidate (both choices). Never
+  with history — its domain DEALT WITH by him (a party he addressed, or an admitted domain;
+  never a sighting alone) on `THIRD_PARTY_MIN_CASES` (2) distinct cases he transacted on, at
+  least `THIRD_PARTY_MIN_AGE_DAYS` (30) before the candidate (both choices). Never
   `mailgate.grade`. A caution mark on any model's record of the candidate, or failed
   authentication from a sender that passed before (`mailprefs.floor`), refuses every tier.
   **Changed by the design review (blocking)**: tier (b) first read "a sender in the item's

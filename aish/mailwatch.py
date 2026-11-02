@@ -264,7 +264,7 @@ def gate_facts(
     auth = mailgate.authenticate_header(header)
     return mailreader.Facts(
         auth=auth,
-        grade=mailgate.grade(index, header, auth, store.owner_case_parties(as_of)),
+        grade=mailgate.grade(index, header, auth, store.owner_case_parties(as_of, index)),
         flags=mailgate.red_flags(header, store.admitted_domains(as_of)),
         newsletter=mailgate.newsletter(header),
         candidates=mailcases.candidates(store, header, body),
