@@ -1983,7 +1983,9 @@ TOOL_SCHEMAS: list[dict] = [
             "description": (
                 "The owner's standing feedback on his inbox reports. list is free. add / edit "
                 "/ remove ONLY when his own message asks; he approves a card. Example: 'ignore "
-                "familysafety@microsoft.com' -> add kind=hide sender=familysafety@microsoft.com. "
+                "familysafety@microsoft.com' -> add kind=hide sender=familysafety@microsoft.com; "
+                "'Hetzner invoices matter' -> add kind=important domain=hetzner.com "
+                "meaning=money. A matter that is done is inbox_items resolve, not this. "
                 "NEVER say you will remember or ignore something unless this tool answered SAVED."
             ),
             "parameters": {
@@ -1992,7 +1994,9 @@ TOOL_SCHEMAS: list[dict] = [
                     "action": {"type": "string", "enum": ["list", "add", "edit", "remove"]},
                     "id": {"type": "string", "description": "edit/remove: a pref id from list."},
                     "kind": {"type": "string", "enum": ["hide", "show_first", "not_a_follow_up",
-                                                        "remind", "correction"]},
+                                                        "remind", "correction", "important"]},
+                    "meaning": {"type": "string", "enum": ["money", "documents", "anything"],
+                                "description": "important: what of the entity's mail"},
                     "sender": {"type": "string"},
                     "domain": {"type": "string"},
                     "recipient": {"type": "string", "description": "hide mail sent TO this."},
@@ -2007,6 +2011,27 @@ TOOL_SCHEMAS: list[dict] = [
                     "no_answer_days": {"type": "integer"},
                     "note": {"type": "string"},
                     "label": {"type": "string", "enum": ["needed_action", "junk"]},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inbox_items",
+            "description": (
+                "Items of the owner's inbox reports. list is free. resolve (a matter is done or "
+                "needs no reply) / restore (still open) ONLY when his own message asks; he "
+                "approves a card. Use the report's ref. Example: 'Catherine already paid' -> "
+                "resolve ref=3e2ea1e21b1b. NEVER say a matter is done unless this tool "
+                "answered SAVED."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "resolve", "restore"]},
+                    "ref": {"type": "string", "description": "the ref the report printed"},
                 },
                 "required": ["action"],
             },
