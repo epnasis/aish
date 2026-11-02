@@ -257,3 +257,39 @@ class TestEviction:
         victim.write_text("[")
         again = mailcases.CaseStore(tmp_path)
         assert again.health.loaded == 1 and again.health.unreadable == [victim.name]
+
+
+class TestInflectedKeys:
+    """Polish declines the nouns that introduce a key; the stems find the
+    inflected forms (round-3, the owner's InPost notices yielded nothing)."""
+
+    def test_inflected_forms_yield_their_keys_with_their_kinds(self):
+        assert mailcases.extract_keys("Numer paczki: 620999000111222333444555") == {
+            "620999000111222333444555": "tracking"}
+        assert mailcases.extract_keys("Szczegóły zamówienia nr 98103010/2026") == {
+            "98103010/2026": "order"}
+        assert mailcases.extract_keys("Numer przesyłki: PX7687080605") == {
+            "PX7687080605": "tracking"}
+        assert mailcases.extract_keys("Do faktury VQGEQB1M-0005") == {"VQGEQB1M-0005": "invoice"}
+
+    def test_a_compound_beyond_the_bounded_ending_is_not_an_introducing_word(self):
+        """`paczkomat WAW45H` names a locker shared by unrelated parcels."""
+        assert mailcases.extract_keys("Wybrany paczkomat: WAW45H") == {}
+
+    def test_the_whole_words_keep_their_unbounded_tail(self):
+        assert mailcases.extract_keys("Bestellungsnummer: 4711220") == {"4711220": "order"}
+
+    def test_a_date_is_never_a_key(self):
+        for text in ("Data zamówienia: 2026-10-10", "zamówienia: 26/08/2026",
+                     "order 16.10.2026"):
+            assert mailcases.extract_keys(text) == {}, text
+
+    def test_the_stems_are_counted_under_their_own_name(self):
+        from aish import vocab
+
+        vocab.drain()
+        mailcases.extract_keys("Numer paczki: 620999000111222333444555")
+        mailcases.extract_keys("order 77123 shipped")
+        tallies = vocab.drain()
+        assert tallies["mailcases._KEY_STEMS"]["matched"] == 1
+        assert tallies["mailcases._KEY_WORDS"]["matched"] == 1

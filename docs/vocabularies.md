@@ -122,6 +122,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `mailreport._ONE_TIME_CODE_PHRASES` | PL + EN (+ ID `kode`) | friction | yes | charter v3 answers a code `nothing` + `expire_after_grace`, so a code reaches the daily report's sections only on a Reader miss AND a list miss | 28 |
 | `mailindex._REPLY_PREFIXES` | client subject prefixes | breaks | yes | In-Reply-To / References, read first — the prefix is consulted only when both are absent | 9 |
 | `mailcases._KEY_WORDS` | EN + PL + DE + FR | breaks | yes | the UPS `1Z` shape and the IBAN checksum, which need no introducing word | 22 |
+| `mailcases._KEY_STEMS` | PL (inflected stems, bounded ending ≤ 3 letters) | breaks | yes | the whole-word list above, and the UPS `1Z` shape | 8 |
 | `mailcases._CURRENCY_WORDS` | currency signs and ISO codes | breaks | yes | — | 10 |
 | `signin._SECOND_LEVEL` | public suffixes | friction | **no** | — | 10 |
 | `web._NOT_BUYABLE` | schema.org enum | breaks | **no** | subset of `web._AVAILABILITY`, tested at the same call site | 3 |
@@ -587,3 +588,25 @@ right ones; that question is the exam's, not the counter's.
 
 **These numbers begin at this commit.** Every log written before it carries no `vocab` record
 at all, and the report says so rather than rendering an empty window as a clean bill.
+
+
+## `mailcases._KEY_STEMS` (2026-11-02, a deliberate addition with its before-picture)
+
+Polish declines the nouns that introduce a reference — *Numer paczki*, *do zamówienia*, *numer
+przesyłki* — and `_KEY_WORDS` holds only the nominatives, so on the owner's live index (a temp
+copy, read-only, 1,146 mails) **0 of his InPost notices yielded their parcel number**. The stems
+(`zamówieni`/`zamowieni`, `przesyłk`/`przesylk`, `paczk`, `rezerwacj`, `faktur`, `rachun`) are a
+NEW list, so `_KEY_WORDS` itself did not change, and they take a BOUNDED ending (`STEM_SUFFIX_MAX`,
+3 letters): `paczk` finds *paczki*, *paczkę*, *paczkami* but never *paczkomat*, whose locker id
+would otherwise read as a tracking key shared by unrelated parcels. Measured on the same copy:
+
+| | mails with a key | distinct keys | kinds |
+|---|---|---|---|
+| before | 74 | 51 | order 44, booking 20, invoice 18 |
+| after | 147 | 90 | order 71, tracking 46, booking 23, invoice 19 |
+
+Of the stem matches, three were calendar dates (*Data zamówienia: 2026-10-10*); a key shaped like
+a date is now refused for every introducing word (`_DATE_SHAPED`, structural) — it removed none of
+the whole-word list's keys. The owner's phone number on the InPost notices (*Numer telefonu*) is no
+key and on no case. `mailcases.py` joined `TestTheCountingChangedNoMatching.FILES`, so a later
+change to either list is fenced. `TestInflectedKeys` in `tests/test_mailcases.py`.

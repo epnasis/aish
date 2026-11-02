@@ -59,6 +59,7 @@ class TestTheCountingChangedNoMatching:
         "aish/web.py",
         "aish/approval.py",
         "aish/agent.py",
+        "aish/mailcases.py",
     )
 
     @staticmethod

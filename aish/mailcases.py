@@ -108,22 +108,52 @@ _KEY_WORDS = vocab.declare(
     "name and time window.",
 )
 
+# Polish declines these nouns ("Numer paczki", "do zamówienia", "przesyłkę"),
+# and a whole-word entry above finds only the nominative. Each stem is an
+# introducing word with a BOUNDED ending — at most `STEM_SUFFIX_MAX` letters —
+# so `paczk` finds paczki / paczkę / paczkami but never "paczkomat", whose
+# locker id ("WAW45H") would otherwise read as a tracking key and link
+# unrelated parcels to one locker. The whole words keep their unbounded tail
+# (German "Bestellungsnummer"). Counted under its own name.
+_KEY_STEMS = vocab.declare(
+    "mailcases._KEY_STEMS",
+    ("zamówieni", "zamowieni", "przesyłk", "przesylk", "paczk", "rezerwacj", "faktur",
+     "rachun"),
+    languages="PL (inflected stems)",
+    on_miss=vocab.BREAKS,
+    demanded=False,
+    structural="the whole-word list above, and the UPS `1Z` shape",
+    note="A miss is a key in an inflected form not found (the before-picture: 0 of the "
+    "owner's InPost notices yielded their parcel number); a false match is a key that "
+    "opens or joins nothing without an authenticated or owner mail, and the bounded "
+    "ending keeps compounds like 'paczkomat' out.",
+)
+STEM_SUFFIX_MAX = 3
+
 _KEY_KINDS = {
-    "order": ("order", "zamówienie", "zamowienie", "bestellung", "commande"),
+    "order": ("order", "zamówienie", "zamowienie", "bestellung", "commande", "zamówieni",
+              "zamowieni"),
     "tracking": ("tracking", "przesyłka", "przesylka", "paczka", "parcel", "shipment",
-                 "sendung", "awb"),
-    "booking": ("booking", "rezerwacja", "reservation", "confirmation", "pnr", "reference"),
-    "invoice": ("invoice", "faktura", "rachunek"),
+                 "sendung", "awb", "przesyłk", "przesylk", "paczk"),
+    "booking": ("booking", "rezerwacja", "reservation", "confirmation", "pnr", "reference",
+                "rezerwacj"),
+    "invoice": ("invoice", "faktura", "rachunek", "faktur", "rachun"),
 }
 
 _KEY_PATTERN = re.compile(
     # The leading \b: "border 12345" and "preorder X9123" are not orders.
-    r"\b(?P<word>" + "|".join(re.escape(w) for w in sorted(_KEY_WORDS, key=len, reverse=True))
-    + r")\w*\.?\s*(?:no\.?|nr\.?|number|numer|code|kod|id)?\s*[:#]?\s*"
+    r"\b(?:(?P<word>" + "|".join(re.escape(w) for w in sorted(_KEY_WORDS, key=len, reverse=True))
+    + r")\w*|(?P<stem>" + "|".join(re.escape(w) for w in sorted(_KEY_STEMS, key=len,
+                                                                 reverse=True))
+    + r")\w{0," + str(STEM_SUFFIX_MAX) + r"}\b)"
+    + r"\.?\s*(?:no\.?|nr\.?|number|numer|code|kod|id)?\s*[:#]?\s*"
     r"(?P<key>[A-Z0-9][A-Z0-9/-]{3,29})\b",
     re.I,
 )
 _UPS = re.compile(r"\b1Z[0-9A-Z]{16}\b")
+# A calendar date after an introducing word ("Data zamówienia: 2026-10-10") is
+# a date, not a reference: many unrelated orders share one. Structural.
+_DATE_SHAPED = re.compile(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}")
 
 _CURRENCY_WORDS = vocab.declare(
     "mailcases._CURRENCY_WORDS",
@@ -156,16 +186,20 @@ def extract_keys(text: str) -> dict[str, str]:
     """{normalized key: kind}. A key must carry a digit — `order confirmed`
     has no reference in it."""
     out: dict[str, str] = {}
+    by_stem = False
     for match in _KEY_PATTERN.finditer(text or ""):
         key = match.group("key").upper().strip("-/")
-        if not any(ch.isdigit() for ch in key) or len(key) < 4:
+        if not any(ch.isdigit() for ch in key) or len(key) < 4 or _DATE_SHAPED.fullmatch(key):
             continue
-        word = match.group("word").lower()
+        word = (match.group("word") or match.group("stem")).lower()
         kind = next((k for k, words in _KEY_KINDS.items() if word in words), "reference")
+        if key not in out and match.group("stem"):
+            by_stem = True
         out.setdefault(key, kind)
     for match in _UPS.finditer(text or ""):
         out.setdefault(match.group(0).upper(), "tracking")
-    vocab.note("mailcases._KEY_WORDS", matched=bool(out))
+    vocab.note("mailcases._KEY_WORDS", matched=bool(out) and not by_stem)
+    vocab.note("mailcases._KEY_STEMS", matched=by_stem)
     return out
 
 

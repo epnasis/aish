@@ -165,7 +165,9 @@ In shadow, the Reader's `suspicion` axis is the only judged signal, and it restr
 
 ## The case store and the correlator — `mailcases.py`
 
-**Everything here is code.** Keys by regex after an introducing word (`_KEY_WORDS`, counted)
+**Everything here is code.** Keys by regex after an introducing word (`_KEY_WORDS`, or since
+2026-11-02 an inflected Polish stem with a bounded ending, `_KEY_STEMS` — `docs/vocabularies.md`;
+never a date-shaped key; both counted)
 and carrying a digit, the UPS shape without one; amounts beside a currency
 (`_CURRENCY_WORDS`); IBANs by regex AND the mod-97 checksum (`iban_valid`), with a bare
 26-digit Polish account read as its PL IBAN. `TestExtraction`.
