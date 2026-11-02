@@ -396,6 +396,7 @@ class Context:
         self._text: dict[str, str | None] = {}
         self._entity: dict[str, frozenset[str]] = {}
         self._cases_of: dict[str, list[mailcases.Case]] = {}
+        self._trusted_cases: dict[str, list[mailcases.Case]] = {}
         for case in self.store.cases.values():
             for _at, digest in case.mails:
                 self._cases_of.setdefault(digest, []).append(case)
@@ -473,7 +474,50 @@ class Context:
         return self._keys[digest]
 
     def cases_of(self, digest: str) -> list[mailcases.Case]:
+        """The cases this mail is a TRUSTED member of — the ONE reader of case
+        membership for anything that grants or decides visibility (the case
+        tie, stored amounts, an item's meaning, admitted domains, his closed
+        case covering an item, the keeper release). Membership is trusted
+        when the mail is his own, or authenticated AND joined through a key a
+        trusted mail recorded, a key he typed himself, or a direct reply to
+        his mail on that case (`_trusted_member`). Any other attachment is
+        display-only: it characterises nothing (round-4 review)."""
+        if digest not in self._trusted_cases:
+            header = self.index.get(digest)
+            self._trusted_cases[digest] = [
+                case for case in self._cases_of.get(digest, [])
+                if header is not None and self._trusted_member(case, header)]
+        return self._trusted_cases[digest]
+
+    def attached_cases_of(self, digest: str) -> list[mailcases.Case]:
+        """Every case the mail is attached to, trusted or not — for DISPLAY only."""
         return self._cases_of.get(digest, [])
+
+    def _trusted_member(self, case: mailcases.Case, header: mailindex.Header) -> bool:
+        if header.direction == "out":
+            return True
+        if not mailgate.authenticate_header(header).authenticated:
+            return False
+        keys = self.keys(header.digest)
+        if any(k in case.keys and self._trusted_fact(case.keys[k]) for k in keys):
+            return True
+        text = (self.text(header.digest) or header.subject or "").upper()
+        if any(info.get("kind") == mailcases.OWNER_KEY and mailcases._says_key(text, key)
+               for key, info in case.keys.items()):
+            return True
+        for mid in header.in_reply_to:
+            parent = self.index.reply_parent(mid, header.position)
+            if (parent is not None and parent.direction == "out"
+                    and parent.position in case.mails):
+                return True
+        return False
+
+    def trusted_closure(self) -> mailcases.Closure:
+        """His closures, with each mail's case membership as `cases_of`
+        trusts it: a close covers only mail trusted on the case."""
+        members = {d: frozenset(c.id for c in self.cases_of(d)) for d in self.closure.members}
+        return mailcases.Closure(dict(self.closure.closed_at),
+                                 {d: ids for d, ids in members.items() if ids})
 
     def stored_amounts(self, digest: str) -> frozenset[tuple[str, int]]:
         """Amounts the case store RECORDED for this mail at ingest — never
@@ -636,14 +680,15 @@ class Context:
     def _closed(self, item: OpenItem, restored_at: float) -> State | None:
         """His closed case, under `Closure.releases`' read-clock law, revived
         by later mail like his resolve. None when no case closes it."""
-        cases = set(self.closure.members.get(item.anchor, ()))
-        if not cases or not all(c in self.closure.closed_at for c in cases):
+        closure = self.trusted_closure()
+        cases = set(closure.members.get(item.anchor, ()))
+        if not cases or not all(c in closure.closed_at for c in cases):
             return None
-        closed_at = min(self.closure.closed_at[c] for c in cases)
+        closed_at = min(closure.closed_at[c] for c in cases)
         if closed_at <= restored_at:
             return None  # his later restore outranks his earlier close
         read_at = max(self.first_read(d) for d in item.rests_on)
-        if not self.closure.releases(item.anchor, read_at, ()) or not self.covers(item, closed_at):
+        if not closure.releases(item.anchor, read_at, ()) or not self.covers(item, closed_at):
             return State(OPEN, revived=True)
         return State(SETTLED, OWNER, closed_at, Evidence(cases=tuple(sorted(cases))))
 

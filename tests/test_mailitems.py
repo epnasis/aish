@@ -639,3 +639,45 @@ class TestLegacyParties:
         mailcases._absorb(legacy, inbound)
         index = mailindex.MailIndex(tmp_path)
         assert legacy.addressed_at("shop@store.example", index) == his.position
+
+
+class TestMembershipMustRestOnATrustedFact:
+    """Round-4 note 1: an untrusted key still JOINED mail to cases, and that
+    membership was the "case" tie and the closed-case coverage. Membership now
+    counts only when it rests on a trusted fact (`Context.cases_of`)."""
+
+    def planted(self, state):
+        his = his_sent(state, "o1", to="shop@store.example", at=NOW - 9 * DAY,
+                       subject="Re: Broken parcel locker")
+        forged = unauthenticated(state, "x1", frm="shop@store.example",
+                                 subject="zamówienie nr FAKE1234", at=NOW - 10 * DAY)
+        stranger = add_mail(state, "k1", frm="billing@stranger.example",
+                            subject="Order FAKE1234 settled", at=NOW - 2 * DAY,
+                            body="Your order FAKE1234 is settled. 120,00 zł received.")
+        add_verdict(state, stranger, recorded_at=NOW - 2 * DAY)
+        store = mailcases.CaseStore(state)
+        case = mailcases.Case(
+            id="case-planted0001", created=forged.position, created_by="inbound",
+            mails=sorted([forged.position, his.position, stranger.position]),
+            keys={"FAKE1234": {"kind": "order", "at": forged.position}})
+        store.cases[case.id] = case
+        store._save(case)
+        return his, stranger, case
+
+    def test_a_planted_key_ties_no_authenticated_strangers_mail(self, tmp_path):
+        _his, stranger, case = self.planted(tmp_path)
+        context = ctx(tmp_path)
+        assert [c.id for c in context.attached_cases_of(stranger.digest)] == [case.id]
+        assert context.cases_of(stranger.digest) == []  # display-only
+        (item,) = [i for i in context.derive().items() if i.kind == mailitems.THEIRS]
+        assert "case" not in context.ties(item, stranger)
+        for candidate in context.candidates(item):
+            assert candidate.tier == ""
+
+    def test_his_close_covers_no_mail_attached_by_an_untrusted_key(self, tmp_path):
+        _his, stranger, case = self.planted(tmp_path)
+        store = mailcases.CaseStore(tmp_path)
+        store.act(mailcases.CLOSE, {"case": case.id}, by="owner", now=NOW - DAY)
+        context = ctx(tmp_path)
+        assert stranger.digest not in context.trusted_closure().members
+        assert context.trusted_closure().members  # his own mail still is

@@ -750,9 +750,10 @@ def build(
     from . import mailitems, mailsettle  # both read this module's helpers
 
     store = mailcases.CaseStore(state_dir)
-    # His case closures release keeper-clamped mail (`mailcases.Closure`).
-    closure = store.closure()
     ctx = mailitems.Context(state_dir, now=now, index=index, readings=readings, store=store)
+    # His case closures release keeper-clamped mail (`mailcases.Closure`),
+    # reading membership as the items do: trusted only.
+    closure = ctx.trusted_closure()
     report.judgements_unreadable = ctx.judgements_unreadable
     # The ONE derivation the watcher's settlement pass uses too.
     derived = ctx.derive(needs_since=min(floor, now - FOLLOWUP_WINDOW_DAYS * 86400))

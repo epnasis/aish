@@ -190,6 +190,13 @@ keys alone were written from any mail, so a forged mail quoting a real order num
 *"zamówienie nr FAKE123"* could plant an order key and make an item a delivery. The readers apply
 the same law to facts recorded before it (`mailitems.Context._trusted_fact`: a key whose recording
 mail is not his own or authenticated characterises nothing). `TestCaseFactsComeOnlyFromTrustedMail`.
+**Membership obeys the same law** (round-4 note 1): a mail is attached to a case by any key, but
+it is a MEMBER for anything that grants or decides visibility only when it is his own mail, or
+authenticated AND joined through a key a trusted mail recorded, a key he typed himself, or a direct
+reply to his mail on the case. `mailitems.Context.cases_of` is the one reader — the case tie, stored
+amounts, an item's meaning, admitted domains, his closed case covering an item and the keeper
+release (`Context.trusted_closure`) all go through it; `attached_cases_of` is for display only.
+`TestMembershipMustRestOnATrustedFact`.
 **A known weaker edge, stated:** a case's account history before it has an admitted sender is the
 whole AUTHENTICATED history (`coordinates_before`) — a stranger passing DMARC on its OWN domain
 can seed it; N1 removes the unauthenticated half of that, not this one (§Residuals).
