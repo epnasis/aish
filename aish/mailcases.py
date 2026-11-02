@@ -141,14 +141,47 @@ _KEY_KINDS = {
     "invoice": ("invoice", "faktura", "rachunek", "faktur", "rachun"),
 }
 
+# The words that say a token IDENTIFIES the matter ("Numer paczki: …",
+# "zamówienia nr …"). Under one of them a stem-introduced token is a key in
+# any key shape; without one it must be identifier-shaped (`_identifier_shaped`).
+# Matched against mail text, so declared and counted. One authority for BOTH
+# places a marker may stand (before the stem, after it).
+_IDENTITY_MARKERS = vocab.declare(
+    "mailcases._IDENTITY_MARKERS",
+    ("numer", "nr", "no", "number", "nummer"),
+    languages="PL + EN + DE",
+    on_miss=vocab.BREAKS,
+    demanded=False,
+    structural="`_identifier_shaped`: a token that is a reference by its own shape needs no marker",
+    note="A miss is a short all-digit reference after an inflected stem with no marker: not "
+    "a key (it has the shape of a one-time code). Never consulted for the whole words.",
+)
+# The connectors that may stand between an introducing word and its token
+# without saying it is the matter's number ("order code X9123"); NOT identity
+# markers — "kod odbioru" names a one-time secret, not the parcel.
+_KEY_CONNECTORS = vocab.declare(
+    "mailcases._KEY_CONNECTORS",
+    ("code", "kod", "id"),
+    languages="EN + PL",
+    on_miss=vocab.BREAKS,
+    demanded=False,
+    note="Pre-existing connectors of the key pattern, declared when the markers were.",
+)
+
+
+def _alternation(words: tuple[str, ...]) -> str:
+    return "|".join(re.escape(w) + r"\.?" for w in sorted(words, key=len, reverse=True))
+
+
 _KEY_PATTERN = re.compile(
     # The leading \b: "border 12345" and "preorder X9123" are not orders.
-    r"(?:\b(?P<pre>numer|nr|no|number|nummer)\.?\s+)?"
+    r"(?:\b(?P<pre>" + _alternation(_IDENTITY_MARKERS) + r")\s+)?"
     r"\b(?:(?P<word>" + "|".join(re.escape(w) for w in sorted(_KEY_WORDS, key=len, reverse=True))
     + r")\w*|(?P<stem>" + "|".join(re.escape(w) for w in sorted(_KEY_STEMS, key=len,
                                                                  reverse=True))
     + r")\w{0," + str(STEM_SUFFIX_MAX) + r"}\b)"
-    + r"\.?\s*(?P<post>no\.?|nr\.?|number|numer|code|kod|id)?\s*[:#]?\s*"
+    + r"\.?\s*(?P<post>" + _alternation((*_IDENTITY_MARKERS, *_KEY_CONNECTORS)) + r")?"
+    + r"\s*[:#]?\s*"
     r"(?P<key>[A-Z0-9][A-Z0-9/-]{3,29})\b",
     re.I,
 )
@@ -188,7 +221,7 @@ def extract_keys(text: str) -> dict[str, str]:
     """{normalized key: kind}. A key must carry a digit — `order confirmed`
     has no reference in it."""
     out: dict[str, str] = {}
-    by_word = by_stem = False
+    by_word = by_stem = by_connector = False
     for match in _KEY_PATTERN.finditer(text or ""):
         key = match.group("key").upper().strip("-/")
         if not any(ch.isdigit() for ch in key) or len(key) < 4 or _DATE_SHAPED.fullmatch(key):
@@ -201,21 +234,18 @@ def extract_keys(text: str) -> dict[str, str]:
             by_stem = True
         else:
             by_word = True
+        post = (match.group("post") or "").rstrip(".").lower()
+        by_connector = by_connector or post in _KEY_CONNECTORS
         out.setdefault(key, kind)
     for match in _UPS.finditer(text or ""):
         out.setdefault(match.group(0).upper(), "tracking")
     # Each list counted by what IT matched: a mail can hit both.
     vocab.note("mailcases._KEY_WORDS", matched=by_word)
     vocab.note("mailcases._KEY_STEMS", matched=by_stem)
+    vocab.note("mailcases._KEY_CONNECTORS", matched=by_connector)
     return out
 
 
-#: The markers that say a token IDENTIFIES the matter ("Numer paczki: …",
-#: "zamówienia nr …"). Under one of them a stem-introduced token is a key in
-#: any key shape; without one it must be identifier-shaped
-#: (`_identifier_shaped`). "code"/"kod" are not markers — "kod odbioru" names a
-#: one-time secret, not the parcel.
-_IDENTITY_MARKERS = frozenset({"numer", "nr", "no", "number", "nummer"})
 
 
 #: An all-digit token shorter than this, with no identity marker, has the
@@ -239,7 +269,9 @@ def _governed(match: re.Match) -> bool:
     are exactly the ones a marker governs ("numer paczki"); without one the
     inflected noun only stands near a token ("PIN do odbioru paczki: 646235")."""
     marks = (match.group("pre"), match.group("post"))
-    return any(m and m.rstrip(".").lower() in _IDENTITY_MARKERS for m in marks)
+    governed = any(m and m.rstrip(".").lower() in _IDENTITY_MARKERS for m in marks)
+    vocab.note("mailcases._IDENTITY_MARKERS", matched=governed)
+    return governed
 
 
 def _cents(number: str) -> int | None:

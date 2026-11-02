@@ -123,6 +123,8 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `mailindex._REPLY_PREFIXES` | client subject prefixes | breaks | yes | In-Reply-To / References, read first — the prefix is consulted only when both are absent | 9 |
 | `mailcases._KEY_WORDS` | EN + PL + DE + FR | breaks | yes | the UPS `1Z` shape and the IBAN checksum, which need no introducing word | 22 |
 | `mailcases._KEY_STEMS` | PL (inflected stems, bounded ending ≤ 3 letters) | breaks | yes | the whole-word list above, and the UPS `1Z` shape | 8 |
+| `mailcases._IDENTITY_MARKERS` | PL + EN + DE | breaks | yes | `_identifier_shaped`: a token that is a reference by its own shape needs no marker | 5 |
+| `mailcases._KEY_CONNECTORS` | EN + PL | breaks | yes | none — the pre-existing connectors of the key pattern | 3 |
 | `mailcases._CURRENCY_WORDS` | currency signs and ISO codes | breaks | yes | — | 10 |
 | `signin._SECOND_LEVEL` | public suffixes | friction | **no** | — | 10 |
 | `web._NOT_BUYABLE` | schema.org enum | breaks | **no** | subset of `web._AVAILABILITY`, tested at the same call site | 3 |
@@ -612,7 +614,9 @@ the whole-word list's keys. The owner's phone number on the InPost notices (*Num
 key and on no case.
 
 **What makes a stem's token the matter's identifier, not a one-time secret** (round-3 note N2:
-*Twój PIN do odbioru paczki: 646235* had become a tracking key). Not a word added to a list: a
+*Twój PIN do odbioru paczki: 646235* had become a tracking key). The rule reads a list of words —
+`mailcases._IDENTITY_MARKERS`, declared and counted (round-4 note 2 found it first written as an
+undeclared set); no word was added to it for the PIN, and no negative list (*kod*, *PIN*) exists: a
 stem-introduced token is a key when an IDENTITY MARKER governs it — *numer / nr / no / number*
 right before the stem (*Numer paczki: …*) or right after it (*zamówienia nr …*); without one, it
 must be identifier-shaped on its own (`_identifier_shaped`): letters and digits mixed (*XYO3K4*,
@@ -625,3 +629,13 @@ the rule lost exactly ONE key, `646235` (the PIN), and gained none; the InPost t
 still extracts from all three notices. **Each list is counted by what IT matched** — a mail with
 a whole-word key and a stem key counts a match for both (N3). `TestInflectedKeys`. `mailcases.py` joined `TestTheCountingChangedNoMatching.FILES`, so a later
 change to either list is fenced. `TestInflectedKeys` in `tests/test_mailcases.py`.
+
+**One authority for the markers, and a fence that sees new lists** (round-4 note 2). Both places a
+marker may stand — before the stem and after it — are built from `_IDENTITY_MARKERS` (with
+`_KEY_CONNECTORS` after it), so the earlier asymmetry (*nummer* only before) is gone; measured on
+a frozen copy of the live index the restructure moved no key. `TestTheCountingChangedNoMatching`
+now fails on a collection CREATED since a file's baseline unless `NEW` declares it with its exact
+entries, and a file absent at the global baseline gets its own (`FILE_BASES`): before, it skipped
+`mailcases.py` whole and could not see a new list anywhere. Two existing new collections surfaced
+and are declared (`PAGE_READERS`, a record's `sandbox_meta` fields — neither a word list).
+`TestTheMarkersHaveOneAuthority`, `test_a_new_list_is_fenced_until_declared`.

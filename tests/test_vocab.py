@@ -140,6 +140,48 @@ class TestTheCountingChangedNoMatching:
         "aish/approval.py:SAFE_COMMANDS": {"added": [], "removed": ["ps"]},
     }
 
+    #: A file whose before-picture is not the global baseline: it did not
+    #: exist then (so the global check skipped it whole). Its lists are
+    #: compared with this commit — the one before its first deliberate list
+    #: change (2026-11-02: the key stems).
+    FILE_BASES = {
+        "aish/mailcases.py": "7979c8ce17cd83e7907865f42e9bb4828495b810",
+    }
+
+    #: Collections CREATED since a file's baseline, each with its exact
+    #: entries. A new list is a change a reader must be told about as much as
+    #: an edited one — the fence missed new lists until round-4 review.
+    NEW = {
+        # Not word lists: aish's own tool names and record field names.
+        "aish/agent.py:MAIL_STORE_TOOLS": ["cases", "inbox_preferences", "inbox_items"],
+        "aish/agent.py:pref_act": ["kind", "action", "pref_kind"],
+        "aish/agent.py:item_act": ["kind", "verb", "anchor"],
+        # Found when the fence learned to see new lists: aish's own tool names
+        # (the page-reading tools) and a record's field names — not word lists.
+        "aish/agent.py:PAGE_READERS": ["browse", "browse_act", "browse_fill"],
+        "aish/agent.py:sandbox_meta": ["confined", "tier"],
+        # 2026-11-02: matched against mail text; declared and counted.
+        "aish/mailcases.py:_KEY_STEMS": ["zamówieni", "zamowieni", "przesyłk", "przesylk",
+                                         "paczk", "rezerwacj", "faktur", "rachun"],
+        "aish/mailcases.py:_IDENTITY_MARKERS": ["numer", "nr", "no", "number", "nummer"],
+        "aish/mailcases.py:_KEY_CONNECTORS": ["code", "kod", "id"],
+    }
+
+    @staticmethod
+    def _undeclared_new(name: str, old: dict, new: dict, registry: dict) -> dict:
+        """Lists in `new` that `old` lacks and `registry` does not declare with
+        exactly these entries."""
+        return {f"{name}:{key}": ("(new)", entries) for key, entries in new.items()
+                if key not in old and registry.get(f"{name}:{key}") != entries}
+
+    def test_a_new_list_is_fenced_until_declared(self):
+        before = self._lists("A = ('x', 'y')\n")
+        after = self._lists("A = ('x', 'y')\nB = ('kod', 'pin')\n")
+        assert self._undeclared_new("m.py", before, after, {}) == {
+            "m.py:B": ("(new)", ["kod", "pin"])}
+        assert self._undeclared_new("m.py", before, after, {"m.py:B": ["kod", "pin"]}) == {}
+        assert self._undeclared_new("m.py", before, after, {"m.py:B": ["kod"]})
+
     @staticmethod
     def _matches(before: list, after: list, declared: dict) -> bool:
         """Is `after` exactly `before` plus/minus what the entry DECLARED?
@@ -163,14 +205,17 @@ class TestTheCountingChangedNoMatching:
         assert base, "aish/vocab.py has no commit — cannot establish a baseline"
         drifted = {}
         for name in self.FILES:
+            commit = self.FILE_BASES.get(name, f"{base}~1")
             before = subprocess.run(
-                ["git", "show", f"{base}~1:{name}"],
+                ["git", "show", f"{commit}:{name}"],
                 cwd=REPO, capture_output=True, text=True,
             )
             if before.returncode:
-                continue  # a file that did not exist then
+                drifted[name] = ("no before-picture at " + commit, "set FILE_BASES")
+                continue
             old = self._lists(before.stdout)
             new = self._lists((REPO / name).read_text())
+            drifted.update(self._undeclared_new(name, old, new, self.NEW))
             for key, entries in old.items():
                 if key not in new or new[key] == entries:
                     continue

@@ -348,3 +348,22 @@ class TestTheRecheckRecordsKeysToo:
         assert case.keys["FV99887"]["at"] == later.header.position
         assert case.amounts and case.amounts[0]["cents"] == 4000
         assert not store.record_authenticated(case, later.header, later.body)  # idempotent
+
+
+class TestTheMarkersHaveOneAuthority:
+    """Round-4 note 2: the identity markers are a declared, counted list, and
+    the pattern's both marker positions derive from it."""
+
+    def test_every_declared_marker_governs_before_and_after_the_stem(self):
+        for marker in mailcases._IDENTITY_MARKERS:
+            assert mailcases.extract_keys(f"{marker} paczki 646235") == {"646235": "tracking"}
+            assert mailcases.extract_keys(f"paczki {marker} 646235") == {"646235": "tracking"}
+
+    def test_the_markers_are_counted_where_they_are_consulted(self):
+        from aish import vocab
+
+        vocab.drain()
+        mailcases.extract_keys("numer paczki 646235")
+        mailcases.extract_keys("odbioru paczki: 646235")
+        tally = vocab.drain()["mailcases._IDENTITY_MARKERS"]
+        assert tally["asked"] == 2 and tally["matched"] == 1
