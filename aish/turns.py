@@ -139,7 +139,9 @@ def get(
         return None
     path = store_dir(state_dir) / key / digest
     try:
-        text = path.read_text(encoding="utf-8")
+        # The exact bytes — `read_text()` would turn "\r\n" into "\n" and fail
+        # the hash of any blob carrying CRLF (`evidence.get`, 2026-11-02).
+        text = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
     return text if digest_of(text) == digest else None

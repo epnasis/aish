@@ -113,7 +113,11 @@ def get(digest: str, state_dir: os.PathLike | str | None) -> str | None:
         return None
     path = _blob_path(state_dir, digest)
     try:
-        text = path.read_text()
+        # The exact bytes, decoded — never `read_text()`, whose universal
+        # newlines turn "\r\n" into "\n": every recorded mail body written with
+        # CRLF then failed its own hash and read as "not recorded" (367 of the
+        # owner's 454 Gmail bodies, found 2026-11-02).
+        text = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
     return text if digest_of(text) == digest else None

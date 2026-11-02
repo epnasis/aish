@@ -73,6 +73,18 @@ class TestEvidenceStore:
         assert digest == evidence.digest_of("the tool menu")
         assert evidence.get(digest, tmp_path) == "the tool menu"
 
+    def test_crlf_round_trips_exactly(self, tmp_path):
+        """A mail body written with CRLF line ends is what was recorded; a
+        universal-newline read failed its hash and every such body read as
+        "not recorded" (367 of the owner's 454 Gmail bodies, 2026-11-02)."""
+        from aish import turns
+
+        text = "Dzień dobry,\r\nZrobiłam dopłatę.\r\n"
+        digest = evidence.put(text, tmp_path)
+        assert evidence.get(digest, tmp_path) == text
+        sent = turns.put(text, tmp_path, "session-crlf.jsonl")
+        assert turns.get(sent, tmp_path, "session-crlf.jsonl") == text
+
     def test_identical_content_is_stored_once(self, tmp_path):
         first = evidence.put("same bytes", tmp_path)
         second = evidence.put("same bytes", tmp_path)
