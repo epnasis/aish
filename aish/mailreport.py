@@ -401,10 +401,12 @@ class Report:
     unjudged: int = 0
     not_weighed: int = 0
     body_not_recorded: int = 0
+    unread_candidates: int = 0
     judgements_unreadable: int = 0
     own_copies: list[tuple[str, str, str]] = field(default_factory=list)  # copy, original, subj
     late_closed: list[str] = field(default_factory=list)
     since_acts: dict[str, int] = field(default_factory=dict)
+    settled_drawn: int = -1  # rows "Probably settled" drew under its cap (-1: not rendered)
     since_acts_from: float = 0.0
 
     def counts(self) -> dict[str, int]:
@@ -416,7 +418,8 @@ class Report:
         """The new mail this report SHOWS — never again in a later report.
         Items over a section's cap are not shown, so they stay eligible. A
         needs item shown under "Probably settled" was shown."""
-        settled = [i for i in self.settled[:SETTLED_SHOWN] if isinstance(i, Item)]
+        drawn = SETTLED_SHOWN if self.settled_drawn < 0 else self.settled_drawn
+        settled = [i for i in self.settled[:drawn] if isinstance(i, Item)]
         shown = [*self.needs[:NEEDS_SHOWN], *self.interest[:INTEREST_SHOWN], *settled]
         digests = {i.reading.digest for i in shown}
         for digest in list(digests):
@@ -873,6 +876,8 @@ def _candidates(ctx: Any, report: Report, digest: str, rows: list[Any]) -> None:
                 row.unweighed.append(candidate)
             elif candidate.body_missing:
                 report.body_not_recorded += 1
+            elif candidate.unread:
+                report.unread_candidates += 1
             else:
                 judged = ctx.judged.get(mailitems.pair_key(item.key, candidate.header.digest,
                                                            digest))
@@ -1142,13 +1147,22 @@ def _settled_section(report: Report, clean: Clean) -> str:
     if not report.settled:
         return ""
     lines = ["", f"## Probably settled ({len(report.settled)})", SETTLED_NOTE]
-    lines += [_settled_line(r, report.now, clean) for r in report.settled[:SETTLED_SHOWN]]
-    if len(report.settled) > SETTLED_SHOWN:
-        lines.append(f"(+{len(report.settled) - SETTLED_SHOWN} more, not shown)")
-    text = "\n".join(lines)
-    if len(text) > SETTLED_MAX_CHARS:
-        text = text[: SETTLED_MAX_CHARS - 60] + "\n(this section was cut here, at its size cap)"
-    return text
+    # Whole lines only: a cut inside a line could leave half a chip.
+    room = SETTLED_MAX_CHARS - 80
+    used = sum(len(t) + 1 for t in lines)
+    shown = 0
+    for row in report.settled[:SETTLED_SHOWN]:
+        line = _settled_line(row, report.now, clean)
+        if used + len(line) + 1 > room:
+            break
+        lines.append(line)
+        used += len(line) + 1
+        shown += 1
+    report.settled_drawn = shown
+    if shown < len(report.settled):
+        lines.append(f"(+{len(report.settled) - shown} more, not shown — at this section's "
+                     "size cap)")
+    return "\n".join(lines)
 
 
 def _since_line(report: Report) -> str:
@@ -1179,6 +1193,9 @@ def _settlement_lines(report: Report, clean: Clean) -> list[str]:
     if report.body_not_recorded:
         parts.append(f"{report.body_not_recorded} that cannot be judged because a body is not "
                      "recorded")
+    if report.unread_candidates:
+        parts.append(f"{report.unread_candidates} waiting for the mail Reader before they can be "
+                     "weighed")
     if report.judgements_unreadable:
         parts.append(f"{report.judgements_unreadable} judgement file(s) could not be read")
     if parts:

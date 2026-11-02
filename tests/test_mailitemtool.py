@@ -241,3 +241,32 @@ class TestTheImportantPreference:
         planned = mailprefs.plan(tmp_path, {"action": "add", "kind": "not_a_follow_up",
                                             "counterparty": "c@x.example"})
         assert planned.kind == "not_a_follow_up"  # the standing kind stays a preference
+
+
+class TestSaveTimeRefusals:
+    def test_a_held_lock_saves_nothing(self, tmp_path):
+        import contextlib
+
+        item = pay_item(tmp_path)
+        planned = mailitemtool.plan(tmp_path, {"action": "resolve", "ref": item.anchor[:12]})
+
+        @contextlib.contextmanager
+        def held(_state):
+            yield False
+
+        applied = mailitemtool.apply(tmp_path, planned, source={}, now=NOW, lock=held)
+        assert not applied.ok and applied.text.startswith("NOT SAVED")
+        assert mailitems.read_acts(tmp_path) == []
+
+    def test_an_item_that_changed_since_the_card_is_refused(self, tmp_path):
+        his_sent(tmp_path, "o1", to="bob@client.example", at=NOW - 9 * DAY, subject="Quote")
+        first = add_mail(tmp_path, "r1", frm="bob@client.example", subject="Re: Quote",
+                         at=NOW - 8 * DAY, in_reply_to="o1@owner.example")
+        add_verdict(tmp_path, first, wanted="cannot_tell", recorded_at=NOW - 8 * DAY)
+        planned = mailitemtool.plan(tmp_path, {"action": "resolve", "ref": first.digest[:12]})
+        # A needs item now anchors on the same mail: the card named one item, two are there.
+        add_verdict(tmp_path, first, wanted="reply", recorded_at=NOW - 8 * DAY + 1,
+                    model="local:other")
+        applied = mailitemtool.apply(tmp_path, planned, source={}, now=NOW)
+        assert not applied.ok and "changed since the card" in applied.text
+        assert mailitems.read_acts(tmp_path) == []

@@ -288,6 +288,7 @@ class SettlePass:
     candidates: int = 0  # tied later mail found
     not_weighed: int = 0  # refused by the tier rule (code)
     body_not_recorded: int = 0
+    unread: int = 0  # authenticated, tied, but no Reader reading yet: read first
     already_judged: int = 0
     judged: int = 0  # model calls made
     endings: dict[str, int] = field(default_factory=dict)
@@ -367,6 +368,10 @@ def pairs(ctx: mailitems.Context, digest: str, result: SettlePass | None = None,
             if candidate.body_missing:
                 if result is not None:
                     result.body_not_recorded += 1
+                continue
+            if candidate.unread:
+                if result is not None:
+                    result.unread += 1
                 continue
             judged = ctx.judged.get(mailitems.pair_key(item.key, candidate.header.digest, digest))
             if judged is not None and judged.get("ending") in FINAL_ENDINGS:

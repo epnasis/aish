@@ -208,13 +208,6 @@ def own_copies(index: mailindex.MailIndex) -> dict[str, str]:
     return out
 
 
-def own_copy_of(index: mailindex.MailIndex, header: mailindex.Header) -> str:
-    """The Gmail original of `header` when it is his own copy, else ""."""
-    if header.direction != "in" or header.mailbox == "gmail":
-        return ""
-    return own_copies(index).get(header.digest, "")
-
-
 # ---------------------------------------------------------------- his acts on items
 
 
@@ -346,6 +339,7 @@ class Candidate:
     tier: str = ""  # "" when the tier rule refuses it
     refused: str = ""  # code's words for why it cannot settle the item
     body_missing: bool = False
+    unread: bool = False  # inbound with no Reader reading: waits to be read, never judged
 
 
 class Context:
@@ -623,7 +617,8 @@ class Context:
             if header is None or not self.later(header, item, state.restored_at):
                 continue
             checked = self.check(item, header)
-            if checked is None or not checked.tier or checked.body_missing:
+            if (checked is None or not checked.tier or checked.body_missing
+                    or checked.unread):
                 continue
             at = _f(record.get("at"))
             if not self.covers(item, at):
@@ -749,7 +744,13 @@ class Context:
           transacted on, first seen `THIRD_PARTY_MIN_AGE_DAYS` before.
 
         Never `mailgate.grade`. A caution on any record, or failed
-        authentication from a sender that passed before, refuses any tier."""
+        authentication from a sender that passed before, refuses any tier.
+
+        **Every INBOUND candidate, whatever its tier, must be authenticated and
+        read** (delivery review 2026-11-02, blocking): an unauthenticated From
+        is a claim anyone writes, and the caution floor reads the Reader's
+        record — a mail with no reading has no floor at all. An unread one is
+        not refused: it WAITS (`unread`), and the settlement step reads it."""
         ties = self.ties(item, header) if ties is None else ties
         if not ties:
             return None
@@ -763,6 +764,11 @@ class Context:
         if header.direction == "out":
             found.tier = "his act"
             return found
+        if not mailgate.authenticate_header(header).authenticated:
+            found.refused = "its sender is not authenticated"
+            return found
+        reading = self.readings.get(header.digest)
+        found.unread = reading is None or reading.record is None
         sender = header.from_addr
         domain = mailindex.domain_of(sender)
         he_wrote_to = {
@@ -772,9 +778,6 @@ class Context:
         admitted = {d for c in self.cases_of(item.anchor) for d in c.admitted}
         if sender == item.counterparty or sender in he_wrote_to or domain in admitted:
             found.tier = "same counterparty"
-            return found
-        if not mailgate.authenticate_header(header).authenticated:
-            found.refused = "a third party whose mail is not authenticated"
             return found
         if not {"case", "amount"} & set(ties):
             found.refused = ("a third party tied to it only by "
@@ -921,7 +924,12 @@ def follow_ups(ctx: Context) -> tuple[list[mailreport.FollowUp], list[mailreport
                 ):
                     asking.append((header, reading))
             if not asking:
-                if any(late_read(readings.get(h.digest)) for h in answers):
+                # Named only when a LATE reading is the reason: had those
+                # answers stayed unread, they would have counted as asks.
+                if any(late_read(readings.get(h.digest))
+                       and mailreport.classify(None, h) not in (mailreport.GATED_OUT,
+                                                                mailreport.OTP_OUT)
+                       for h in answers):
                     closed.append(party)
                 continue
             latest, reading = asking[-1]
@@ -965,6 +973,22 @@ def gaps(ctx: Context, limit: int) -> list[str]:
                 out.append(digest)
         if len(out) >= limit:
             break
+    return out[:limit]
+
+
+def unread_candidates(ctx: Context, items: Iterable[OpenItem], limit: int) -> list[str]:
+    """Tied later mail that waits for a Reader reading before it can be
+    weighed (`Candidate.unread`), newest first, at most `limit` — read by the
+    settlement step so the caution floor has a record to read."""
+    out: list[str] = []
+    for item in items:
+        state = ctx.state_of(item)
+        if state.by_owner or state.probably:
+            continue
+        for candidate in ctx.candidates(item, restored_at=state.restored_at):
+            if candidate.unread and candidate.tier and candidate.header.digest not in out:
+                out.append(candidate.header.digest)
+    out.sort(key=lambda d: ctx.first_read(d), reverse=True)
     return out[:limit]
 
 

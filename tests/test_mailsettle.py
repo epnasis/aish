@@ -291,3 +291,19 @@ class TestTheLateReading:
         mailwatch.settle(tmp_path, charter=reader, settler=settler(), model_spec=MODEL,
                          now=NOW, result=mailwatch.Pass(), chat=scripted)
         assert scripted.calls == 1
+
+
+class TestTheSectionCap:
+    def test_the_cap_drops_whole_lines_and_records_only_what_it_drew(self, tmp_path,
+                                                                     monkeypatch):
+        admit(tmp_path, settler(), MODEL)
+        item, _ = settled_pair(tmp_path)
+        mailsettle.settle_pass(tmp_path, charter=settler(), model_spec=MODEL, now=NOW,
+                               chat=ScriptedJudge())
+        monkeypatch.setattr(mailreport, "SETTLED_MAX_CHARS", 400)
+        report = TestTheReport().build(tmp_path)
+        text = mailreport.render(report, clean=lambda t: t)
+        assert "(+1 more, not shown — at this section's size cap)" in text
+        section = text.split("## Probably settled", 1)[1].split("---")[0]
+        assert "aish-reply://" not in section
+        assert item.anchor not in report.shown_digests()

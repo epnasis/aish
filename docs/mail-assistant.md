@@ -1261,7 +1261,9 @@ An **item** is one thing the report would put in front of him, anchored by a DIG
 the 07:30 report both call it, so they cannot disagree about what is open. The report still shows
 a needs item only while it is news (§What is new) — the watcher judges only what the report could
 show (`mailsettle.showable`, reading the report's own `news_window`, and nothing his hide
-preferences take out). Follow-ups are unchanged in what they list (per counterparty, B3), and a
+preferences take out). It is a slight SUPERSET in one corner — a your-turn row whose ask the report
+folds under a shown Needs item, or a near-duplicate's twin — so the watcher can spend a call on a
+row the report will not draw; never the other way. Follow-ups are unchanged in what they list (per counterparty, B3), and a
 your-turn row he answered in its own conversation is simply not derived: his answer moved his
 last message past it, as before. The item key is `kind|anchor|counterparty`.
 `TestTheOneDerivation` in `tests/test_mailitems.py`.
@@ -1327,8 +1329,11 @@ original exists from that address with the same subject and the same To and Cc s
 within `OWN_COPY_SKEW_S` (300 s, a choice) of the copy's Date. A recognised copy MINTS NOTHING:
 never an item, never observed into the case store (`ingest` indexes the whole batch before
 observing any of it, so the pair is recognised whichever came first; the backfill and the recheck
-skip it too), never read by the Reader (the pass counts it `own_copies`). The derivation re-tests
-at read time, so a copy whose original arrives in a later pass stops being an item then. The
+skip it too), never read by the Reader (the pass counts it `own_copies`) — **within one batch**.
+Across passes it is weaker: a copy fetched in a pass where its Gmail original was not (a quota
+stop, a failed sent fetch) is observed into the case store as ordinary authenticated inbound when
+it comes, and nothing undoes that observation. The derivation re-tests at read time, so such a copy
+still stops being an ITEM once its original is indexed. The
 footer names each copy with both refs. `TestHisOwnCopy`.
 
 ### The settlement judge — `mailsettle.py`, `aish/charters/item-settler.md`
@@ -1362,6 +1367,14 @@ model-free.
   the thread's Message-ID would have been its own credential to demote the item.
   `test_a_stranger_joining_the_conversation_is_not_tier_b`; `TestTheTierRule`,
   `TestTheThirdPartyTier`.
+- **Every inbound candidate, whatever its tier, must be authenticated and read** (the delivery
+  review, blocking): an unauthenticated From is a claim anyone can write, and the caution floor
+  reads the Reader's record — a mail with no reading had no floor at all, so a forged,
+  never-assessed From of the counterparty passed tier (b). An unauthenticated candidate is refused
+  (*its sender is not authenticated*); an authenticated one with no reading WAITS (`unread`, never
+  judged, and a judgement on it settles nothing) until the settlement step reads it
+  (`mailitems.unread_candidates`, `CANDIDATE_READS_PER_PASS` (5, a choice), newest first). The
+  footer counts what waits. `TestEvidenceMustBeAuthenticatedAndRead`.
 - **A refused pair is never sent, and is named.** The open item's line says *later mail aish did
   not weigh: from <address> (<date>): <code's reason>* — an address and code's words only, never
   the later mail's subject or text (review: an attacker-writable channel pinned to a chosen item).
@@ -1393,8 +1406,9 @@ backfill's "older backfilled mail is never assessed": an old answer an open foll
 
 ### The report
 
-- **Probably settled (N)** — its own section, cut by its own cap (`SETTLED_MAX_CHARS`) and never
-  by the sections' (review-2 change 11). Each line: the item in code's words, *probably settled:*
+- **Probably settled (N)** — its own section, cut by its own cap (`SETTLED_MAX_CHARS`, whole
+  lines only, so a cut never splits a chip, and only the rows drawn are recorded as shown;
+  `TestTheSectionCap`) and never by the sections' (review-2 change 11). Each line: the item in code's words, *probably settled:*
   the evidence code verified — *you wrote to X on <date>* (the rule) or *mail from X on <date>
   (the same party / a third party with history; the stored amount), as aish's settlement judge
   read it* with the evidence mail's ref — and two one-tap chips, `[restore]` and `[done]`. **The
@@ -1433,7 +1447,7 @@ report chat's required menu beside `cases` and `inbox_preferences`. **The false-
 names resolutions** (`mailprefs.MEMORY_RULE`). The conversation-scoped `not_a_follow_up` is
 retired into `resolve` (review change 7 of 2026-11-01): a new one is refused with that guidance;
 saved ones keep applying (none existed live); the counterparty-standing kind stays a preference.
-`TestTheVerbs`, `TestTheWiring` in `tests/test_mailitemtool.py`.
+`TestTheVerbs`, `TestTheWiring`, `TestSaveTimeRefusals` (the held lock and the item that changed since its card) in `tests/test_mailitemtool.py`.
 
 ### `important` — entity and meaning, with an effect preview
 

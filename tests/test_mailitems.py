@@ -463,3 +463,46 @@ class TestHealthOfTheStore:
         sent = his_sent(tmp_path, "s1", to="agent@broker.example", at=NOW - DAY, subject="x")
         copy = tuta_copy(tmp_path, sent)
         assert mailgate.authenticate_header(copy).authenticated
+
+
+def unauthenticated(state, gid: str, *, frm: str, subject: str, at: float,
+                    body: str = "") -> mailindex.Header:
+    """A mail whose From is only a claim: Gmail's header says DMARC failed."""
+    from mail_fixtures import gmail
+
+    parsed = mailindex.from_gmail(gmail(gid, frm=frm, subject=subject, body=body, at=at,
+                                        auth="fail"), frozenset({OWNER}))
+    assert parsed is not None
+    mailindex.MailIndex(state).add(parsed.header, parsed.body)
+    return parsed.header
+
+
+class TestEvidenceMustBeAuthenticatedAndRead:
+    """The delivery review's blocking finding: a forged From of the
+    counterparty, never read, passed tier (b) and its floor never ran."""
+
+    def test_a_forged_counterparty_from_settles_nothing(self, tmp_path):
+        pay_item(tmp_path)
+        forged = unauthenticated(tmp_path, "k1", frm="club@swim.example",
+                                 subject="Payment received", at=NOW - 2 * DAY,
+                                 body="We booked your 640 PLN payment.")
+        touch(tmp_path, forged, NOW - 2 * DAY)
+        context = ctx(tmp_path)
+        (candidate,) = context.candidates(context.derive().items()[0])
+        assert candidate.tier == "" and candidate.refused == "its sender is not authenticated"
+
+    def test_an_unread_authenticated_candidate_waits_for_the_reader(self, tmp_path):
+        pay_item(tmp_path)
+        thanks = add_mail(tmp_path, "k1", frm="club@swim.example", subject="Thank you",
+                          at=NOW - 2 * DAY, body="We booked your 640 PLN payment.")
+        touch(tmp_path, thanks, NOW - 2 * DAY)
+        context = ctx(tmp_path)
+        item = context.derive().items()[0]
+        (candidate,) = context.candidates(item)
+        assert candidate.tier == "same counterparty" and candidate.unread
+        assert mailitems.unread_candidates(context, [item], 5) == [thanks.digest]
+        # A stored settled_by on an unread candidate does not settle the item.
+        mailitems.write_judgement(tmp_path, item.anchor, {
+            "item": item.key, "candidate": thanks.digest, "charter_digest": "d", "at": NOW,
+            "ending": "ok", "answer": "settled_by"})
+        assert ctx(tmp_path).state_of(item).state == mailitems.OPEN

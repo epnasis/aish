@@ -92,6 +92,9 @@ DEFAULT_MAX = 50
 #: Answers an open your-turn row rests on that nobody read, read late per pass
 #: (`mailitems.gaps`). A CHOICE: bounded like the judge, oldest row first.
 LATE_READS_PER_PASS = 5
+#: Tied later mail with no reading, read per pass before the judge may weigh
+#: it (`mailitems.unread_candidates`): the caution floor needs a record. A CHOICE.
+CANDIDATE_READS_PER_PASS = 5
 GWS_TIMEOUT = 60
 SOURCES = ("gmail", "tuta")
 
@@ -627,7 +630,9 @@ def settle(
     verdicts = mailverdicts.VerdictStore(state_dir)
     if model_spec:
         ctx = mailitems.Context(state_dir, now=now, index=index, store=store)
-        for digest in mailitems.gaps(ctx, late_reads):
+        unread = mailitems.unread_candidates(ctx, mailsettle.showable(ctx, since),
+                                             CANDIDATE_READS_PER_PASS)
+        for digest in [*mailitems.gaps(ctx, late_reads), *unread]:
             header = index.get(digest)
             if header is None or verdicts.has(digest, model_spec, charter.digest):
                 continue
@@ -636,7 +641,9 @@ def settle(
                                 chat=chat, state_dir=state_dir, propose=False, now=now)
             except Exception as exc:  # noqa: BLE001 — one mail's failure is its own record
                 record = mailverdicts.error_record(header, charter, model_spec, exc, now)
-            record[mailitems.LATE_READ] = "an open follow-up rested on it and it had no reading"
+            record[mailitems.LATE_READ] = (
+                "a later mail tied to an open item had no reading" if digest in unread
+                else "an open follow-up rested on it and it had no reading")
             verdicts.write(record)
             result.late_read += 1
     settled = mailsettle.settle_pass(state_dir, charter=settler, model_spec=model_spec,
