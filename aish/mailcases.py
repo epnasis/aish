@@ -294,6 +294,22 @@ def _governed(match: re.Match) -> bool:
     return governed
 
 
+def mail_keys(subject: str, text: str, reader_kind: str = "") -> dict[str, str]:
+    """The keys ONE MAIL contributes — none at all when the mail is a one-time
+    code or sign-in link by the classification the report already uses
+    (`mailreport.is_one_time_code`, over the Reader's kind and the subject):
+    such a mail's references are one-time secrets, not a matter's identity
+    (round-4 note 3: a 7+-digit OTP or a mixed one-time code after an
+    introducing word). Restrict-only: it can drop keys, never add one. At
+    ingest there is no reading yet, so only the subject half applies there;
+    the readers apply the Reader's kind as well."""
+    from . import mailreport  # mailreport imports this module
+
+    if mailreport.is_one_time_code(reader_kind, subject):
+        return {}
+    return extract_keys(text)
+
+
 def _cents(number: str) -> int | None:
     text = number.replace(" ", " ").replace(" ", "")
     if re.fullmatch(r"\d{1,3}(?:\.\d{3})+(?:,\d{2})?", text):
@@ -701,7 +717,7 @@ class CaseStore:
         mail (a mail already on a case changes nothing)."""
         position = header.position
         text = f"{header.subject}\n{body}"
-        keys = extract_keys(text)
+        keys = mail_keys(header.subject, text)
         touched: dict[str, Case] = {}
         for key in keys:
             for case in self.by_key(key):
@@ -777,7 +793,7 @@ class CaseStore:
         if header.direction != "in" or header.position not in case.mails:
             return False
         text = f"{header.subject}\n{body}"
-        changed = self._record_facts(case, header, text, True, extract_keys(text))
+        changed = self._record_facts(case, header, text, True, mail_keys(header.subject, text))
         if changed:
             self._save(case)
         return changed
@@ -1089,7 +1105,7 @@ def candidates(
     as_of = header.position
     text = f"{header.subject}\n{body}"
     folded = text.casefold()
-    keys = set(extract_keys(text))
+    keys = set(mail_keys(header.subject, text))
     amounts = set(extract_amounts(text))
     sender_name = mailindex.display_name(header.from_value).casefold()
     found: list[Candidate] = []

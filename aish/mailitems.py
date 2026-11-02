@@ -465,13 +465,21 @@ class Context:
         return self._text[digest]
 
     def keys(self, digest: str) -> frozenset[str]:
+        """The keys this mail contributes (`mailcases.mail_keys`): none for a
+        mail read or titled as a one-time code."""
         if digest not in self._keys:
             header = self.index.get(digest)
             text = self.text(digest)
             if text is None and header is not None:
                 text = header.subject
-            self._keys[digest] = frozenset(mailcases.extract_keys(text or ""))
+            self._keys[digest] = frozenset(mailcases.mail_keys(
+                header.subject if header is not None else "", text or "",
+                self._reader_kind(digest)))
         return self._keys[digest]
+
+    def _reader_kind(self, digest: str) -> str:
+        reading = self.readings.get(digest)
+        return str((reading.verdict if reading else {}).get("kind") or "")
 
     def cases_of(self, digest: str) -> list[mailcases.Case]:
         """The cases this mail is a TRUSTED member of — the ONE reader of case
@@ -596,6 +604,8 @@ class Context:
             else None
         if header is None:
             return False
+        if mailreport.is_one_time_code(self._reader_kind(header.digest), header.subject):
+            return False  # a one-time code's reference characterises nothing
         return header.direction == "out" or mailgate.authenticate_header(header).authenticated
 
     def important_pref(self, reading: mailreport.Reading,

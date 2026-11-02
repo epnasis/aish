@@ -302,7 +302,7 @@ def assess(
         )
     verdict = reading.verdict
     code_coordinates = mailcases.extract_coordinates(f"{header.subject}\n{body}")
-    keys = set(mailcases.extract_keys(f"{header.subject}\n{body}"))
+    keys = set(mailcases.mail_keys(header.subject, f"{header.subject}\n{body}"))
     linked = _case_ids_by_key(store, header, keys)
     if verdict is not None and reading.bundle is not None:
         mailverdicts.count_verdict(verdict)
@@ -1066,7 +1066,8 @@ def _follow_authentication(
             if on:
                 # Later mail on no case carrying one of its keys would have
                 # joined, had this mail arrived authenticated.
-                run_keys.update(mailcases.extract_keys(f"{header.subject}\n{body}"))
+                run_keys.update(mailcases.mail_keys(header.subject,
+                                                    f"{header.subject}\n{body}"))
             continue
         if on:
             if header.direction == "out":
@@ -1077,7 +1078,7 @@ def _follow_authentication(
         if header.digest in moved or not run_keys:
             continue
         body = index.body(header.digest) or ""
-        keys = mailcases.extract_keys(f"{header.subject}\n{body}")
+        keys = mailcases.mail_keys(header.subject, f"{header.subject}\n{body}")
         # Every `run_keys` entry was put there by a mail EARLIER in this
         # position-ordered loop, so a key in it is a key on a case before this mail.
         if any(k in run_keys for k in keys):

@@ -681,3 +681,31 @@ class TestMembershipMustRestOnATrustedFact:
         context = ctx(tmp_path)
         assert stranger.digest not in context.trusted_closure().members
         assert context.trusted_closure().members  # his own mail still is
+
+
+class TestAOneTimeCodeMailContributesNoKeys:
+    """Round-4 note 3: a 7+-digit OTP or a mixed one-time code after an
+    introducing word still keyed. A mail the report already classifies as a
+    one-time code or sign-in link (Reader kind or subject) contributes no keys
+    at all — restrict-only, no negative word list."""
+
+    def test_by_subject_at_ingest_and_by_the_readers_kind_later(self, tmp_path):
+        assert mailcases.mail_keys("Your verification code",
+                                   "Confirmation code 5-17927992435000278-753139") == {}
+        assert mailcases.mail_keys("Let's confirm your email",
+                                   "Confirmation 5-17927992435000278-753139") != {}
+        assert mailcases.mail_keys("Let's confirm your email",
+                                   "Confirmation 5-17927992435000278-753139",
+                                   reader_kind="verification code") == {}
+
+    def test_the_readers_see_none_and_a_recorded_one_characterises_nothing(self, tmp_path):
+        his = his_sent(tmp_path, "o1", to="ib@broker.example", at=NOW - 6 * DAY,
+                       subject="Re: Account")
+        code = add_mail(tmp_path, "c1", frm="verify@broker.example",
+                        subject="Let's confirm your email", at=NOW - 5 * DAY,
+                        body="Order confirmation 5-17927992435000278-753139")
+        add_verdict(tmp_path, code, kind="one time code", recorded_at=NOW - 5 * DAY)
+        context = ctx(tmp_path)
+        assert context.keys(code.digest) == frozenset()
+        assert not context._trusted_fact({"kind": "order", "at": list(code.position)})
+        assert context._trusted_fact({"kind": "order", "at": list(his.position)})

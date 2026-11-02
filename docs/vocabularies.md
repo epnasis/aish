@@ -648,3 +648,23 @@ code to EVERY stem (`_stem_forms`), so a stem added later gets its forms without
 them; the bounded ending still keeps *paczkomat* out and dates stay refused. Measured on the frozen
 copy: one key gained, `29777837645` (tracking), now shared by the 4 DHL notices; none lost.
 `TestStemAlternationsAreARule`.
+
+**A one-time code's mail contributes no keys** (round-4 note 3). The shape rule still let a 7+-digit
+OTP, a phone number or a mixed one-time code after an introducing word become a key. Three systemic
+options were measured on the frozen copy (1,149 mails), and no negative word list (*kod*, *PIN*)
+was considered:
+(a) a token that is one of his own identifiers (appearing in his own outbound mail) is never a key —
+no ungoverned stem key appears in his mail, so it would have changed nothing measured and catches
+phones only;
+(b) a key needs a second mail or a marker — it would have LOST seven real references carried by one
+mail each (`10021306947-01`, `10021579307-01`, `10021925290-01`/`-02`, `261509440`, `348010369`,
+`G10102653771`, `PX7694845874`);
+(c) **chosen**: a mail the report already classifies as a one-time code or sign-in link
+(`mailreport.is_one_time_code`, over the Reader's kind and the subject) contributes no keys
+(`mailcases.mail_keys` — the one function every caller now uses: observation, the recheck, the
+correlator, assessment and the items' key reader; and `Context._trusted_fact` refuses a key such a
+mail recorded). Restrict-only. Measured: lost exactly two keys, both Interactive Brokers sign-in
+confirmations (`5-17927992435000278-753139`, `5-17935414849320950-789728`); gained none.
+**Residual, stated:** at ingest there is no reading yet, so only the subject half applies there; and
+a phone number directly after an introducing word in an ordinary mail still keys (none on the
+frozen copy). `TestAOneTimeCodeMailContributesNoKeys`.
