@@ -1508,6 +1508,31 @@ and `anything` would — the preview shows him which before he saves.
 word list; their misses are visible in the footer counts (not judged, not weighed, body not
 recorded) and the judgement store, not yet in `aish vocab`.
 
+### Readings made without the body, read again (2026-11-02) — `mailwatch.reread_blind`
+
+**An explicit amendment of "a verdict already recorded … is never recomputed"** (§The thread
+index, §The Tuta authentication recheck), with this exact premise: *a recorded Reader reading
+whose recorded input carried `[body not recorded]` as the reviewed mail's text, while the
+evidence store now yields that body, did not judge the mail.* The CRLF read bug (fixed in
+`evidence.get`, 2026-11-02) produced exactly that for bodies the store held all along — 367 of
+the owner's 454 Gmail index bodies read as absent.
+
+- **Decided from evidence** (`mailwatch.blind_readings`): the reading's first call's input bundle
+  is read from the evidence store by its recorded digest; its reviewed message's `text` must be
+  exactly `[body not recorded]`, and `index.body` must return the body NOW. A body genuinely
+  absent is never a candidate, so it is never retried; a bundle no longer in the store cannot be
+  checked, and its reading stands. Only final readings (`ok`, `invalid`) by the pass's own model
+  are considered.
+- **Superseded, never deleted**: the new record carries the old one whole under `supersedes`
+  (`{at, record, why}`); a re-read that gets no answer (no model, no admission) writes nothing and
+  the old reading stands. The first-read clock still counts the superseded reading
+  (`mailreport._with_superseded`), so a re-read never makes an old mail look new.
+- **Bounded, oldest mail first**: `REREAD_PER_PASS` (10, a choice) in every `--once` pass, before
+  the settlement step; the backlog in one run is `aish-mailwatch --reread-blind --model <spec>
+  [--max N]` (driver step 3i).
+
+`TestBlindReadings` in `tests/test_mailreread.py`.
+
 ## The live backfill (2026-10-31) — `aish-mailwatch --backfill DAYS`
 
 **Why.** On 2026-10-28 the live index held 0 of his sent messages: the watcher lists a window of
@@ -1792,10 +1817,12 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **His own mail is recognised only Tuta-side.** A Tuta copy of his Gmail SENT mail is matched
   (§Open items and settlement); a Gmail inbound copy of mail he sent from Tuta is not — no such
   pair was observed, and none is matched.
-- **Many Gmail bodies are not recorded.** On 2026-11-02, 367 of the 454 Gmail index entries (live
-  state, read-only) named a body digest the evidence store does not hold; why is not known here.
-  A pair whose body is missing is never judged and is counted in the footer, so for those mails
-  only the deterministic rule (his own reply) can settle anything.
+- **Readings made blind are re-read only by their own model.** The 367 Gmail bodies that read as
+  absent on 2026-11-02 were held all along — `evidence.get` failed CRLF bodies on its own hash
+  (fixed). Readings made meanwhile are re-read `REREAD_PER_PASS` at a time and only for the
+  pass's model; a reading by another model stays blind until a pass or `--reread-blind` runs with
+  it, and a reading whose recorded bundle left the evidence store cannot be checked and stands.
+  A body genuinely absent is still never judged and is counted in the footer.
 - **A third party with no case history settles an item only by his vouch.** Tier (c) reads the
   case store only; a courier or payment provider on no case he transacted on (InPost on
   2026-11-02: on none) is named on the item as "not weighed", with the vouch offered as a chip,
@@ -1919,6 +1946,11 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    ```sh
    uv run python scripts/role-admission.py --dry-run item-settler
    uv run python scripts/role-admission.py --model gemini:gemini-3.8-flash item-settler
+   ```
+   Then, once, the backlog of readings made without their body (the CRLF bug; real Reader
+   calls, one per such mail, oldest first — run with `--max N` to spread the cost):
+   ```sh
+   aish-mailwatch --reread-blind --model gemini:gemini-3.8-flash
    ```
    Nothing else changes in the jobs: every `--once` pass now runs the settlement step when the
    charter loads (unadmitted: no call, the report counts the candidates as not yet judged). To run

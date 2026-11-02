@@ -95,6 +95,14 @@ LATE_READS_PER_PASS = 5
 #: Tied later mail with no reading, read per pass before the judge may weigh
 #: it (`mailitems.unread_candidates`): the caution floor needs a record. A CHOICE.
 CANDIDATE_READS_PER_PASS = 5
+#: Readings made WITHOUT the mail's body that are re-read per pass, oldest mail
+#: first (`blind_readings`): the CRLF read bug (2026-11-02) handed the Reader
+#: "[body not recorded]" for bodies the store held all along. A CHOICE; the
+#: one-shot backlog is `--reread-blind`.
+REREAD_PER_PASS = 10
+#: The text a bundle carries for a body the store did not yield
+#: (`mailreader._message_entry`).
+BODY_NOT_RECORDED = "[body not recorded]"
 GWS_TIMEOUT = 60
 SOURCES = ("gmail", "tuta")
 
@@ -383,6 +391,7 @@ class Pass:
     listing_ok: bool = True
     sources: dict[str, SourcePass] = field(default_factory=dict)
     own_copies: int = 0  # his own sent mail in his other inbox: not read
+    reread: int = 0  # readings made without the body, superseded and read again
     late_read: int = 0  # answers an open follow-up rested on, read late
     settlement: dict[str, Any] = field(default_factory=dict)  # `mailsettle.SettlePass`
 
@@ -599,11 +608,91 @@ def run_once(
         verdicts.write(record)
         result.assessed += 1
         result.endings[record["ending"]] = result.endings.get(record["ending"], 0) + 1
+    if model_spec:
+        result.reread = reread_blind(state_dir, index=index, store=store, charter=charter,
+                                     model_spec=model_spec, chat=chat, now=now(),
+                                     limit=REREAD_PER_PASS)
     if settler is not None:
         settle(state_dir, index=index, store=store, charter=charter, settler=settler,
                model_spec=model_spec, chat=chat, settle_chat=settle_chat, now=now(),
                result=result)
     return result
+
+
+def blind_readings(
+    state_dir: os.PathLike | str, index: mailindex.MailIndex, model_spec: str
+) -> list[mailindex.Header]:
+    """The mails whose final reading by `model_spec` was made WITHOUT their
+    body although the evidence store yields it now — oldest mail first.
+
+    Decided from evidence, never guessed: the reading's recorded input (its
+    first call's bundle, in the evidence store by digest) carried exactly
+    `BODY_NOT_RECORDED` as the reviewed message's text, AND `index.body` now
+    returns the body. A body genuinely absent from the store is never a
+    candidate, so it is never retried; a bundle no longer in the store cannot
+    be checked, and its reading stands."""
+    from . import evidence
+
+    out: list[mailindex.Header] = []
+    for record in mailverdicts.iter_store(state_dir):
+        if record.get("model") != model_spec or record.get("ending") not in (
+                mailverdicts.FINAL_ENDINGS - {mailreader.GATED}):
+            continue
+        header = index.get(str(record.get("mail") or ""))
+        calls = record.get("calls") if isinstance(record.get("calls"), list) else []
+        if header is None or not calls or not isinstance(calls[0], dict):
+            continue
+        digest = str((calls[0].get("input") or {}).get("digest") or "")
+        text = evidence.get(digest, state_dir) if digest else None
+        try:
+            bundle = json.loads(text) if text else None
+        except ValueError:
+            bundle = None
+        if not isinstance(bundle, dict):
+            continue
+        reviewed = next((m for m in bundle.get("messages") or ()
+                         if isinstance(m, dict) and m.get("ref") == bundle.get("mail")), None)
+        if reviewed is None or reviewed.get("text") != BODY_NOT_RECORDED:
+            continue
+        if index.body(header.digest) is None:
+            continue
+        out.append(header)
+    return sorted(out, key=lambda h: h.position)
+
+
+def reread_blind(
+    state_dir: os.PathLike | str,
+    *,
+    index: mailindex.MailIndex,
+    store: mailcases.CaseStore,
+    charter: roles.Charter,
+    model_spec: str,
+    now: float,
+    limit: int,
+    chat: Callable[..., Any] | None = None,
+) -> int:
+    """Re-read up to `limit` blind readings (`blind_readings`), in arrival
+    order. The old record is never deleted: the new one carries it whole under
+    `supersedes`, with code's sentence for why. Returns how many were read."""
+    verdicts = mailverdicts.VerdictStore(state_dir)
+    done = 0
+    for header in blind_readings(state_dir, index, model_spec)[:limit]:
+        old = (verdicts.read(header.digest) or {}).get("by_model", {}).get(model_spec)
+        try:
+            record = assess(index, store, header, charter=charter, model_spec=model_spec,
+                            chat=chat, state_dir=state_dir, propose=False, now=now)
+        except Exception as exc:  # noqa: BLE001 — one mail's failure is its own record
+            record = mailverdicts.error_record(header, charter, model_spec, exc, now)
+        if record.get("ending") not in mailverdicts.FINAL_ENDINGS:
+            continue  # no model, no admission: the old reading stands until one answers
+        record["supersedes"] = {
+            "at": now, "record": old,
+            "why": "its reading's input carried [body not recorded] for this mail, and the "
+                   "evidence store now yields the body",
+        }
+        verdicts.write(record)
+        done += 1
+    return done
 
 
 def settle(
@@ -1016,6 +1105,32 @@ def load_settler() -> roles.Charter | None:
         return None
 
 
+def _main_reread(state_dir: Path, model_spec: str, limit: int | None) -> int:
+    """`--reread-blind`: the backlog of readings made without their body, in
+    one run, under the one pass lock. Records a `mail_reread` run line."""
+    if not model_spec:
+        log("--reread-blind needs --model")
+        return 2
+    try:
+        charter = load_reader()
+    except roles.CharterError as exc:
+        log(f"the Reader's charter does not load: {exc}")
+        return 2
+    started = time.time()
+    with pass_lock(state_dir) as held:
+        if not held:
+            log("another pass holds the lock — the re-read does nothing")
+            return 3
+        index = mailindex.MailIndex(state_dir)
+        found = len(blind_readings(state_dir, index, model_spec))
+        done = reread_blind(state_dir, index=index, store=mailcases.CaseStore(state_dir),
+                            charter=charter, model_spec=model_spec, now=started,
+                            limit=limit or found)
+        flush_run(state_dir, "mail_reread", {"blind": found, "reread": done}, started)
+    print(json.dumps({"blind": found, "reread": done}, sort_keys=True))
+    return 0
+
+
 def _main_settle(state_dir: Path, model_spec: str, since_text: str) -> int:
     """`--settle`: the settlement step alone, over what is indexed — no
     mailbox read, under the one pass lock. Records a `mail_settle` run line."""
@@ -1110,6 +1225,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--since", default="",
                         help="with --settle: YYYY-MM-DD or <N>d — weigh the needs items the "
                         "report would show with the same --since (default: its own window)")
+    parser.add_argument("--reread-blind", action="store_true",
+                        help="one-shot: re-read every reading made without its body although "
+                        "the evidence store now holds it (oldest first, up to --max); no "
+                        "mailbox is read")
     parser.add_argument("--account", default=os.environ.get("AISH_MAIL_ACCOUNT", ""),
                         help="the Gmail account (needs ~/.config/gws-accounts/<email>/)")
     parser.add_argument("--owner", action="append", default=[],
@@ -1134,6 +1253,8 @@ def main(argv: list[str] | None = None) -> int:
                              args.max or BACKFILL_LIMIT)
     if args.settle:
         return _main_settle(state_dir, args.model, args.since)
+    if args.reread_blind:
+        return _main_reread(state_dir, args.model, args.max)
     if not args.once and args.backfill <= 0:
         parser.print_help()
         return 2

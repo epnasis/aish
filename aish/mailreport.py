@@ -279,7 +279,10 @@ def load_readings(state_dir: os.PathLike | str) -> tuple[dict[str, Reading], int
         digest = str(raw.get("mail") or path.stem)
         judged = [r for r in records if isinstance(r.get("verdict"), dict)]
         chosen = max(judged, key=lambda r: _f(r.get("recorded_at"))) if judged else None
-        stamped = [_f(r.get("recorded_at")) for r in records if _f(r.get("recorded_at"))]
+        # A superseded reading (`mailwatch.reread_blind`) still says when aish
+        # FIRST read the mail: a re-read must not make an old mail look new.
+        stamped = [_f(r.get("recorded_at")) for r in _with_superseded(records)
+                   if _f(r.get("recorded_at"))]
         out[digest] = Reading(
             digest=digest,
             record=chosen,
@@ -291,6 +294,18 @@ def load_readings(state_dir: os.PathLike | str) -> tuple[dict[str, Reading], int
             records=tuple(records),
         )
     return out, unreadable
+
+
+def _with_superseded(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each record and every reading it superseded, however deep."""
+    out: list[dict[str, Any]] = []
+    for first in records:
+        record: Any = first
+        while isinstance(record, dict):
+            out.append(record)
+            superseded = record.get("supersedes")
+            record = superseded.get("record") if isinstance(superseded, dict) else None
+    return out
 
 
 OK = "ok"
