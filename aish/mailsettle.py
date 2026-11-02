@@ -117,7 +117,9 @@ def compose(ctx: mailitems.Context, item: mailitems.OpenItem,
     relation = {"his act": "the owner's own mail",
                 "same counterparty": "from the same party as the item, or a party in its "
                                      "conversation",
-                "third party": "from a third party with a history in the owner's cases"}
+                "third party": "from a third party with a history in the owner's cases",
+                "vouched sender": "from a sender the owner allowed to settle this kind of "
+                                  f"item ({candidate.meaning})"}
     data = {
         "item": {
             "matter": matter_words(ctx, item),

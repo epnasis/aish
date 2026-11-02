@@ -1011,7 +1011,25 @@ def _unweighed(rows: list[Any], clean: Clean) -> str:
            else safe(clean, header.from_addr or "(no address)", ADDRESS_CHARS))
     more = f" (+{len(rows) - 1} more)" if len(rows) > 1 else ""
     return (f" — later mail aish did not weigh: from {who} ({_when(header.at)}): "
-            f"{safe(clean, first.refused, 200)}{_ref(header.digest)}{more}")
+            f"{safe(clean, first.refused, 200)}{_ref(header.digest)}{more}"
+            f"{_vouch_chip(rows)}")
+
+
+def _vouch_chip(rows: list[Any]) -> str:
+    """The one-tap offer of his settler vouch (`mailvouch`), code-built from a
+    validated exact domain and a closed meaning — the report's third link
+    shape (`server.presented_report`). The tap sends the words; the grant is
+    still his card."""
+    from . import mailvouch
+
+    for row in rows:
+        if row.vouchable:
+            words = mailvouch.chip_text(*row.vouchable)
+            if words:
+                d, m = row.vouchable
+                return (f" — [let {safe(lambda t: t, d, 80)} settle {m} items]"
+                        f"(aish-reply://{words})")
+    return ""
 
 
 def _needs_line(item: Item, clean: Clean, account: str) -> str:
@@ -1113,7 +1131,9 @@ def _evidence(row: Item | FollowUp, clean: Clean) -> str:
     who = ("your own mail" if ev.tier == "his act"
            else f"mail from {safe(clean, ev.sender or '(no address)', ADDRESS_CHARS)}")
     tier = {"same counterparty": "the same party", "third party": "a third party with history",
-            "his act": "your own act"}.get(ev.tier, safe(clean, ev.tier, 40))
+            "his act": "your own act",
+            "vouched sender": "a sender you allowed to settle such items"}.get(
+        ev.tier, safe(clean, ev.tier, 40))
     money = _amounts(ev.amounts)
     return (f"{who} dated {when} ({tier}{'; ' + money if money else ''}), as aish's settlement "
             f"judge read it{_ref(ev.digest)}")

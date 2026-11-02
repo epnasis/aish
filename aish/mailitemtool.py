@@ -26,11 +26,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import mailitems, mailreport
+from . import mailitems, mailreport, mailvouch
 from .mailcasetool import _q, _safe
 
 LOOK_ACTIONS = ("list",)
-CHANGE_ACTIONS = mailitems.VERBS
+CHANGE_ACTIONS = (*mailitems.VERBS, *mailvouch.VERBS)
 ACTIONS = (*LOOK_ACTIONS, *CHANGE_ACTIONS)
 
 LIST_SHOWN = 40
@@ -105,9 +105,13 @@ def _state_words(state: mailitems.State) -> str:
 def list_text(state_dir: os.PathLike | str, now: float | None = None) -> str:
     ctx = _context(state_dir, clock() if now is None else now)
     rows = _rows(ctx)
+    vouched = sorted(ctx.vouched)
+    allowed = ("Senders you allowed to settle items: " + "; ".join(
+        f"{_safe(d, 80)} ({m})" for d, m in vouched)) if vouched else (
+        "Senders you allowed to settle items: none.")
     if not rows:
-        return "No items: nothing in the last report window asks or waits."
-    lines = [f"{len(rows)} item(s) — ref, kind, state, item:"]
+        return "No items: nothing in the last report window asks or waits.\n" + allowed
+    lines = [allowed, f"{len(rows)} item(s) — ref, kind, state, item:"]
     for row in rows[:LIST_SHOWN]:
         item = row.open_item
         state = ctx.state_of(item)
@@ -154,6 +158,8 @@ def plan(state_dir: os.PathLike | str, args: dict[str, Any], now: float | None =
     verb = str(args.get("action") or "")
     if verb not in CHANGE_ACTIONS:
         raise ItemError(f"action must be one of {', '.join(ACTIONS)}")
+    if verb in mailvouch.VERBS:
+        return _plan_vouch(state_dir, verb, args)
     ctx = _context(state_dir, clock() if now is None else now)
     rows = _matching(ctx, str(args.get("ref") or ""))
     anchor = rows[0].open_item.anchor
@@ -170,6 +176,32 @@ def plan(state_dir: os.PathLike | str, args: dict[str, Any], now: float | None =
                     "now on can still settle it. Nothing in your mailboxes is changed.")
     return Plan(verb, anchor, tuple(r.open_item.key for r in rows), sentence,
                 {"ref": anchor[:REF_CHARS]})
+
+
+def _plan_vouch(state_dir: os.PathLike | str, verb: str, args: dict[str, Any]) -> Plan:
+    """His settler vouch (`mailvouch`): the exact domain and the closed
+    meaning, validated; the card says what it grants and what it does not."""
+    try:
+        domain = mailvouch.domain(args.get("domain"))
+        meaning = mailvouch.meaning(args.get("meaning"))
+    except mailvouch.VouchError as exc:
+        raise ItemError(str(exc)) from exc
+    held = (domain, meaning) in mailvouch.current(state_dir)
+    if verb == mailvouch.VOUCH and held:
+        raise ItemError(f"mail from {domain} may already settle {meaning} items")
+    if verb == mailvouch.REVOKE and not held:
+        raise ItemError(f"mail from {domain} is not allowed to settle {meaning} items")
+    if verb == mailvouch.VOUCH:
+        sentence = (f"Allow mail from {domain} to settle {meaning} items in your inbox reports? "
+                    f"Only mail from exactly {domain} — not a subdomain or a lookalike — that "
+                    "is authenticated, read by aish, tied by code to the item, carries no "
+                    "caution and came after it; aish's settlement judge must still read it as "
+                    "settling the item, and a settled item only moves to “Probably settled”. "
+                    "It stays until you revoke it. Nothing in your mailboxes is changed.")
+    else:
+        sentence = (f"Stop letting mail from {domain} settle {meaning} items in your inbox "
+                    "reports. Items it settled before return to their sections.")
+    return Plan(verb, "", (), sentence, {"domain": domain, "meaning": meaning})
 
 
 @dataclass
@@ -189,6 +221,8 @@ def apply(
         if not held:
             return Applied(False, "NOT SAVED: another process held the item acts' lock; "
                                   "nothing changed. Do not say it is done.")
+        if planned.verb in mailvouch.VERBS:
+            return _apply_vouch(state_dir, planned, source=source, now=now)
         try:
             rows = _matching(_context(state_dir, now), planned.anchor)
         except ItemError as exc:
@@ -209,3 +243,23 @@ def apply(
     return Applied(True, f"{SAVED_WORDS} as {done}: {planned.sentence} It applies from the next "
                          "inbox report — you may now tell the owner it is "
                          f"{'done' if done == 'resolved' else 'kept open'}.", act)
+
+
+def _apply_vouch(state_dir: os.PathLike | str, planned: Plan, *, source: dict[str, Any],
+                 now: float) -> Applied:
+    """Called under the acts lock: re-check against the ledger as it is now."""
+    key = (planned.fields["domain"], planned.fields["meaning"])
+    held = key in mailvouch.current(state_dir)
+    if (planned.verb == mailvouch.VOUCH) == held:
+        return Applied(False, "NOT SAVED: that vouch changed since the card was shown; "
+                              "nothing changed. Do not say it is done.")
+    act = {"at": now, "verb": planned.verb, "domain": key[0], "meaning": key[1],
+           "text": planned.sentence, "by": "owner", "source": source}
+    try:
+        mailvouch.append_act(state_dir, act)
+    except OSError as exc:
+        return Applied(False, f"NOT SAVED: writing the vouch failed ({exc}); nothing changed. "
+                              "Do not say it is done.")
+    done = "vouched" if planned.verb == mailvouch.VOUCH else "revoked"
+    return Applied(True, f"{SAVED_WORDS} as {done}: {planned.sentence} It applies from the "
+                         "next watcher pass and inbox report.", act)

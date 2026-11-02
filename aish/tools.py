@@ -2024,14 +2024,18 @@ TOOL_SCHEMAS: list[dict] = [
                 "Items of the owner's inbox reports. list is free. resolve (a matter is done or "
                 "needs no reply) / restore (still open) ONLY when his own message asks; he "
                 "approves a card. Use the report's ref. Example: 'Catherine already paid' -> "
-                "resolve ref=3e2ea1e21b1b. NEVER say a matter is done unless this tool "
-                "answered SAVED."
+                "resolve ref=3e2ea1e21b1b; the report's 'vouch settler paczkomaty.pl delivery' "
+                "-> vouch domain=paczkomaty.pl meaning=delivery. NEVER say a matter is done "
+                "unless this tool answered SAVED."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "resolve", "restore"]},
+                    "action": {"type": "string",
+                               "enum": ["list", "resolve", "restore", "vouch", "revoke"]},
                     "ref": {"type": "string", "description": "the ref the report printed"},
+                    "domain": {"type": "string", "description": "vouch/revoke: exact domain"},
+                    "meaning": {"type": "string", "enum": ["delivery", "payment"]},
                 },
                 "required": ["action"],
             },

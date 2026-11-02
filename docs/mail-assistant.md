@@ -3,7 +3,7 @@
 `mailindex.py`, `mailgate.py`, `mailcases.py`, `mailreader.py`, `mailverdicts.py`,
 `mailwatch.py`, `mailsource.py`, `mailtuta.py`, `mailview.py`, `mailexport.py`,
 `mailbacktest.py`, `mailreport.py`, `mailcasetool.py`, `mailprefs.py`, `mailitems.py`,
-`mailsettle.py`, `mailitemtool.py`, `aish/charters/mail-reader.md`,
+`mailsettle.py`, `mailitemtool.py`, `mailvouch.py`, `aish/charters/mail-reader.md`,
 `aish/charters/item-settler.md`, `scripts/install-mailwatch-service.sh`,
 `scripts/install-mailreport-service.sh`.
 The binding design is the comment *"W5 REWRITTEN — the inbox assistant"* on epic #142
@@ -1336,6 +1336,39 @@ it comes, and nothing undoes that observation. The derivation re-tests at read t
 still stops being an ITEM once its original is indexed. The
 footer names each copy with both refs. `TestHisOwnCopy`.
 
+### The settler vouch — `mailvouch.py` (his word for a third party)
+
+**Why.** F4: InPost's *"your parcel from Uncico was picked up"* is a third party with no
+history in his case store (it is on no case he transacted on), so the tier rule refuses it — and
+must, since the history rule is what stops an authenticated stranger with a name in its text from
+settling items. Loosening it would be the local optimum. The missing fact is HIS: whether mail
+from that sender may speak for that kind of matter.
+
+- **The grant is his act, per EXACT domain and closed meaning.** `inbox_items` action=vouch /
+  revoke, the case verbs' law (a task he sent, a code-composed card, under the item acts' lock,
+  SAVED only after the write): *Allow mail from paczkomaty.pl to settle delivery items in your
+  inbox reports? Only mail from exactly paczkomaty.pl — not a subdomain or a lookalike — …*.
+  Every act is a line in `<state>/mail/settler-vouch-acts.jsonl`; the current set is the newest act
+  per (domain, meaning); permanent until revoked; listed by `inbox_items` list. Membership is an
+  exact string compare (the `vouches.py` law).
+- **Meanings are code's** (`mailvouch.MEANINGS`, decided per item by
+  `mailitems.Context.settle_meanings` from recorded facts): `delivery` — the later mail's text
+  names the item's counterparty (a display name, or its domain's label: the carrier saying whose
+  parcel it is); `payment` — one of the item's own mails carries a recorded money fact.
+- **What it grants is eligibility, nothing more**: a vouched (domain, meaning) is tier
+  `vouched sender`, an alternative to the third-party history rule, which is unchanged. The
+  candidate must still be authenticated, read, tied by code, free of any caution, later on both
+  clocks — and the settlement judge must still read it as settling the item, which then only
+  moves to *Probably settled*.
+- **Code offers it, never answers it.** A refused third party for which a meaning applies carries
+  `Candidate.vouchable`, and the item's *later mail aish did not weigh* line ends with a one-tap
+  chip `[let <domain> settle <meaning> items](aish-reply://vouch settler <domain> <meaning>)` —
+  the report's third link shape, built from a validated domain and a closed meaning
+  (`mailvouch.chip_text`) and the only extra shape `server._REPORT_FOREIGN_LINK` keeps. A tap
+  sends the words as his message; the grant is still his card.
+
+`TestTheGrant`, `TestTheOffer` and the vouch verbs' `TestTheVerbs` in `tests/test_mailvouch.py`.
+
 ### The settlement judge — `mailsettle.py`, `aish/charters/item-settler.md`
 
 A toolless role (kind `judge`, model class `caller`, degradation `skip`, the `settlement`
@@ -1763,9 +1796,10 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
   state, read-only) named a body digest the evidence store does not hold; why is not known here.
   A pair whose body is missing is never judged and is counted in the footer, so for those mails
   only the deterministic rule (his own reply) can settle anything.
-- **A third party with no case history can never settle an item.** Tier (c) reads the case store
-  only; a courier or payment provider that is on no case he transacted on (InPost on 2026-11-02:
-  on none) is named on the item as "not weighed", never judged.
+- **A third party with no case history settles an item only by his vouch.** Tier (c) reads the
+  case store only; a courier or payment provider on no case he transacted on (InPost on
+  2026-11-02: on none) is named on the item as "not weighed", with the vouch offered as a chip,
+  until he vouches for its exact domain and that kind of item (§The settler vouch).
 - **An item's anchor can move.** An older asking mail indexed later becomes the first asking mail,
   so a your-turn row's anchor (and with it his resolve) moves — the row shows again: the visible
   direction.

@@ -60,7 +60,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import atomic_write, mailcases, mailgate, mailindex, mailprefs, mailreader, mailreport
+from . import (
+    atomic_write,
+    mailcases,
+    mailgate,
+    mailindex,
+    mailprefs,
+    mailreader,
+    mailreport,
+    mailvouch,
+)
 
 NEEDS, YOURS, THEIRS = "needs", "yours", "theirs"
 KINDS = (NEEDS, YOURS, THEIRS)
@@ -340,6 +349,8 @@ class Candidate:
     refused: str = ""  # code's words for why it cannot settle the item
     body_missing: bool = False
     unread: bool = False  # inbound with no Reader reading: waits to be read, never judged
+    meaning: str = ""  # the vouched meaning that made a third party eligible
+    vouchable: tuple[str, str] | None = None  # (domain, meaning) his vouch would make eligible
 
 
 class Context:
@@ -367,6 +378,8 @@ class Context:
             read_judgements(state_dir) if state_dir is not None else ({}, 0))
         self.judged = judged
         self.copies = own_copies(self.index)
+        # His settler vouches: exact (domain, meaning) pairs (`mailvouch`).
+        self.vouched = mailvouch.current(state_dir)
         # His `important` preferences: entity + meaning, placing mail under Needs.
         self.important = (mailprefs.Store.load(state_dir).of(mailprefs.IMPORTANT)
                           if state_dir is not None else [])
@@ -499,6 +512,20 @@ class Context:
         if header is not None and mailreader.has_document(header.attachments):
             out.add("documents")
         return frozenset(out)
+
+    def settle_meanings(self, item: OpenItem, header: mailindex.Header) -> list[str]:
+        """Which `mailvouch.MEANINGS` a later mail could settle this item AS —
+        code over recorded facts only: `payment` when one of the item's own
+        mails carries a recorded money fact (`meanings`); `delivery` when the
+        later mail's text names the item's counterparty (a display name or its
+        domain's label: the carrier saying whose parcel it is)."""
+        out = []
+        if any("money" in self.meanings(d) for d in item.rests_on):
+            out.append("payment")
+        text = (self.text(header.digest) or header.subject or "").casefold()
+        if any(token in text for token in self.entity_tokens(item.counterparty)):
+            out.append("delivery")
+        return out
 
     def important_pref(self, reading: mailreport.Reading,
                        header: mailindex.Header | None) -> str:
@@ -779,6 +806,15 @@ class Context:
         if sender == item.counterparty or sender in he_wrote_to or domain in admitted:
             found.tier = "same counterparty"
             return found
+        # His vouch: this exact domain may settle this kind of item. An
+        # alternative grant by HIS act — the history rule below is unchanged.
+        meanings = self.settle_meanings(item, header)
+        allowed = [m for m in meanings if (domain, m) in self.vouched]
+        if allowed:
+            found.tier, found.meaning = "vouched sender", allowed[0]
+            return found
+        if meanings:
+            found.vouchable = (domain, meanings[0])
         if not {"case", "amount"} & set(ties):
             found.refused = ("a third party tied to it only by "
                              + ", ".join(t for t in ties) + " — not by a case or a stored amount")
