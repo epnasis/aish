@@ -165,6 +165,11 @@ class TestTheCountingChangedNoMatching:
                                          "paczk", "rezerwacj", "faktur", "rachun"],
         "aish/mailcases.py:_IDENTITY_MARKERS": ["numer", "nr", "no", "number", "nummer"],
         "aish/mailcases.py:_KEY_CONNECTORS": ["code", "kod", "id"],
+        # Round-4 note 6: Polish consonant alternation, a rule applied to every
+        # stem (never matched against text itself).
+        "aish/mailcases.py:_STEM_ALTERNATIONS": [("k", "c"), ("g", "dz"), ("ch", "sz"),
+                                                 ("r", "rz"), ("t", "ci"), ("d", "dzi"),
+                                                 ("ł", "l")],
     }
 
     @staticmethod

@@ -130,6 +130,25 @@ _KEY_STEMS = vocab.declare(
     "and without an identity marker a short all-digit token (a PIN) is no key.",
 )
 STEM_SUFFIX_MAX = 3
+# Polish declension alternates a stem's LAST consonant in the locative and
+# dative (paczka -> paczce, przesyłka -> przesyłce, faktura -> fakturze). One
+# rule table, applied by code to EVERY stem (`_stem_forms`), so a new stem gets
+# its alternations without anyone writing them: the method, not the word.
+_STEM_ALTERNATIONS = (("k", "c"), ("g", "dz"), ("ch", "sz"), ("r", "rz"), ("t", "ci"),
+                      ("d", "dzi"), ("ł", "l"))
+
+
+def _stem_forms(stems: tuple[str, ...]) -> dict[str, str]:
+    """Every form a stem may take before its bounded ending -> the stem."""
+    forms = {stem: stem for stem in stems}
+    for stem in stems:
+        for tail, alternate in _STEM_ALTERNATIONS:
+            if stem.endswith(tail):
+                forms.setdefault(stem[: -len(tail)] + alternate, stem)
+    return forms
+
+
+_STEM_FORMS = _stem_forms(tuple(_KEY_STEMS))
 
 _KEY_KINDS = {
     "order": ("order", "zamówienie", "zamowienie", "bestellung", "commande", "zamówieni",
@@ -177,7 +196,7 @@ _KEY_PATTERN = re.compile(
     # The leading \b: "border 12345" and "preorder X9123" are not orders.
     r"(?:\b(?P<pre>" + _alternation(_IDENTITY_MARKERS) + r")\s+)?"
     r"\b(?:(?P<word>" + "|".join(re.escape(w) for w in sorted(_KEY_WORDS, key=len, reverse=True))
-    + r")\w*|(?P<stem>" + "|".join(re.escape(w) for w in sorted(_KEY_STEMS, key=len,
+    + r")\w*|(?P<stem>" + "|".join(re.escape(w) for w in sorted(_STEM_FORMS, key=len,
                                                                  reverse=True))
     + r")\w{0," + str(STEM_SUFFIX_MAX) + r"}\b)"
     + r"\.?\s*(?P<post>" + _alternation((*_IDENTITY_MARKERS, *_KEY_CONNECTORS)) + r")?"
@@ -229,6 +248,7 @@ def extract_keys(text: str) -> dict[str, str]:
         if match.group("stem") and not _governed(match) and not _identifier_shaped(key):
             continue
         word = (match.group("word") or match.group("stem")).lower()
+        word = _STEM_FORMS.get(word, word)
         kind = next((k for k, words in _KEY_KINDS.items() if word in words), "reference")
         if match.group("stem"):
             by_stem = True

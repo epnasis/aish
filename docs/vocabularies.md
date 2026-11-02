@@ -639,3 +639,12 @@ entries, and a file absent at the global baseline gets its own (`FILE_BASES`): b
 `mailcases.py` whole and could not see a new list anywhere. Two existing new collections surfaced
 and are declared (`PAGE_READERS`, a record's `sandbox_meta` fields — neither a word list).
 `TestTheMarkersHaveOneAuthority`, `test_a_new_list_is_fenced_until_declared`.
+
+**Inflection is a rule, not more words** (round-4 note 6). Polish locatives and datives alternate a
+stem's last consonant — *paczka → w paczce*, *przesyłka → o przesyłce*, *faktura → w fakturze* —
+and none of those met the stems: the owner's DHL notices (*Powiadomienie o przesylce 29777837645*)
+connected to nothing. `_STEM_ALTERNATIONS` (k→c, g→dz, ch→sz, r→rz, t→ci, d→dzi, ł→l) is applied by
+code to EVERY stem (`_stem_forms`), so a stem added later gets its forms without anyone writing
+them; the bounded ending still keeps *paczkomat* out and dates stay refused. Measured on the frozen
+copy: one key gained, `29777837645` (tracking), now shared by the 4 DHL notices; none lost.
+`TestStemAlternationsAreARule`.

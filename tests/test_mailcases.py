@@ -367,3 +367,25 @@ class TestTheMarkersHaveOneAuthority:
         mailcases.extract_keys("odbioru paczki: 646235")
         tally = vocab.drain()["mailcases._IDENTITY_MARKERS"]
         assert tally["asked"] == 2 and tally["matched"] == 1
+
+
+class TestStemAlternationsAreARule:
+    """Round-4 note 6: the locative/dative alternate a stem's last consonant
+    (paczka -> paczce, przesyłka -> przesyłce, faktura -> fakturze). One rule
+    table applied to every stem; never a word written per form."""
+
+    def test_the_alternated_forms_introduce_keys(self):
+        assert mailcases.extract_keys("Powiadomienie o przesylce 29777837645") == {
+            "29777837645": "tracking"}
+        assert mailcases.extract_keys("w paczce nr 646235") == {"646235": "tracking"}
+        assert mailcases.extract_keys("w fakturze nr FV/2026/41") == {"FV/2026/41": "invoice"}
+
+    def test_every_stem_ending_in_an_alternating_consonant_gets_its_form(self):
+        for stem in mailcases._KEY_STEMS:
+            for tail, alternate in mailcases._STEM_ALTERNATIONS:
+                if stem.endswith(tail):
+                    assert mailcases._STEM_FORMS[stem[: -len(tail)] + alternate] == stem
+
+    def test_the_bounded_ending_and_the_date_rule_still_hold(self):
+        assert mailcases.extract_keys("Wybrany paczkomat: WAW45H") == {}
+        assert mailcases.extract_keys("w przesyłce z dnia 2026-10-10") == {}
