@@ -690,14 +690,9 @@ class CaseStore:
             if position in case.mails:
                 continue
             case.mails.append(position)
-            # A case's recorded facts — keys and their kinds, like the amounts,
-            # accounts and domains below — come only from his own or
-            # AUTHENTICATED mail. Unauthenticated mail is attached and shown,
-            # and characterises nothing (round-3 delivery review: it could
-            # plant an order key and make an item a delivery).
-            if header.direction == "out" or authenticated:
-                for key, kind in keys.items():
-                    case.keys.setdefault(key, {"kind": kind, "at": position})
+            # A case's recorded facts come only from his own or AUTHENTICATED
+            # mail (`_record_facts`, the one list and the one law).
+            self._record_facts(case, header, text, authenticated, keys)
             if header.direction == "out":
                 if case.created != position:
                     case.owner_acts.append(position)
@@ -718,31 +713,46 @@ class CaseStore:
                     {"at": position, "name": mailindex.display_name(header.from_value),
                      "via": INBOUND, "authenticated": bool(authenticated)},
                 )
-                if authenticated:
-                    domain = mailindex.domain_of(header.from_addr)
-                    case.domains.setdefault(domain, position)
-                    for currency, cents in extract_amounts(text):
-                        case.amounts.append({"currency": currency, "cents": cents, "at": position})
-                    for value in extract_coordinates(text):
-                        case.coordinates.append(
-                            {"value": value, "at": position, "domain": domain}
-                        )
             self._save(case)
         return Observation(keys, tuple(sorted(touched)), created, tuple(admitted))
 
     def record_authenticated(self, case: Case, header: mailindex.Header, body: str) -> bool:
-        """The facts `observe` records only for AUTHENTICATED inbound mail —
-        the sender's domain seen on the case, its amounts, its coordinates —
-        for a mail already on `case` that was observed unauthenticated and is
-        authenticated now (the Tuta recheck). Every fact at the mail's own
-        position; idempotent per fact; the domain's first sighting moves only
-        EARLIER, never later. True when anything changed (and was saved)."""
+        """The facts observation records only from TRUSTED mail — for a mail
+        already on `case` that was observed unauthenticated and is
+        authenticated now (the Tuta recheck): exactly `_record_facts`, keys
+        included, so the list of facts and the law have one authority. True
+        when anything changed (and was saved)."""
         if header.direction != "in" or header.position not in case.mails:
             return False
-        position = header.position
         text = f"{header.subject}\n{body}"
-        domain = mailindex.domain_of(header.from_addr)
+        changed = self._record_facts(case, header, text, True, extract_keys(text))
+        if changed:
+            self._save(case)
+        return changed
+
+    @staticmethod
+    def _record_facts(case: Case, header: mailindex.Header, text: str, authenticated: bool,
+                      keys: dict[str, str]) -> bool:
+        """THE facts a case records about one of its mails, and the one law
+        for them: written only from his own mail or AUTHENTICATED mail;
+        unauthenticated mail is attached and characterises nothing. Keys with
+        their kinds from either; the sender's domain, amounts and payment
+        accounts from authenticated INBOUND mail. Each at the mail's own
+        position, idempotent per fact; a first sighting moves only EARLIER.
+        True when anything changed."""
+        position = header.position
+        trusted = header.direction == "out" or authenticated
+        if not trusted:
+            return False
         changed = False
+        for key, kind in keys.items():
+            held = case.keys.get(key)
+            if held is None:
+                case.keys[key] = {"kind": kind, "at": position}
+                changed = True
+        if header.direction != "in":
+            return changed
+        domain = mailindex.domain_of(header.from_addr)
         if domain and (domain not in case.domains or position < case.domains[domain]):
             case.domains[domain] = position
             changed = True
@@ -750,14 +760,14 @@ class CaseStore:
         for currency, cents in extract_amounts(text):
             if (currency, cents) not in amounts:
                 case.amounts.append({"currency": currency, "cents": cents, "at": position})
+                amounts.add((currency, cents))
                 changed = True
         values = {c["value"] for c in case.coordinates if c["at"] == position}
         for value in extract_coordinates(text):
             if value not in values:
                 case.coordinates.append({"value": value, "at": position, "domain": domain})
+                values.add(value)
                 changed = True
-        if changed:
-            self._save(case)
         return changed
 
     def admit_toward(

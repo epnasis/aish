@@ -319,3 +319,32 @@ class TestInflectedKeys:
         tallies = vocab.drain()
         assert tallies["mailcases._KEY_STEMS"]["matched"] == 1
         assert tallies["mailcases._KEY_WORDS"]["matched"] == 1
+
+
+class TestTheRecheckRecordsKeysToo:
+    """Round-4 note 4: the Tuta recheck backfilled domains, amounts and
+    accounts but not keys. It now records exactly what observation records
+    from trusted mail (`CaseStore._record_facts`)."""
+
+    def test_a_mail_authenticated_later_gains_its_keys(self):
+        store = mailcases.CaseStore()
+        index = mailindex.MailIndex()
+        his = mailindex.from_gmail(gmail("o1", frm=OWNER, to="shop@store.example",
+                                         subject="Order AB12345", at=T0,
+                                         labels=("SENT",)), frozenset({OWNER}))
+        assert his is not None
+        index.add(his.header, his.body)
+        store.observe(his.header, his.body, True, index)
+        later = mailindex.from_gmail(gmail("i1", frm="shop@store.example",
+                                           subject="Order AB12345 — invoice FV99887",
+                                           body="Your order AB12345, invoice FV99887, 40,00 zł",
+                                           at=T0 + DAY, auth="fail"), frozenset({OWNER}))
+        assert later is not None
+        index.add(later.header, later.body)
+        store.observe(later.header, later.body, False, index)
+        (case,) = store.cases.values()
+        assert "FV99887" not in case.keys and case.amounts == []
+        assert store.record_authenticated(case, later.header, later.body)
+        assert case.keys["FV99887"]["at"] == later.header.position
+        assert case.amounts and case.amounts[0]["cents"] == 4000
+        assert not store.record_authenticated(case, later.header, later.body)  # idempotent

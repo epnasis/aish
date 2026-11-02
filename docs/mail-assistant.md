@@ -196,7 +196,10 @@ authenticated AND joined through a key a trusted mail recorded, a key he typed h
 reply to his mail on the case. `mailitems.Context.cases_of` is the one reader — the case tie, stored
 amounts, an item's meaning, admitted domains, his closed case covering an item and the keeper
 release (`Context.trusted_closure`) all go through it; `attached_cases_of` is for display only.
-`TestMembershipMustRestOnATrustedFact`.
+`TestMembershipMustRestOnATrustedFact`. **The list of facts has one writer**
+(`CaseStore._record_facts`, round-4 note 4): observation and the Tuta recheck
+(`record_authenticated`) both go through it, so a mail authenticated later gains its keys too, not
+only its domain, amounts and accounts. `TestTheRecheckRecordsKeysToo`.
 **A known weaker edge, stated:** a case's account history before it has an admitted sender is the
 whole AUTHENTICATED history (`coordinates_before`) — a stranger passing DMARC on its OWN domain
 can seed it; N1 removes the unauthenticated half of that, not this one (§Residuals).
