@@ -149,7 +149,8 @@ did with it, split by which header gated it — so the gate can be narrowed on e
   `CaseStore.owner_case_parties`). Before it, an authenticated stranger quoting his real order
   number earned the grade `known` and third-party history (round-3 review). A party recorded
   before provenance existed is resolved from his own outbound mail on the case when the index is
-  at hand. `TestJoiningACaseIsNotTrust` in `tests/test_mailitems.py`.
+  at hand (and a merge never turns a legacy record into "inbound": `TestLegacyParties`).
+`TestJoiningACaseIsNotTrust` in `tests/test_mailitems.py`.
 
 `established` needs `ESTABLISHED_MIN_ACTS` (2) acts on distinct days and the first at least
 `ESTABLISHED_MIN_AGE_DAYS` (30) days before. **Inbound volume is recorded and read by no line**
@@ -180,6 +181,18 @@ on its OWN domain can mail the order number with its own account first. So once 
 admitted sender, its account history is only what admitted senders sent (`coordinates_before`);
 before it has one, the whole authenticated history is all there is, and that is weaker.
 `TestCaseCreation`.
+
+**A case's recorded facts come only from his own or authenticated mail** (round-3 note N1).
+Keys and their kinds, amounts, payment accounts and authenticated domains are written onto a case
+by observation only from his outbound mail or an AUTHENTICATED inbound one; unauthenticated mail
+that quotes a case's key is still attached to it and shown, and characterises nothing. Before,
+keys alone were written from any mail, so a forged mail quoting a real order number plus
+*"zamówienie nr FAKE123"* could plant an order key and make an item a delivery. The readers apply
+the same law to facts recorded before it (`mailitems.Context._trusted_fact`: a key whose recording
+mail is not his own or authenticated characterises nothing). `TestCaseFactsComeOnlyFromTrustedMail`.
+**A known weaker edge, stated:** a case's account history before it has an admitted sender is the
+whole AUTHENTICATED history (`coordinates_before`) — a stranger passing DMARC on its OWN domain
+can seed it; N1 removes the unauthenticated half of that, not this one (§Residuals).
 
 **Alias admission is deterministic corroboration, and the corroboration is HIS.** A sender
 domain is admitted on a case when it was seen there in authenticated mail AND he then acted on

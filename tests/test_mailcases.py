@@ -270,7 +270,33 @@ class TestInflectedKeys:
             "98103010/2026": "order"}
         assert mailcases.extract_keys("Numer przesyłki: PX7687080605") == {
             "PX7687080605": "tracking"}
+        assert mailcases.extract_keys("Do faktury nr VQGEQB1M-0005") == {
+            "VQGEQB1M-0005": "invoice"}
+
+    def test_a_stem_introduces_a_key_only_under_an_identity_marker(self):
+        """Round-3 note N2: "Twój PIN do odbioru paczki: 646235" is a one-time
+        secret beside the noun, not the parcel's number: a short all-digit
+        token needs an identity marker; "kod" is never one."""
+        assert mailcases.extract_keys("Twój PIN do odbioru paczki: 646235") == {}
+        assert mailcases.extract_keys("przesyłki kod 778812") == {}
+        # Without a marker, an identifier-shaped token still stands.
         assert mailcases.extract_keys("Do faktury VQGEQB1M-0005") == {"VQGEQB1M-0005": "invoice"}
+        assert mailcases.extract_keys("fakturę do zamówienia 261509440") == {
+            "261509440": "order"}
+        assert mailcases.extract_keys("tymczasowej rezerwacji: XYO3K4") == {"XYO3K4": "booking"}
+        # Under a marker, a short number is the matter's number.
+        assert mailcases.extract_keys("zamówienia nr 66786") == {"66786": "order"}
+        assert mailcases.extract_keys("Nr przesyłki PX7687080605") == {
+            "PX7687080605": "tracking"}
+
+    def test_each_list_is_counted_by_what_it_matched(self):
+        from aish import vocab
+
+        vocab.drain()
+        mailcases.extract_keys("Order 77123 — numer paczki: 620999000111222333444555")
+        tallies = vocab.drain()
+        assert tallies["mailcases._KEY_WORDS"]["matched"] == 1
+        assert tallies["mailcases._KEY_STEMS"]["matched"] == 1
 
     def test_a_compound_beyond_the_bounded_ending_is_not_an_introducing_word(self):
         """`paczkomat WAW45H` names a locker shared by unrelated parcels."""

@@ -124,9 +124,10 @@ _KEY_STEMS = vocab.declare(
     demanded=False,
     structural="the whole-word list above, and the UPS `1Z` shape",
     note="A miss is a key in an inflected form not found (the before-picture: 0 of the "
-    "owner's InPost notices yielded their parcel number); a false match is a key that "
-    "opens or joins nothing without an authenticated or owner mail, and the bounded "
-    "ending keeps compounds like 'paczkomat' out.",
+    "owner's InPost notices yielded their parcel number). A false match is recorded on a "
+    "case only from his own or an authenticated mail — other mail may attach to a case by "
+    "it and characterises nothing; the bounded ending keeps compounds like 'paczkomat' out, "
+    "and without an identity marker a short all-digit token (a PIN) is no key.",
 )
 STEM_SUFFIX_MAX = 3
 
@@ -142,11 +143,12 @@ _KEY_KINDS = {
 
 _KEY_PATTERN = re.compile(
     # The leading \b: "border 12345" and "preorder X9123" are not orders.
+    r"(?:\b(?P<pre>numer|nr|no|number|nummer)\.?\s+)?"
     r"\b(?:(?P<word>" + "|".join(re.escape(w) for w in sorted(_KEY_WORDS, key=len, reverse=True))
     + r")\w*|(?P<stem>" + "|".join(re.escape(w) for w in sorted(_KEY_STEMS, key=len,
                                                                  reverse=True))
     + r")\w{0," + str(STEM_SUFFIX_MAX) + r"}\b)"
-    + r"\.?\s*(?:no\.?|nr\.?|number|numer|code|kod|id)?\s*[:#]?\s*"
+    + r"\.?\s*(?P<post>no\.?|nr\.?|number|numer|code|kod|id)?\s*[:#]?\s*"
     r"(?P<key>[A-Z0-9][A-Z0-9/-]{3,29})\b",
     re.I,
 )
@@ -186,21 +188,58 @@ def extract_keys(text: str) -> dict[str, str]:
     """{normalized key: kind}. A key must carry a digit — `order confirmed`
     has no reference in it."""
     out: dict[str, str] = {}
-    by_stem = False
+    by_word = by_stem = False
     for match in _KEY_PATTERN.finditer(text or ""):
         key = match.group("key").upper().strip("-/")
         if not any(ch.isdigit() for ch in key) or len(key) < 4 or _DATE_SHAPED.fullmatch(key):
             continue
+        if match.group("stem") and not _governed(match) and not _identifier_shaped(key):
+            continue
         word = (match.group("word") or match.group("stem")).lower()
         kind = next((k for k, words in _KEY_KINDS.items() if word in words), "reference")
-        if key not in out and match.group("stem"):
+        if match.group("stem"):
             by_stem = True
+        else:
+            by_word = True
         out.setdefault(key, kind)
     for match in _UPS.finditer(text or ""):
         out.setdefault(match.group(0).upper(), "tracking")
-    vocab.note("mailcases._KEY_WORDS", matched=bool(out) and not by_stem)
+    # Each list counted by what IT matched: a mail can hit both.
+    vocab.note("mailcases._KEY_WORDS", matched=by_word)
     vocab.note("mailcases._KEY_STEMS", matched=by_stem)
     return out
+
+
+#: The markers that say a token IDENTIFIES the matter ("Numer paczki: …",
+#: "zamówienia nr …"). Under one of them a stem-introduced token is a key in
+#: any key shape; without one it must be identifier-shaped
+#: (`_identifier_shaped`). "code"/"kod" are not markers — "kod odbioru" names a
+#: one-time secret, not the parcel.
+_IDENTITY_MARKERS = frozenset({"numer", "nr", "no", "number", "nummer"})
+
+
+#: An all-digit token shorter than this, with no identity marker, has the
+#: shape of a one-time code or PIN (4-6 digits), not of a matter's reference.
+UNGOVERNED_DIGITS_MIN = 7
+
+
+def _identifier_shaped(key: str) -> bool:
+    """Does the token carry the shape of a REFERENCE on its own — letters and
+    digits mixed ("XYO3K4", "PX7694845874"), or a long number ("261509440")?
+    A short all-digit token is the shape of a one-time code ("646235"). Used
+    only where no identity marker says what the token is. Structural."""
+    letters = any(c.isalpha() for c in key)
+    digits = sum(c.isdigit() for c in key)
+    return (letters and digits > 0) or digits >= UNGOVERNED_DIGITS_MIN
+
+
+def _governed(match: re.Match) -> bool:
+    """Is a stem-introduced token directly governed by an identity marker,
+    before the stem or right after it? The genitive forms the stems exist for
+    are exactly the ones a marker governs ("numer paczki"); without one the
+    inflected noun only stands near a token ("PIN do odbioru paczki: 646235")."""
+    marks = (match.group("pre"), match.group("post"))
+    return any(m and m.rstrip(".").lower() in _IDENTITY_MARKERS for m in marks)
 
 
 def _cents(number: str) -> int | None:
@@ -482,6 +521,12 @@ def _absorb(into: Case, other: Case) -> None:
         if marks:
             kept["addressed"] = min(tuple(p) for p in marks)
             kept["via"] = OWNER_ADDRESSED
+        elif held is not None and ("via" not in info or "via" not in held):
+            # One side predates provenance: keep it UNKNOWN (derivable from his
+            # own mail on the case), never "inbound" — a merge must not strip
+            # the standing the legacy record could still prove.
+            kept.pop("via", None)
+            kept.pop("authenticated", None)
     for domain, seen in other.domains.items():
         into.domains[domain] = min(seen, into.domains.get(domain, seen))
     for domain, info in other.admitted.items():
@@ -645,8 +690,14 @@ class CaseStore:
             if position in case.mails:
                 continue
             case.mails.append(position)
-            for key, kind in keys.items():
-                case.keys.setdefault(key, {"kind": kind, "at": position})
+            # A case's recorded facts — keys and their kinds, like the amounts,
+            # accounts and domains below — come only from his own or
+            # AUTHENTICATED mail. Unauthenticated mail is attached and shown,
+            # and characterises nothing (round-3 delivery review: it could
+            # plant an order key and make an item a delivery).
+            if header.direction == "out" or authenticated:
+                for key, kind in keys.items():
+                    case.keys.setdefault(key, {"kind": kind, "at": position})
             if header.direction == "out":
                 if case.created != position:
                     case.owner_acts.append(position)

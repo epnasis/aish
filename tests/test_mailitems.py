@@ -567,3 +567,75 @@ class TestJoiningACaseIsNotTrust:
         item = next(i for i in context.derive().items() if i.anchor == ask.digest)
         for candidate in context.candidates(item):
             assert candidate.tier == ""
+
+
+class TestCaseFactsComeOnlyFromTrustedMail:
+    """Round-3 note N1: observation recorded keys from ANY touched mail, so an
+    unauthenticated mail quoting an existing key could plant an order key and
+    make an item a delivery. A case's recorded facts come only from his own or
+    authenticated mail; other mail is attached and characterises nothing."""
+
+    def test_an_unauthenticated_mail_plants_no_key(self, tmp_path):
+        his = his_sent(tmp_path, "o1", to="shop@store.example", at=NOW - 6 * DAY,
+                       subject="Re: Broken parcel locker, order AB77310")
+        store = mailcases.CaseStore(tmp_path)
+        index = mailindex.MailIndex(tmp_path)
+        store.observe(index.get(his.digest), index.body(his.digest) or "", True, index)
+        (case,) = store.cases.values()
+        before = dict(case.keys)
+        forged = unauthenticated(tmp_path, "x1", frm="shop@store.example",
+                                 subject="AB77310 — zamówienie nr FAKE123", at=NOW - 5 * DAY,
+                                 body="Your order AB77310, zamówienie nr FAKE123.")
+        index = mailindex.MailIndex(tmp_path)
+        store.observe(index.get(forged.digest), index.body(forged.digest) or "", False, index)
+        case = mailcases.CaseStore(tmp_path).cases[case.id]
+        assert forged.position in case.mails  # attached, shown
+        assert case.keys == before and "FAKE123" not in case.keys
+
+    def test_a_key_planted_before_the_law_makes_no_item_a_delivery(self, tmp_path):
+        his = his_sent(tmp_path, "o1", to="shop@store.example", at=NOW - 6 * DAY,
+                       subject="Re: Broken parcel locker")
+        forged = unauthenticated(tmp_path, "x1", frm="shop@store.example",
+                                 subject="zamówienie nr FAKE123", at=NOW - 7 * DAY)
+        store = mailcases.CaseStore(tmp_path)
+        case = mailcases.Case(id="case-legacy00001", created=his.position, created_by="owner",
+                              mails=[forged.position, his.position],
+                              keys={"FAKE123": {"kind": "order", "at": forged.position}})
+        store.cases[case.id] = case
+        store._save(case)
+        (item,) = [i for i in ctx(tmp_path).derive().items() if i.kind == mailitems.THEIRS]
+        assert ctx(tmp_path).settle_meanings(item) == []
+        case.keys["AB77310"] = {"kind": "order", "at": his.position}
+        store._save(case)
+        assert ctx(tmp_path).settle_meanings(item) == ["delivery"]
+
+
+class TestLegacyParties:
+    """Round-3 note N4: a party recorded before provenance existed."""
+
+    def legacy_case(self, state):
+        his = his_sent(state, "o1", to="shop@store.example", at=NOW - 9 * DAY,
+                       subject="Order AB10001")
+        case = mailcases.Case(id="case-legacy00002", created=his.position, created_by="owner",
+                              mails=[his.position],
+                              parties={"shop@store.example": {"at": his.position, "name": ""}})
+        return his, case
+
+    def test_standing_is_derived_from_his_outbound_mail_when_the_index_is_at_hand(
+        self, tmp_path
+    ):
+        his, case = self.legacy_case(tmp_path)
+        index = mailindex.MailIndex(tmp_path)
+        assert case.addressed_at("shop@store.example", index) == his.position
+        assert case.addressed_at("shop@store.example") is None  # never assumed
+
+    def test_a_merge_with_an_inbound_record_keeps_the_legacy_standing(self, tmp_path):
+        his, legacy = self.legacy_case(tmp_path)
+        inbound = mailcases.Case(
+            id="case-inbound0003", created=(his.position[0] - 3600, "z"), created_by="inbound",
+            mails=[], parties={"shop@store.example": {
+                "at": (his.position[0] - 3600, "z"), "name": "", "via": "inbound",
+                "authenticated": True}})
+        mailcases._absorb(legacy, inbound)
+        index = mailindex.MailIndex(tmp_path)
+        assert legacy.addressed_at("shop@store.example", index) == his.position

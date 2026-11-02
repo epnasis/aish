@@ -600,13 +600,28 @@ NEW list, so `_KEY_WORDS` itself did not change, and they take a BOUNDED ending 
 3 letters): `paczk` finds *paczki*, *paczkę*, *paczkami* but never *paczkomat*, whose locker id
 would otherwise read as a tracking key shared by unrelated parcels. Measured on the same copy:
 
-| | mails with a key | distinct keys | kinds |
+| | mails with a key | distinct keys | kinds — (mail, key) occurrences |
 |---|---|---|---|
 | before | 74 | 51 | order 44, booking 20, invoice 18 |
-| after | 147 | 90 | order 71, tracking 46, booking 23, invoice 19 |
+| after the stems | 147 | 90 | order 71, tracking 46, booking 23, invoice 19 |
+| after the identity rule (below) | 145 | 89 | order 71, tracking 44, booking 23, invoice 19 |
 
 Of the stem matches, three were calendar dates (*Data zamówienia: 2026-10-10*); a key shaped like
 a date is now refused for every introducing word (`_DATE_SHAPED`, structural) — it removed none of
 the whole-word list's keys. The owner's phone number on the InPost notices (*Numer telefonu*) is no
-key and on no case. `mailcases.py` joined `TestTheCountingChangedNoMatching.FILES`, so a later
+key and on no case.
+
+**What makes a stem's token the matter's identifier, not a one-time secret** (round-3 note N2:
+*Twój PIN do odbioru paczki: 646235* had become a tracking key). Not a word added to a list: a
+stem-introduced token is a key when an IDENTITY MARKER governs it — *numer / nr / no / number*
+right before the stem (*Numer paczki: …*) or right after it (*zamówienia nr …*); without one, it
+must be identifier-shaped on its own (`_identifier_shaped`): letters and digits mixed (*XYO3K4*,
+*PX7694845874*) or at least `UNGOVERNED_DIGITS_MIN` (7) digits (*261509440*). A short all-digit
+token with no marker is the shape of a one-time code or PIN. *kod / code* are never markers: they
+name a secret. A marker-only rule was measured first and lost four real references (*fakturę do
+zamówienia 261509440*, *tymczasowej rezerwacji: XYO3K4*, *Przesyłka o numerze PX7694845874*, an
+order id) — the shape half keeps them. Measured on a fresh copy of the live index (1,149 mails):
+the rule lost exactly ONE key, `646235` (the PIN), and gained none; the InPost tracking number
+still extracts from all three notices. **Each list is counted by what IT matched** — a mail with
+a whole-word key and a stem key counts a match for both (N3). `TestInflectedKeys`. `mailcases.py` joined `TestTheCountingChangedNoMatching.FILES`, so a later
 change to either list is fenced. `TestInflectedKeys` in `tests/test_mailcases.py`.

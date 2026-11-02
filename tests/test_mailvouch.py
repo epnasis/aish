@@ -168,7 +168,7 @@ class TestTheOffer:
         assert chip in line
         assert chip in server.presented_report("Head\n" + line)
 
-    def test_the_server_reads_the_meanings_from_their_one_authority(self, monkeypatch):
+    def test_the_server_reads_the_meanings_from_their_one_authority(self):
         for meaning in mailvouch.MEANINGS:
             chip = f"[a](aish-reply://vouch settler x.example {meaning})"
             assert chip in server.presented_report("Head\n" + chip)

@@ -534,11 +534,25 @@ class Context:
         out = []
         if any("money" in self.meanings(d) for d in item.rests_on):
             out.append("payment")
-        if any(info.get("kind") in DELIVERY_KEY_KINDS
+        if any(info.get("kind") in DELIVERY_KEY_KINDS and self._trusted_fact(info)
                for d in item.rests_on for case in self.cases_of(d)
                for info in case.keys.values()):
             out.append("delivery")
         return out
+
+    def _trusted_fact(self, info: dict[str, Any]) -> bool:
+        """Was this recorded case fact written by his own or AUTHENTICATED
+        mail? Read-side twin of `CaseStore.observe`'s write law, for facts
+        recorded before that law (a key whose mail is gone or unauthenticated
+        characterises nothing). A key he typed himself (`create`) is his."""
+        at = info.get("at")
+        if info.get("kind") == mailcases.OWNER_KEY:
+            return True
+        header = self.index.get(str(at[1])) if isinstance(at, (list, tuple)) and len(at) > 1 \
+            else None
+        if header is None:
+            return False
+        return header.direction == "out" or mailgate.authenticate_header(header).authenticated
 
     def important_pref(self, reading: mailreport.Reading,
                        header: mailindex.Header | None) -> str:
@@ -834,8 +848,8 @@ class Context:
             return found
         history = self.history(domain, header)
         if history < THIRD_PARTY_MIN_CASES:
-            found.refused = (f"a third party on {history} case(s) you transacted on, first seen "
-                             f"{THIRD_PARTY_MIN_AGE_DAYS}+ days before — "
+            found.refused = (f"a third party you dealt with (addressed, or admitted) on "
+                             f"{history} of your cases {THIRD_PARTY_MIN_AGE_DAYS}+ days before — "
                              f"{THIRD_PARTY_MIN_CASES} needed")
             return found
         found.tier = "third party"
