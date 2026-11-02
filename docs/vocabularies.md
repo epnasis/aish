@@ -658,7 +658,7 @@ no ungoverned stem key appears in his mail, so it would have changed nothing mea
 phones only;
 (b) a key needs a second mail or a marker — it would have LOST seven real references carried by one
 mail each (`10021306947-01`, `10021579307-01`, `10021925290-01`/`-02`, `261509440`, `348010369`,
-`G10102653771`, `PX7694845874`);
+*G10102653771*, `PX7694845874`);
 (c) **chosen**: a mail the report already classifies as a one-time code or sign-in link
 (`mailreport.is_one_time_code`, over the Reader's kind and the subject) contributes no keys
 (`mailcases.mail_keys` — the one function every caller now uses: observation, the recheck, the
