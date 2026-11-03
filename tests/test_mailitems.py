@@ -667,7 +667,7 @@ class TestMembershipMustRestOnATrustedFact:
     def test_a_planted_key_ties_no_authenticated_strangers_mail(self, tmp_path):
         _his, stranger, case = self.planted(tmp_path)
         context = ctx(tmp_path)
-        assert [c.id for c in context.attached_cases_of(stranger.digest)] == [case.id]
+        assert stranger.position in mailcases.CaseStore(tmp_path).cases[case.id].mails  # attached
         assert context.cases_of(stranger.digest) == []  # display-only
         (item,) = [i for i in context.derive().items() if i.kind == mailitems.THEIRS]
         assert "case" not in context.ties(item, stranger)

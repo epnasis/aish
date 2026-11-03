@@ -194,9 +194,13 @@ mail is not his own or authenticated characterises nothing). `TestCaseFactsComeO
 it is a MEMBER for anything that grants or decides visibility only when it is his own mail, or
 authenticated AND joined through a key a trusted mail recorded, a key he typed himself, or a direct
 reply to his mail on the case. `mailitems.Context.cases_of` is the one reader — the case tie, stored
-amounts, an item's meaning, admitted domains, his closed case covering an item and the keeper
-release (`Context.trusted_closure`) all go through it; `attached_cases_of` is for display only.
-`TestMembershipMustRestOnATrustedFact`. **The list of facts has one writer**
+amounts, an item's meaning, admitted domains and his closed case covering an item go through it,
+and so does the keeper release on EVERY surface: the report, `/mail` and the CSV all read
+`mailitems.trusted_closure` (round-5 review: `/mail` and the CSV read the raw store closure and
+said *RELEASED* where the report did not). `Closure.releases` also requires the mail to be a
+member of a case NOW, so the case ids a pre-law record wrote (`mail_cases`, raw membership)
+release nothing on their own. `TestMembershipMustRestOnATrustedFact`, `TestTheThreeSurfacesAgree`
+(`tests/test_mailcase_verbs.py`). **The list of facts has one writer**
 (`CaseStore._record_facts`, round-4 note 4): observation and the Tuta recheck
 (`record_authenticated`) both go through it, so a mail authenticated later gains its keys too, not
 only its domain, amounts and accounts. `TestTheRecheckRecordsKeysToo`.

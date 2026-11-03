@@ -497,10 +497,6 @@ class Context:
                 if header is not None and self._trusted_member(case, header)]
         return self._trusted_cases[digest]
 
-    def attached_cases_of(self, digest: str) -> list[mailcases.Case]:
-        """Every case the mail is attached to, trusted or not — for DISPLAY only."""
-        return self._cases_of.get(digest, [])
-
     def _trusted_member(self, case: mailcases.Case, header: mailindex.Header) -> bool:
         if header.direction == "out":
             return True
@@ -1149,3 +1145,9 @@ def near_duplicates(items: list[mailreport.Item], first_read: Callable[[str], fl
             siblings[keep.reading.digest] = siblings.pop(twin.reading.digest, [])
         siblings.setdefault(keep.reading.digest, []).append(drop.reading.digest)
     return kept, siblings
+
+
+def trusted_closure(state_dir: os.PathLike | str, now: float | None = None) -> mailcases.Closure:
+    """His closures with TRUSTED membership (`Context.trusted_closure`) — the
+    one closure every surface reads: the report, `/mail` and the CSV."""
+    return Context(state_dir, now=time.time() if now is None else now).trusted_closure()

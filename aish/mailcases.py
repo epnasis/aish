@@ -562,9 +562,15 @@ class Closure:
         them was closed at or after aish first read the mail (`read_at`, aish's
         own clock). A mail that arrives on a case after he closed it stays
         held: his close was about the mail he had seen."""
-        cases = set(recorded_cases) | set(self.members.get(digest, ()))
-        return bool(cases) and all(
-            c in self.closed_at and read_at <= self.closed_at[c] for c in cases)
+        members = set(self.members.get(digest, ()))
+        if not members:
+            # The mail must be a MEMBER of a case now (with a trusted closure,
+            # `mailitems.trusted_closure`, a trusted one): recorded case ids
+            # alone — a record's raw membership, written before the trust law —
+            # release nothing (round-5 review).
+            return False
+        cases = set(recorded_cases) | members
+        return all(c in self.closed_at and read_at <= self.closed_at[c] for c in cases)
 
 
 def _absorb(into: Case, other: Case) -> None:
