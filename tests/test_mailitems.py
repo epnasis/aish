@@ -874,3 +874,23 @@ class TestTheEntityTieCountsWhatTheSharedDomainWithholds:
         _his, later, context, item = self.setup(tmp_path, "shop.example", 0)
         assert "entity" in context.ties(item, later)
         assert context.entity_withheld_shared == set()
+
+    def test_one_mail_withheld_against_several_items_counts_once(self, tmp_path):
+        """Round-8 N1: the footer says "later mail(s)", so it counts MAILS —
+        one mail weighed against two of his items is one."""
+        from test_mailreport import fresh_health, identity
+
+        for n in range(mailindex.ENTITY_DOMAIN_MAX_SENDERS):
+            add_mail(tmp_path, f"f{n}", frm=f"user{n}@gmail.example", subject="hi",
+                     at=NOW - 40 * DAY + n)
+        his_sent(tmp_path, "o1", to="friend@gmail.example", at=NOW - 10 * DAY, subject="Sofa")
+        his_sent(tmp_path, "o2", to="pal@gmail.example", at=NOW - 10 * DAY + 60,
+                 subject="Lamp")
+        later = add_mail(tmp_path, "k1", frm="other@gmail.example", subject="Hello",
+                         at=NOW - DAY, body="Hello there")
+        add_verdict(tmp_path, later, recorded_at=NOW - DAY)
+        fresh_health(tmp_path)
+        report = mailreport.build(tmp_path, now=NOW, clean=identity)
+        assert report.entity_withheld_shared == 1
+        assert ("1 later mail(s) from the counterparty's domain not tied by it"
+                in mailreport.render(report, clean=identity))

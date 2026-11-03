@@ -266,9 +266,10 @@ grant; moving his act off the case takes its admission away, and a legacy `admit
 case file is ignored (`TestAdmissionsAreDerivedNeverStored`). This retires the round-7 residual:
 no standing decision reads the global address count any more (`MailIndex.names_one_party` stays
 only for the tier rule's `entity` tie, which grants no tier, and the trust chip's offer gate —
-both restrict-only, and each counted, never silent: the report's settlement footer counts later
-mail from an item counterparty's domain that the tie did NOT tie because the domain names no
-single party (`Context.entity_withheld_shared`,
+both restrict-only, and each counted, never silent: the report's settlement footer counts the
+distinct later MAILS from an item counterparty's domain that the tie did NOT tie because the
+domain names no single party — one mail weighed against several items is one (round-8 N1; the
+first build counted (item, mail) pairs under words that say mails) (`Context.entity_withheld_shared`,
 `TestTheEntityTieCountsWhatTheSharedDomainWithholds`), and its footer counts the trust offers the
 gate held back (§The trust chip)).
 **What reads it:** the sender-not-admitted flag is exact (`case_flags`: an inbound sender whose
@@ -319,16 +320,32 @@ address outside it gets no chip. **Offered only where the domain names one party
 provider no chip is ever offered, and the footer counts the senders it held back; the only path
 there is his explicit command through the case tool. **Once per (case, address)**: an offer a
 DELIVERED report showed is recorded in that report's ledger line (`trust_offers`) and never
-offered again; a dry run records nothing. Open, undismissed cases only; at most
+offered again — keyed by the case it IS now (`offered_keys` resolves each recorded case id
+through his merges), so a merge, which carries the withheld record to the surviving case, does
+not re-offer it (`TestAMergeDoesNotReOffer`); a dry run records nothing. Open, undismissed cases only; at most
 `TRUST_OFFERS_SHOWN` (3) per report, whole lines, never cut by the size cap. **The server keeps
 exactly this link shape** (`server._REPORT_FOREIGN_LINK`, its fourth): the address grammar and
 the case-id shape come from their one authority in `mailcases`, never a second literal.
 
 **The tap is his message; the trust is his card.** The chip sends *trust sender X on case C*;
-the model proposes `cases` `trust` (case, address); the card's one sentence is code's —
-*Trust X on case "…" (n mails) — their authenticated mail can then settle this case's items, and
-is no longer flagged as a sender you have not dealt with here. Only this case, only this address;
-there is no undo verb for a trust.* Applied, it is recorded on the case (`Case.trusted`: `at`,
+the model proposes `cases` `trust` (case, address); the card's one sentence is code's and states
+the trust's REAL reach — *Trust X on case "…" (n mails) — their authenticated mail can then settle
+this case's items and is no longer flagged as a sender you have not dealt with here, and X counts
+as someone you have dealt with: their mail anywhere is graded as known, not first contact.
+Untrust takes it back.* The reach is not a case-scoped one, and the card does not pretend it is:
+an admitted address is someone he dealt with on the case (`Case.dealt_with_at`), which is a
+`case` act in the relationship ledger (`CaseStore.owner_case_parties`), and the ledger grades
+every mail that address sends. Fencing the grade to the case was rejected: the `case` act is the
+same law for an address he WROTE to on a case, and a second, narrower kind of dealing for trust
+alone would make the ledger answer two questions with one word. Pinned by the test that proves
+the words: before the trust a later mail from it grades `first-contact`, after it `known` (`how`
+`case`), after untrust `first-contact` again (`test_the_trust_card_names_its_real_reach_and_it_is_true`).
+**Untrust** (`cases` `untrust`, case and address): his revocation — the trust leaves the case's
+record, the act stays in the ledger as `verb: untrust`, and `Case.admissions` re-derives; refused
+for an address not trusted there. The report offers it as `[untrust](aish-reply://untrust sender
+X on case C)` beside every trust he made since the last report (the continuity window), the same
+grammar and the same link fence (`mailcases.CHIP_VERBS`); the case tool's `show` lists his trusts.
+Applied, it is recorded on the case (`Case.trusted`: `at`,
 `address`, `mail` — the offering mail from the case's own withheld record, never the model's
 words) and in the acts ledger (`case-acts.jsonl`: `verb: trust`, `case`, `address`, `mail`).
 `Case.admissions` reads it on every read. A chip naming a case he merged since lands on the case
@@ -1211,8 +1228,8 @@ unchanged) and `restore`, `note`, `remind` (a due date and text, stored, shown b
 since the preferences slice — listed in the daily report's Follow-ups from its due date for 7 days
 while the case is open; nothing else notifies him), `create` (a title and optional keys he gives; mail carrying such a
 key joins the case wherever it says it — `OWNER_KEY`, `_says_key` — and opens nothing), and
-`trust` (one exact address admitted on one case by his act — §The trust chip). There is no delete
-verb.
+`trust` / `untrust` (one exact address admitted on one case by his act, and his revocation of it
+— §The trust chip). There is no delete verb.
 
 - **Provenance — refused, no card, unless a person sent the task.** `Agent.task_from_owner` is set
   by the server before EVERY task from `_run_task`'s `owner_sent` (typed, a chip tapped, Retry),

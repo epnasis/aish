@@ -533,6 +533,9 @@ class TestTheVerdictsKindReachesTheKeys:
                            charter=charter, chat=reader, now=lambda: T0 + DAY)
         (record,) = list(mailverdicts.iter_store(tmp_path))
         assert record["verdict"]["kind"] == "verification code"
+        # Round-8 N4: fields changed meaning, so the record says which version.
+        assert record["v"] == mailverdicts.RECORD_VERSION == 2
+        assert record["gate"]["grade"]["withheld"] == []
         assert not record.get("keeper_clamped")  # no case_key signal from a code's key
         # The recheck reads the same kind back from the store.
         assert mailwatch.recorded_kind(mailverdicts.VerdictStore(tmp_path),

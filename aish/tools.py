@@ -1960,7 +1960,8 @@ TOOL_SCHEMAS: list[dict] = [
                     "action": {
                         "type": "string",
                         "enum": ["list", "show", "close", "reopen", "merge", "move", "rename",
-                                 "dismiss", "restore", "note", "remind", "create", "trust"],
+                                 "dismiss", "restore", "note", "remind", "create", "trust",
+                                 "untrust"],
                         "description": "dismiss = not a case (hidden, undone by restore).",
                     },
                     "case": {"type": "string", "description": "A case id from list."},

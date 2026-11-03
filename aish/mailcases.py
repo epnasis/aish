@@ -75,11 +75,13 @@ OWNER_KEY = "yours"
 # The owner's verbs (`CaseStore.act`). Each is HIS act: nothing in the
 # pipeline calls one, and the agent offers them only through a card in a task
 # he sent (`docs/mail-assistant.md` §The case verbs).
-CLOSE, REOPEN, MERGE, MOVE, RENAME, DISMISS, RESTORE, NOTE, REMIND, CREATE, TRUST = (
+CLOSE, REOPEN, MERGE, MOVE, RENAME, DISMISS, RESTORE, NOTE, REMIND, CREATE = (
     "close", "reopen", "merge", "move", "rename", "dismiss", "restore", "note", "remind",
-    "create", "trust",
+    "create",
 )
-VERBS = (CLOSE, REOPEN, MERGE, MOVE, RENAME, DISMISS, RESTORE, NOTE, REMIND, CREATE, TRUST)
+TRUST, UNTRUST = "trust", "untrust"
+VERBS = (CLOSE, REOPEN, MERGE, MOVE, RENAME, DISMISS, RESTORE, NOTE, REMIND, CREATE, TRUST,
+         UNTRUST)
 
 #: The address grammar of the trust verb — the ONE authority, read by the
 #: verb's check, the report's chip and the server's link fence
@@ -103,16 +105,21 @@ def trust_address(value: Any) -> str:
     return address
 
 
-def trust_chip_text(address: str, case_id: str) -> str:
-    """The words the report's trust chip sends — code-built from a validated
-    address and a case id, or "" when either is not."""
+#: The chip verbs and their words' shape — one authority with the server's
+#: link fence (`server._REPORT_FOREIGN_LINK`).
+CHIP_VERBS = (TRUST, UNTRUST)
+
+
+def trust_chip_text(address: str, case_id: str, verb: str = TRUST) -> str:
+    """The words the report's trust (or untrust) chip sends — code-built from
+    a validated address and a case id, or "" when either is not."""
     try:
         address = trust_address(address)
     except ValueError:
         return ""
-    if not re.fullmatch(CASE_ID_PATTERN, case_id or ""):
+    if verb not in CHIP_VERBS or not re.fullmatch(CASE_ID_PATTERN, case_id or ""):
         return ""
-    return f"trust sender {address} on case {case_id}"
+    return f"{verb} sender {address} on case {case_id}"
 
 CASE_TITLE_CHARS = 80
 CASE_NOTE_CHARS = 400
@@ -1026,6 +1033,13 @@ class CaseStore:
             mail = str(fields.get("mail") or "")
             if mail and not re.fullmatch(_DIGEST_PATTERN, mail):
                 return "the trust's mail must be a mail id"
+        if verb == UNTRUST:
+            try:
+                address = trust_address(fields.get("address"))
+            except ValueError as exc:
+                return str(exc)
+            if not any(str(t.get("address")) == address for t in case.trusted):
+                return f"{address} is not trusted on case {case.id}"
         return ""
 
     def act(self, verb: str, fields: dict[str, Any], *, by: str, now: float) -> dict[str, Any]:
@@ -1070,6 +1084,12 @@ class CaseStore:
                 mail = str(fields.get("mail") or "")
                 case.trusted.append({"at": now, "address": address, "mail": mail})
                 record.update(address=address, mail=mail)
+            elif verb == UNTRUST:
+                # His revocation: the trust leaves the case's record, the act
+                # stays in the ledger, and `Case.admissions` re-derives.
+                address = trust_address(fields["address"])
+                case.trusted = [t for t in case.trusted if str(t.get("address")) != address]
+                record.update(address=address)
             elif verb == RENAME:
                 record["from"] = case.title
                 case.title = str(fields["title"]).strip()[:CASE_TITLE_CHARS]

@@ -210,6 +210,10 @@ def show_text(state_dir: os.PathLike | str, store: mailcases.CaseStore, case_id:
         lines.append("Parties: " + ", ".join(
             f"{_safe(info.get('name'), NAME_CHARS)} <{who}>" if info.get("name") else who
             for info, who in shown))
+    if case.trusted:
+        lines.append("Trusted by you on it: " + ", ".join(
+            f"{_safe(t.get('address'), ADDRESS_CHARS)} ({_day(float(t.get('at') or 0))})"
+            for t in case.trusted))
     admitted = case.admissions(mailindex.MailIndex(state_dir))
     if admitted:
         lines.append("Senders admitted on it (by your acts toward them): "
@@ -303,9 +307,9 @@ def plan(state_dir: os.PathLike | str, args: dict[str, Any]) -> Plan:
         fields = {"title": title, "keys": _new_keys(args.get("keys"))}
     else:
         fields["case"] = str(args.get("case") or "").strip()
-        if verb == mailcases.TRUST:
-            # A chip may name a case he merged since: trust lands on the case
-            # it became.
+        if verb in mailcases.CHIP_VERBS:
+            # A chip may name a case he merged since: it lands on the case it
+            # became.
             live = store.resolve(fields["case"])
             if live is not None:
                 fields["case"] = live.id
@@ -327,6 +331,11 @@ def plan(state_dir: os.PathLike | str, args: dict[str, Any]) -> Plan:
             fields["into"] = str(args.get("into") or "").strip()
         if verb == mailcases.MOVE and case is not None:
             fields["mail"] = _resolve_mail(case, str(args.get("mail") or ""))
+        if verb == mailcases.UNTRUST:
+            try:
+                fields["address"] = mailcases.trust_address(args.get("address"))
+            except ValueError as exc:
+                raise CaseError(str(exc)) from exc
         if verb == mailcases.TRUST:
             try:
                 fields["address"] = mailcases.trust_address(args.get("address"))
@@ -367,10 +376,20 @@ def _sentence(state_dir: os.PathLike | str, store: mailcases.CaseStore, verb: st
     if verb == mailcases.RENAME:
         return f"Rename case {name} to {_q(fields['title'])}."
     if verb == mailcases.TRUST:
+        # Its real reach, stated: a trusted address is someone he dealt with on
+        # the case (`Case.dealt_with_at`), which is a `case` act in the
+        # relationship ledger, read for every mail it sends.
         return (f"Trust {_safe(fields['address'], ADDRESS_CHARS)} on case {name} "
-                f"({_n(case)}) — their authenticated mail can then settle this case's items, "
-                "and is no longer flagged as a sender you have not dealt with here. Only this "
-                "case, only this address; there is no undo verb for a trust.")
+                f"({_n(case)}) — their authenticated mail can then settle this case's items "
+                "and is no longer flagged as a sender you have not dealt with here, and "
+                f"{_safe(fields['address'], ADDRESS_CHARS)} counts as someone you have dealt "
+                "with: their mail anywhere is graded as known, not first contact. Untrust "
+                "takes it back.")
+    if verb == mailcases.UNTRUST:
+        return (f"Stop trusting {_safe(fields['address'], ADDRESS_CHARS)} on case {name} "
+                f"({_n(case)}) — their mail settles this case's items and counts as someone "
+                "you have dealt with only if you wrote to them there; otherwise it is flagged "
+                "again as a sender you have not dealt with here.")
     if verb == mailcases.NOTE:
         return f"Add a note to case {name}: {_q(fields['text'], NOTE_SHOWN)}."
     if verb == mailcases.REMIND:

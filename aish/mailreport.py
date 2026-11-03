@@ -397,6 +397,35 @@ class TrustOffer:
         return f"{self.case_id}|{self.address}"
 
 
+def offered_keys(store: mailcases.CaseStore, ledger: list[dict[str, Any]]) -> frozenset[str]:
+    """Every (case, address) a delivered report offered, keyed by the case it
+    IS now (`CaseStore.resolve`): a merge never re-offers."""
+    out = set()
+    for line in ledger:
+        if line.get("status") not in SHOWN_STATUSES:
+            continue
+        for key in line.get("trust_offers") or ():
+            if not isinstance(key, str) or "|" not in key:
+                continue
+            case_id, address = key.split("|", 1)
+            live = store.resolve(case_id)
+            out.add(f"{live.id if live is not None else case_id}|{address}")
+    return frozenset(out)
+
+
+def recent_trusts(store: mailcases.CaseStore, since: float) -> list[TrustOffer]:
+    """His trusts made since `since` and still in force — each shown with an
+    undo chip."""
+    out = []
+    for case in sorted(store.cases.values(), key=lambda c: c.id):
+        for act in case.trusted:
+            if float(act.get("at") or 0) >= since:
+                out.append(TrustOffer(case.id, case.display_title(),
+                                      str(act.get("address") or ""), (),
+                                      str(act.get("mail") or "")))
+    return out
+
+
 def trust_offers(store: mailcases.CaseStore, index: mailindex.MailIndex,
                  offered: frozenset[str]) -> tuple[list[TrustOffer], int]:
     """The trust chips to offer, and how many the shared-provider gate held
@@ -475,6 +504,8 @@ class Report:
     trust_offers: list[TrustOffer] = field(default_factory=list)
     trust_drawn: int = -1
     trust_withheld_shared: int = 0
+    # His trusts since the last report, each offered an undo chip.
+    recent_trusts: list[TrustOffer] = field(default_factory=list)
     # Later mail the entity tie did not tie by domain, the domain being one
     # many people use (`Context.entity_withheld_shared`).
     entity_withheld_shared: int = 0
@@ -819,9 +850,7 @@ def build(
     # The ONE derivation the watcher's settlement pass uses too.
     derived = ctx.derive(needs_since=min(floor, now - FOLLOWUP_WINDOW_DAYS * 86400))
     report.late_closed = derived.closed_by_late_reading
-    offered = frozenset(
-        k for line in read_ledger(state_dir) if line.get("status") in SHOWN_STATUSES
-        for k in line.get("trust_offers") or () if isinstance(k, str))
+    offered = offered_keys(store, read_ledger(state_dir))
     report.trust_offers, report.trust_withheld_shared = trust_offers(store, index, offered)
     needs_by = {i.reading.digest: i for i in derived.needs}
     # A needs item he RESTORED stays in front of him after it was shown once:
@@ -903,6 +932,7 @@ def build(
     report.since_acts_from = (since if since_from != "first report"
                               else now - FIRST_RUN_DAYS * 86400)
     report.since_acts = acts_since(state_dir, report.since_acts_from)
+    report.recent_trusts = recent_trusts(store, report.since_acts_from)
     return report
 
 
@@ -964,7 +994,9 @@ def _candidates(ctx: Any, report: Report, digest: str, rows: list[Any]) -> None:
                                                            digest))
                 if judged is None or judged.get("ending") not in mailsettle.FINAL_ENDINGS:
                     report.unjudged += 1
-    report.entity_withheld_shared = len(ctx.entity_withheld_shared)
+    # Distinct MAILS — the footer says "later mail(s)"; one mail withheld
+    # against several items is one mail.
+    report.entity_withheld_shared = len({d for _key, d in ctx.entity_withheld_shared})
 
 
 def acts_since(state_dir: os.PathLike | str, since: float) -> dict[str, int]:
@@ -1290,11 +1322,18 @@ def _trust_section(report: Report, clean: Clean) -> str:
     """The trust chips — code-built from a validated address and a case id,
     the report's fourth link shape (`server.presented_report`). Whole lines,
     never cut by the size cap; the tap sends the words, the trust is his card."""
-    if not report.trust_offers:
+    undo = [o for o in report.recent_trusts
+            if mailcases.trust_chip_text(o.address, o.case_id, mailcases.UNTRUST)]
+    if not report.trust_offers and not undo:
         report.trust_drawn = 0
         return ""
     lines = ["", f"## Senders on your cases you have not written to "
-                 f"({len(report.trust_offers)})", TRUST_NOTE]
+                 f"({len(report.trust_offers)})"] + ([TRUST_NOTE] if report.trust_offers else [])
+    for offer in undo[:TRUST_OFFERS_SHOWN]:
+        words = mailcases.trust_chip_text(offer.address, offer.case_id, mailcases.UNTRUST)
+        lines.append(f"- you trusted {safe(clean, offer.address, ADDRESS_CHARS)} on case "
+                     f"“{safe(clean, offer.title, 80)}” since the last report — "
+                     f"[untrust](aish-reply://{words})")
     shown = report.trust_offers[:TRUST_OFFERS_SHOWN]
     for offer in shown:
         words = mailcases.trust_chip_text(offer.address, offer.case_id)

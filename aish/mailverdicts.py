@@ -29,7 +29,11 @@ from . import atomic_write, mailcases, mailindex, mailreader, roles, vocab
 
 VERDICTS_DIRNAME = "verdicts"
 RECORD_KIND = "mail_verdict"
-RECORD_VERSION = 1
+# 2 (2026-11-03, round 8): `observation.admitted` entries are "case:address"
+# (were "case:domain"); `gate.grade.how` no longer has `replied` (a reply
+# addressed to the sender is `wrote`); `gate.grade.withheld` added. A reader of
+# those fields keys on `v` (docs/trace-contract.md §3.20).
+RECORD_VERSION = 2
 FINAL_ENDINGS = frozenset({roles.Status.OK, roles.Status.INVALID, mailreader.GATED})
 # The assessment itself raised. Recorded rather than lost, NOT final (the next
 # pass tries again), and its `why` names the exception — what was observed,

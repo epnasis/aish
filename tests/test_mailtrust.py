@@ -10,7 +10,7 @@ from mail_fixtures import DAY, OWNER, T0, gmail
 from test_mailcases import build, header, store_order
 from test_mailreport import fresh_health, identity
 
-from aish import mailcases, mailcasetool, mailindex, mailreport, server
+from aish import mailcases, mailcasetool, mailgate, mailindex, mailreport, server
 
 NOW = T0 + 5 * DAY
 
@@ -144,3 +144,85 @@ class TestTheTap:
         fields = {"case": case.id, "address": "billing@lampshop.example"}
         store.act(mailcases.TRUST, fields, by="owner", now=NOW)
         assert "already trusted" in store.check(mailcases.TRUST, fields)
+
+
+class TestUntrust:
+    """Round-8 N2: his trust has an undo — `cases untrust`, a revocation in the
+    acts ledger; admissions re-derive."""
+
+    def trusted(self, state):
+        index, store = build(store_order(), reply(), billing(), state_dir=state)
+        (case,) = store.cases.values()
+        store.act(mailcases.TRUST, {"case": case.id, "address": "billing@lampshop.example"},
+                  by="owner", now=NOW)
+        return case.id
+
+    def test_untrust_takes_it_back_and_both_acts_stay_in_the_ledger(self, tmp_path):
+        case_id = self.trusted(tmp_path)
+        planned = mailcasetool.plan(tmp_path, {"action": "untrust", "case": case_id,
+                                               "address": "billing@lampshop.example"})
+        assert "Stop trusting billing@lampshop.example" in planned.sentence
+        assert mailcasetool.apply(tmp_path, planned, by="owner", now=NOW + 1).ok
+        case = mailcases.CaseStore(tmp_path).cases[case_id]
+        assert case.trusted == []
+        assert "billing@lampshop.example" not in case.admissions(mailindex.MailIndex(tmp_path))
+        verbs = [a["verb"] for a in mailcases.read_acts(tmp_path)
+                 if a.get("address") == "billing@lampshop.example"]
+        assert verbs == [mailcases.TRUST, mailcases.UNTRUST]
+        assert "is not trusted" in mailcases.CaseStore(tmp_path).check(
+            mailcases.UNTRUST, {"case": case_id, "address": "billing@lampshop.example"})
+
+    def test_the_report_offers_undo_next_to_a_recent_trust(self, tmp_path):
+        case_id = self.trusted(tmp_path)
+        _report, text = report_text(tmp_path)
+        words = f"untrust sender billing@lampshop.example on case {case_id}"
+        assert f"[untrust](aish-reply://{words})" in text
+        assert f"(aish-reply://{words})" in server.presented_report(text)
+
+    def test_the_trust_card_names_its_real_reach_and_it_is_true(self, tmp_path):
+        """Round-8 N3: a trusted address counts as someone he dealt with — a
+        `case` act in the ledger, read for its mail anywhere."""
+        index, store = build(store_order(), reply(), billing(), state_dir=tmp_path)
+        (case,) = store.cases.values()
+        planned = mailcasetool.plan(tmp_path, {"action": "trust", "case": case.id,
+                                               "address": "billing@lampshop.example"})
+        assert "their mail anywhere is graded as known" in planned.sentence
+        assert "no undo" not in planned.sentence
+        later = gmail("b2", frm="billing@lampshop.example", subject="Another thing",
+                      body="Hello.", at=NOW + DAY)
+
+        def grade_of_later(state):
+            idx = mailindex.MailIndex(state)
+            parsed = mailindex.from_gmail(later, frozenset({OWNER}))
+            idx.add(parsed.header, parsed.body)
+            head = idx.get(parsed.header.digest)
+            st = mailcases.CaseStore(state)
+            return mailgate.grade(idx, head, mailgate.authenticate_header(head),
+                                  st.owner_case_parties(head.position, idx))
+
+        assert grade_of_later(tmp_path).grade == mailgate.FIRST_CONTACT
+        mailcasetool.apply(tmp_path, planned, by="owner", now=NOW)
+        trusted = grade_of_later(tmp_path)
+        assert trusted.grade == mailgate.KNOWN and trusted.how == ("case",)
+        store = mailcases.CaseStore(tmp_path)
+        store.act(mailcases.UNTRUST, {"case": case.id, "address": "billing@lampshop.example"},
+                  by="owner", now=NOW + 2)
+        assert grade_of_later(tmp_path).grade == mailgate.FIRST_CONTACT
+
+
+class TestAMergeDoesNotReOffer:
+    def test_an_offer_made_before_a_merge_is_not_made_again_after_it(self, tmp_path):
+        """Round-8 N5: offers are keyed by the case they ARE now."""
+        index, store = build(store_order(), reply(), billing(), state_dir=tmp_path)
+        (case,) = store.cases.values()
+        report, _text = report_text(tmp_path)
+        assert report.trust_offer_keys() == [f"{case.id}|billing@lampshop.example"]
+        mailreport.append_ledger(tmp_path, {"at": NOW, "status": mailreport.DELIVERED,
+                                            "digests": [],
+                                            "trust_offers": report.trust_offer_keys()})
+        other = store.act(mailcases.CREATE, {"title": "Lamp", "keys": []}, by="owner",
+                          now=NOW + 1)["case"]
+        store.act(mailcases.MERGE, {"case": case.id, "into": other}, by="owner", now=NOW + 2)
+        assert "billing@lampshop.example" in mailcases.CaseStore(tmp_path).cases[other].withheld
+        again, text = report_text(tmp_path)
+        assert again.trust_offers == [] and "aish-reply://trust" not in text

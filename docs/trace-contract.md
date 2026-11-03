@@ -1067,7 +1067,7 @@ Written by `Agent._inbox_items` through `_emit_record` for every resolve, restor
 
 **Where it is written, and where it is not.** In S1 the record lives ONLY in the verdict store, `<state>/mail/verdicts/<dd>/<mail digest>.json` under `by_model`, and in a backtest run's own copy of that store. **No session log carries one, and nothing reads one to act.** The kind is in `RENDERLESS_STEPS` so that the slice which first carries a verdict into a session (S2, as a tainted outside-content note) cannot open an empty live card or replay as a row; until then that registration is a guard, not a description of a live emitter.
 
-**Change discipline.** `v` is the record version (`RECORD_VERSION`); a field added keeps `v`, a field whose meaning changes bumps it, and a reader keys on `v` rather than guessing from shape.
+**Change discipline.** `v` is the record version (`RECORD_VERSION`); a field added keeps `v`, a field whose meaning changes bumps it, and a reader keys on `v` rather than guessing from shape. **`v: 2` since 2026-11-03 (round 8):** `observation.admitted` entries are `case:address` (were `case:domain`), `gate.grade.how` no longer carries `replied` (a reply addressed to the sender is `wrote`), and `gate.grade.withheld` was added. No code reads those three fields today (`mailview` reads `gate.grade.grade`, unchanged); a reader of them keys on `v`.
 
 ```json
 {"kind": "mail_verdict", "v": 1,

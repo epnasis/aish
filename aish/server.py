@@ -486,7 +486,8 @@ _REPORT_FOREIGN_LINK = re.compile(
     + "(?:" + "|".join(re.escape(m) for m in mailvouch.MEANINGS) + r")\)"
     # The fourth: the trust chip (`mailreport._trust_section`) — its address
     # grammar and case-id shape from their one authority (`mailcases`).
-    + r"|aish-reply://trust sender " + mailcases.TRUST_ADDRESS_PATTERN
+    + r"|aish-reply://(?:" + "|".join(mailcases.CHIP_VERBS) + r") sender "
+    + mailcases.TRUST_ADDRESS_PATTERN
     + r" on case " + mailcases.CASE_ID_PATTERN + r"\))"
 )
 
