@@ -238,6 +238,15 @@ class TestEachKindsEffect:
         assert "ask about the deposit" in rendered and "weekly check" in rendered
         assert "chase the landlord" in rendered and "three days ahead" not in rendered
 
+    def test_an_unanswered_reminder_counts_his_bcc_as_writing(self, tmp_path):
+        """Round-7 note 5: his Bcc to the party is his mail to it."""
+        fresh_health(tmp_path)
+        add_mail(tmp_path, "o1", frm=OWNER, to="agent@else.example", bcc="landlord@x.example",
+                 subject="Deposit", sent=True, at=NOW - 9 * DAY)
+        save(tmp_path, kind="remind", counterparty="landlord@x.example", no_answer_days=7,
+             note="chase the landlord")
+        assert "chase the landlord" in text(build(tmp_path))
+
     def test_a_case_reminder_ends_when_the_case_closes(self, tmp_path):
         fresh_health(tmp_path)
         store = mailcases.CaseStore(tmp_path)

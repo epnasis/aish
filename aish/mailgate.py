@@ -427,6 +427,10 @@ class Grade:
     inbound: int = 0  # RECORDED; no line below reads it
     authenticated: bool = False
     how: tuple[str, ...] = field(default=())  # which act kinds were seen
+    # Act kinds his mail aimed at a SIBLING address would have earned at domain
+    # level (`mailindex.AIM_SIBLING`): his reply to this sender's mail went to
+    # another address at its domain. Observable, never counted.
+    withheld: tuple[str, ...] = field(default=())
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -437,6 +441,7 @@ class Grade:
             "inbound": self.inbound,
             "authenticated": self.authenticated,
             "how": list(self.how),
+            "withheld": list(self.withheld),
         }
 
 
@@ -445,12 +450,15 @@ def owner_acts(
     address: str,
     as_of: tuple[float, str],
     owner_case_parties: dict[str, list[float]] | None = None,
+    withheld: list[tuple[float, str]] | None = None,
 ) -> list[tuple[float, str]]:
     """Every owner act toward `address` at or before `as_of`, as (at, kind).
 
-    `wrote`: an outbound message addressed to it. `replied`: an outbound
-    reply to a message from it, addressed to its domain (`mailindex.aimed_at`).
-    `case`: a case he opened that includes it (from the case store, as of).
+    `wrote`: an outbound message addressed to it — the address itself among
+    its To/Cc/Bcc (`mailindex.aimed_at`). A reply is an act toward the sender
+    only when it is addressed to it, which makes it a `wrote`: replying is not
+    a kind of its own (round-8 B1). `case`: a case he opened that includes it
+    (from the case store, as of).
     Gmail labels are deliberately not acts: a label carries no timestamp, so
     reading one would let a March grade see an April star.
     """
@@ -459,32 +467,29 @@ def owner_acts(
     for header in index.before(as_of):
         if header.direction != "out":
             continue
-        if address in header.correspondents:
+        why = mailindex.aim(header, address)
+        if why == mailindex.AIM_ADDRESS:
             acts.append((header.at, "wrote"))
-            continue
-        # A reply counts only when its OWN In-Reply-To names a message that
-        # came from this address. Membership of the same conversation is not
-        # enough: a hostile mail can put an owner thread's Message-IDs in its
-        # References and join that conversation, and his earlier replies there
-        # must not become acts toward it. And it must be ADDRESSED to the
-        # sender's domain (`mailindex.aimed_at`): a forward of its mail to
-        # someone else is not an act toward it.
-        if not mailindex.aimed_at(header, address):
-            continue
-        for parent_id in header.in_reply_to:
-            parent = index.reply_parent(parent_id, header.position)
-            if (
-                parent is not None
-                and parent.direction == "in"
-                and parent.from_addr == address
-                and parent.position < header.position
-            ):
-                acts.append((header.at, "replied"))
-                break
+        elif (why == mailindex.AIM_SIBLING and withheld is not None
+              and _replies_to(index, header, address)):
+            # His reply to this sender's mail, sent to another address at its
+            # domain: recorded, never an act toward it. In-Reply-To alone is
+            # never an act either — a forward names the mail it forwards.
+            withheld.append((header.at, "replied"))
     for at in (owner_case_parties or {}).get(address, ()):
         if at <= as_of[0]:
             acts.append((at, "case"))
     return sorted(acts)
+
+
+def _replies_to(index: mailindex.MailIndex, header: mailindex.Header, address: str) -> bool:
+    """His mail's OWN In-Reply-To names an earlier inbound mail from `address`."""
+    for parent_id in header.in_reply_to:
+        parent = index.reply_parent(parent_id, header.position)
+        if (parent is not None and parent.direction == "in" and parent.from_addr == address
+                and parent.position < header.position):
+            return True
+    return False
 
 
 def grade(
@@ -499,7 +504,8 @@ def grade(
     inbound = sum(
         1 for h in index.before(as_of) if h.direction == "in" and h.from_addr == address
     )
-    acts = owner_acts(index, address, as_of, owner_case_parties)
+    withheld: list[tuple[float, str]] = []
+    acts = owner_acts(index, address, as_of, owner_case_parties, withheld)
     days = sorted({int(at // 86400) for at, _kind in acts})
     first = acts[0][0] if acts else None
     age = (header.at - first) / 86400 if first is not None else None
@@ -516,4 +522,5 @@ def grade(
         level = ESTABLISHED
     else:
         level = KNOWN
-    return Grade(level, len(days), first, age, inbound, auth.authenticated, how)
+    return Grade(level, len(days), first, age, inbound, auth.authenticated, how,
+                 tuple(sorted({kind for _at, kind in withheld})))

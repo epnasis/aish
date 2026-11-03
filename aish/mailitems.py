@@ -88,11 +88,6 @@ NEAR_DUPLICATE_S = 600
 
 #: At most this many later mails are weighed against one item, newest first.
 CANDIDATES_PER_ITEM = 3
-#: A domain names an entity (its first label, and "the same domain") only when
-#: fewer than this many distinct addresses at it appear in any header of his
-#: mail — a shared provider's ("gmail") names nobody. Structural, not a list of
-#: providers; the number is a CHOICE.
-ENTITY_DOMAIN_MAX_SENDERS = 5
 ENTITY_TOKEN_MIN = 4
 #: The tier rule's third-party history: the sender's domain seen on at least
 #: this many distinct cases he transacted on, first seen this long before the
@@ -144,7 +139,9 @@ class Evidence:
     cases: tuple[str, ...] = ()  # a closed case's ids
     amounts: tuple[tuple[str, int], ...] = ()  # STORED amounts on the evidence mail
     sender: str = ""  # the evidence mail's From address (his own, for his mail)
-    to: tuple[str, ...] = ()  # whom his evidence mail was addressed to
+    # Whom his evidence mail was addressed to, AS SHOWN to a model
+    # (`mailindex.shown_party`): a Bcc-only recipient is `BCC_RECIPIENT`.
+    to: tuple[str, ...] = ()
     when: float = 0.0  # the evidence mail's own time, for display (logic reads first_read)
 
     @classmethod
@@ -152,7 +149,8 @@ class Evidence:
         return cls(header.digest, tier,
                    amounts=tuple(sorted(ctx.stored_amounts(header.digest))),
                    sender=header.from_addr,
-                   to=header.correspondents if header.direction == "out" else (),
+                   to=tuple(dict.fromkeys(mailindex.shown_party(a, (header,))
+                                          for a in header.addressed)),
                    when=header.at or ctx.first_read(header.digest))
 
 
@@ -395,19 +393,14 @@ class Context:
         self._keys: dict[str, frozenset[str]] = {}
         self._text: dict[str, str | None] = {}
         self._entity: dict[str, frozenset[str]] = {}
+        # (item key, later mail) pairs whose same-domain tie the shared-provider
+        # count withheld (`MailIndex.names_one_party`) — counted, never silent.
+        self.entity_withheld_shared: set[tuple[str, str]] = set()
         self._cases_of: dict[str, list[mailcases.Case]] = {}
         self._trusted_cases: dict[str, list[mailcases.Case]] = {}
         for case in self.store.cases.values():
             for _at, digest in case.mails:
                 self._cases_of.setdefault(digest, []).append(case)
-        # Every address seen at each domain, in any header of any mail: a
-        # domain many people use (a mail provider, his family's) names nobody.
-        seen: dict[str, set[str]] = {}
-        for h in self.index.by_digest.values():
-            for address in (h.from_addr, *h.to, *h.cc):
-                if address:
-                    seen.setdefault(mailindex.domain_of(address), set()).add(address)
-        self._domain_senders = {d: len(a) for d, a in seen.items()}
         self._passed: dict[str, float] = {}
         for reading in self.readings.values():
             header = self.index.get(reading.digest)
@@ -541,7 +534,7 @@ class Context:
     def entity_tokens(self, party: str) -> frozenset[str]:
         """Names the counterparty goes by: the display names it mailed him
         under, and its domain's first label when that domain is not a shared
-        provider's (fewer than `ENTITY_DOMAIN_MAX_SENDERS` addresses at it)."""
+        provider's (`MailIndex.names_one_party`)."""
         if party not in self._entity:
             names: set[str] = set()
             for h in self.index.by_digest.values():
@@ -550,7 +543,7 @@ class Context:
                     if len(name) >= ENTITY_TOKEN_MIN:
                         names.add(name)
             domain = mailindex.domain_of(party)
-            if domain and self._domain_senders.get(domain, 0) < ENTITY_DOMAIN_MAX_SENDERS:
+            if domain and self.index.names_one_party(domain):
                 label = domain.split(".")[-2] if domain.count(".") >= 1 else domain
                 if len(label) >= ENTITY_TOKEN_MIN:
                     names.add(label.casefold())
@@ -752,7 +745,7 @@ class Context:
         return None
 
     def _aimed(self, item: OpenItem, header: mailindex.Header, own: set[str]) -> bool:
-        if item.counterparty in header.correspondents:
+        if item.counterparty in header.addressed:
             return True
         for mid in header.in_reply_to:
             parent = self.index.reply_parent(mid, header.position)
@@ -828,9 +821,11 @@ class Context:
             ties.append("amount")
         if "counterparty" not in ties:
             domain = mailindex.domain_of(item.counterparty)
-            same_domain = (header.direction == "in" and domain
-                           and mailindex.domain_of(header.from_addr) == domain
-                           and self._domain_senders.get(domain, 0) < ENTITY_DOMAIN_MAX_SENDERS)
+            at_domain = (header.direction == "in" and bool(domain)
+                         and mailindex.domain_of(header.from_addr) == domain)
+            same_domain = at_domain and self.index.names_one_party(domain)
+            if at_domain and not same_domain:
+                self.entity_withheld_shared.add((item.key, header.digest))
             text = (self.text(header.digest) or header.subject).casefold()
             if same_domain or any(t in text for t in self.entity_tokens(item.counterparty)):
                 ties.append("entity")
@@ -884,9 +879,9 @@ class Context:
         he_wrote_to = {
             c for d in item.conversation
             if (h := self.index.get(d)) is not None and h.direction == "out"
-            for c in h.correspondents}
-        admitted = {d for c in self.cases_of(item.anchor) for d in c.admitted}
-        if sender == item.counterparty or sender in he_wrote_to or domain in admitted:
+            for c in h.addressed}
+        admitted = {a for c in self.cases_of(item.anchor) for a in c.admissions(self.index)}
+        if sender == item.counterparty or sender in he_wrote_to or sender in admitted:
             found.tier = "same counterparty"
             return found
         # His vouch: this exact domain may settle this kind of item. An
@@ -922,11 +917,10 @@ class Context:
         for case in self.store.cases.values():
             if not case.transacted_before(header.position):
                 continue
-            admitted = case.admitted_before(header.position)
             seen = [when[0] for a in case.parties if mailindex.domain_of(a) == domain
-                    if (when := case.dealt_with_at(a, admitted, self.index)) is not None]
-            if domain in admitted:
-                seen.append(case.admitted[domain]["at"][0])
+                    if (when := case.dealt_with_at(a, self.index, header.position)) is not None]
+            seen += [tuple(v["at"])[0] for a, v in case.admissions(self.index).items()
+                     if mailindex.domain_of(a) == domain and tuple(v["at"]) < header.position]
             if seen and min(seen) <= limit:
                 count += 1
         return count
@@ -1020,9 +1014,9 @@ def follow_ups(ctx: Context) -> tuple[list[mailreport.FollowUp], list[mailreport
             continue
         outs = [h for h in conversation if h.direction == "out"]
         members = frozenset(h.digest for h in conversation)
-        parties = sorted({c for h in outs for c in h.correspondents} - mine - listy - {""})
+        parties = sorted({c for h in outs for c in h.addressed} - mine - listy - {""})
         for party in parties:
-            his = [h for h in outs if party in h.correspondents][-1]
+            his = [h for h in outs if party in h.addressed][-1]
             answers = [h for h in conversation
                        if h.direction == "in" and h.from_addr == party
                        and h.digest not in ctx.copies

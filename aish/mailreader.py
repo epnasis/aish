@@ -325,7 +325,9 @@ def compose(
         entry: dict[str, Any] = {"ref": ref, "why": list(cand.reasons)}
         if case is not None:
             entry["keys"] = sorted(case.keys_before(as_of))[:8]
-            entry["admitted_senders"] = sorted(case.admitted_before(as_of))
+            # The Reader's view stays the DOMAINS of admitted addresses (its
+            # charter's shape); the code's flag is exact (`case_flags`).
+            entry["admitted_senders"] = sorted(case.admitted_domains_before(as_of, index))
             last = case.last_before(as_of)
             entry["last_activity"] = _day(last[0]) if last else ""
             entry["owner_transacted"] = case.transacted_before(as_of)

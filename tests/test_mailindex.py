@@ -223,3 +223,60 @@ class TestGmailParse:
         header = parsed(gmail("a", frm="a@x.example", html='<a href="https://h.example">t</a>',
                               attachments=("a.pdf",))).header
         assert mailindex.header_from_json(json.loads(json.dumps(header.as_json()))) == header
+
+
+class TestBccAndTheSharedDomain:
+    """Round-6 notes N1/N2: his Bcc is addressing; a shared provider's domain
+    names nobody (`MailIndex.names_one_party`, `mailindex.aimed_at`)."""
+
+    def test_his_sent_bcc_is_recorded_and_an_inbound_bcc_is_not(self):
+        sent = parsed(gmail("s", frm=OWNER, to="a@shop.example", bcc="B <b@other.example>",
+                            labels=("SENT",))).header
+        assert sent.bcc == ("b@other.example",)
+        assert sent.addressed == ("a@shop.example", "b@other.example")
+        assert sent.correspondents == ("a@shop.example",)
+        inbound = parsed(gmail("i", frm="x@shop.example", bcc="c@third.example")).header
+        assert inbound.bcc == () and inbound.addressed == ()
+
+    def test_an_index_file_written_before_bcc_loads_with_none(self):
+        header = parsed(gmail("s", frm=OWNER, to="a@shop.example", labels=("SENT",))).header
+        raw = header.as_json()
+        del raw["bcc"]
+        assert mailindex.header_from_json(raw).bcc == ()
+
+    def test_a_bcc_aims_his_act(self):
+        sent = parsed(gmail("s", frm=OWNER, to="a@shop.example", bcc="b@other.example",
+                            labels=("SENT",))).header
+        assert mailindex.addressed_to(sent, "b@other.example")
+        assert mailindex.aimed_at(sent, "b@other.example")
+
+    def test_his_act_is_aimed_at_the_exact_address_at_every_domain(self):
+        """Round-8 B1: no domain clause — at a shared provider and at a
+        one-organisation domain alike, another address is a sibling."""
+        fillers = [gmail(f"f{n}", frm=f"user{n}@gmail.example", at=T0 + n)
+                   for n in range(mailindex.ENTITY_DOMAIN_MAX_SENDERS)]
+        to_friend = gmail("s", frm=OWNER, to="friend@gmail.example", at=T0 + 100,
+                          labels=("SENT",))
+        to_shop = gmail("t", frm=OWNER, to="orders@shop.example", at=T0 + 200, labels=("SENT",))
+        index = index_of(*fillers, to_friend, to_shop)
+        friend = index.by_digest[digest(to_friend)]
+        shop = index.by_digest[digest(to_shop)]
+        assert not index.names_one_party("gmail.example") and index.names_one_party(
+            "shop.example")  # the count still exists — it no longer decides an aim
+        assert mailindex.aimed_at(friend, "friend@gmail.example")
+        assert mailindex.aim(friend, "stranger@gmail.example") == mailindex.AIM_SIBLING
+        assert mailindex.aimed_at(shop, "orders@shop.example")
+        assert mailindex.aim(shop, "desk@shop.example") == mailindex.AIM_SIBLING
+        assert not mailindex.aimed_at(shop, "desk@shop.example")
+        assert mailindex.aim(shop, "shop.example") == ""  # a bare domain is nobody
+        assert mailindex.aim(shop, "x@elsewhere.example") == ""
+
+    def test_shown_party_names_the_visible_and_hides_the_bccd(self):
+        sent = parsed(gmail("s", frm=OWNER, to="a@shop.example", bcc="b@other.example",
+                            labels=("SENT",))).header
+        assert mailindex.shown_party("a@shop.example", (sent,)) == "a@shop.example"
+        assert mailindex.shown_party("b@other.example", (sent,)) == mailindex.BCC_RECIPIENT
+        assert mailindex.shown_party("B@Other.example", (sent, None)) == mailindex.BCC_RECIPIENT
+        visible_too = parsed(gmail("t", frm=OWNER, to="b@other.example", at=T0 + 60,
+                                   labels=("SENT",))).header
+        assert mailindex.shown_party("b@other.example", (sent, visible_too)) == "b@other.example"

@@ -80,9 +80,16 @@ class Bundle:
 _WANTED_WORDS = {"pay": "pay", "reply": "reply to", "decide": "decide on"}
 
 
+def shown_counterparty(ctx: mailitems.Context, item: mailitems.OpenItem) -> str:
+    """The item's counterparty as the judge may read it — relative to the
+    item's own mails (`mailindex.shown_party`)."""
+    return mailindex.shown_party(
+        item.counterparty, [ctx.index.get(d) for d in (item.anchor, *item.rests_on)])
+
+
 def matter_words(ctx: mailitems.Context, item: mailitems.OpenItem) -> str:
     """What the item IS, in code's words — the question the judge weighs."""
-    party = item.counterparty
+    party = shown_counterparty(ctx, item)
     if item.kind == mailitems.NEEDS:
         reading = ctx.readings.get(item.anchor)
         wanted = str((reading.verdict if reading else {}).get("wanted") or "")
@@ -123,7 +130,7 @@ def compose(ctx: mailitems.Context, item: mailitems.OpenItem,
     data = {
         "item": {
             "matter": matter_words(ctx, item),
-            "counterparty": item.counterparty,
+            "counterparty": shown_counterparty(ctx, item),
             "messages": messages,
         },
         "candidate": {

@@ -158,6 +158,9 @@ def _mail_line(state_dir: os.PathLike | str, verdicts: mailverdicts.VerdictStore
     ref = f"mail {digest[:MAIL_REF_CHARS]}"
     if header is None:
         return f"  - {ref} {_day(position[0])} (not in the index)"
+    # The VISIBLE recipients (To/Cc), never his Bcc: the model reads this line
+    # to compose replies, and a hidden recipient listed here invites a reply
+    # that exposes it.
     who = ("you → " + _safe(", ".join(header.correspondents), ADDRESS_CHARS)
            if header.direction == "out" else _safe(header.from_addr, ADDRESS_CHARS))
     name = _safe(mailindex.display_name(header.from_value), NAME_CHARS)
@@ -199,13 +202,22 @@ def show_text(state_dir: os.PathLike | str, store: mailcases.CaseStore, case_id:
     ]
     parties = sorted(case.parties.items(), key=lambda kv: (kv[1]["at"], kv[0]))
     if parties:
+        # A party he reached only by Bcc on this case's mail is never an
+        # address here (`mailindex.shown_party`, the one renderer).
+        case_mail = [mailindex.load_header(state_dir, p[1]) for p in case.mails]
+        shown = [(info, _safe(mailindex.shown_party(addr, case_mail), ADDRESS_CHARS))
+                 for addr, info in parties[:10]]
         lines.append("Parties: " + ", ".join(
-            (f"{_safe(info.get('name'), NAME_CHARS)} <{_safe(addr, ADDRESS_CHARS)}>"
-             if info.get("name") else _safe(addr, ADDRESS_CHARS))
-            for addr, info in parties[:10]))
-    if case.admitted:
+            f"{_safe(info.get('name'), NAME_CHARS)} <{who}>" if info.get("name") else who
+            for info, who in shown))
+    if case.trusted:
+        lines.append("Trusted by you on it: " + ", ".join(
+            f"{_safe(t.get('address'), ADDRESS_CHARS)} ({_day(float(t.get('at') or 0))})"
+            for t in case.trusted))
+    admitted = case.admissions(mailindex.MailIndex(state_dir))
+    if admitted:
         lines.append("Senders admitted on it (by your acts toward them): "
-                     + ", ".join(_safe(d, 60) for d in sorted(case.admitted)))
+                     + ", ".join(_safe(a, ADDRESS_CHARS) for a in sorted(admitted)))
     verdicts = mailverdicts.VerdictStore(state_dir)
     mails = sorted(case.mails)
     lines.append(f"Mails ({len(mails)}, oldest first):" if mails else "Mails: none yet.")
@@ -295,6 +307,12 @@ def plan(state_dir: os.PathLike | str, args: dict[str, Any]) -> Plan:
         fields = {"title": title, "keys": _new_keys(args.get("keys"))}
     else:
         fields["case"] = str(args.get("case") or "").strip()
+        if verb in mailcases.CHIP_VERBS:
+            # A chip may name a case he merged since: it lands on the case it
+            # became.
+            live = store.resolve(fields["case"])
+            if live is not None:
+                fields["case"] = live.id
         case = store.cases.get(fields["case"])
         if verb in (mailcases.RENAME,):
             fields["title"] = " ".join(str(args.get("title") or "").split())[
@@ -313,6 +331,20 @@ def plan(state_dir: os.PathLike | str, args: dict[str, Any]) -> Plan:
             fields["into"] = str(args.get("into") or "").strip()
         if verb == mailcases.MOVE and case is not None:
             fields["mail"] = _resolve_mail(case, str(args.get("mail") or ""))
+        if verb == mailcases.UNTRUST:
+            try:
+                fields["address"] = mailcases.trust_address(args.get("address"))
+            except ValueError as exc:
+                raise CaseError(str(exc)) from exc
+        if verb == mailcases.TRUST:
+            try:
+                fields["address"] = mailcases.trust_address(args.get("address"))
+            except ValueError as exc:
+                raise CaseError(str(exc)) from exc
+            # The offering mail, from the case's own withheld record — never
+            # from the model's words.
+            held = (case.withheld.get(fields["address"]) if case is not None else None) or {}
+            fields["mail"] = str(held.get("mail") or "")
     problem = store.check(verb, fields)
     if problem:
         raise CaseError(problem)
@@ -343,6 +375,21 @@ def _sentence(state_dir: os.PathLike | str, store: mailcases.CaseStore, verb: st
         return f"Restore case {name} to your case list."
     if verb == mailcases.RENAME:
         return f"Rename case {name} to {_q(fields['title'])}."
+    if verb == mailcases.TRUST:
+        # Its real reach, stated: a trusted address is someone he dealt with on
+        # the case (`Case.dealt_with_at`), which is a `case` act in the
+        # relationship ledger, read for every mail it sends.
+        return (f"Trust {_safe(fields['address'], ADDRESS_CHARS)} on case {name} "
+                f"({_n(case)}) — their authenticated mail can then settle this case's items "
+                "and is no longer flagged as a sender you have not dealt with here, and "
+                f"{_safe(fields['address'], ADDRESS_CHARS)} counts as someone you have dealt "
+                "with: their mail anywhere is graded as known, not first contact. Untrust "
+                "takes it back.")
+    if verb == mailcases.UNTRUST:
+        return (f"Stop trusting {_safe(fields['address'], ADDRESS_CHARS)} on case {name} "
+                f"({_n(case)}) — their mail settles this case's items and counts as someone "
+                "you have dealt with only if you wrote to them there; otherwise it is flagged "
+                "again as a sender you have not dealt with here.")
     if verb == mailcases.NOTE:
         return f"Add a note to case {name}: {_q(fields['text'], NOTE_SHOWN)}."
     if verb == mailcases.REMIND:

@@ -69,6 +69,7 @@ from . import (
     export,
     files,
     learning,
+    mailcases,
     mailprefs,
     mailvouch,
     notify,
@@ -482,7 +483,12 @@ _REPORT_FOREIGN_LINK = re.compile(
     r"\]\((?!https://mail\.google\.com/mail/|aish-reply://(?:restore|resolve) ref "
     r"[0-9a-f]{12}\)|aish-reply://vouch settler [a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])? "
     # The meanings come from their one authority, never a second literal.
-    + "(?:" + "|".join(re.escape(m) for m in mailvouch.MEANINGS) + r")\))"
+    + "(?:" + "|".join(re.escape(m) for m in mailvouch.MEANINGS) + r")\)"
+    # The fourth: the trust chip (`mailreport._trust_section`) — its address
+    # grammar and case-id shape from their one authority (`mailcases`).
+    + r"|aish-reply://(?:" + "|".join(mailcases.CHIP_VERBS) + r") sender "
+    + mailcases.TRUST_ADDRESS_PATTERN
+    + r" on case " + mailcases.CASE_ID_PATTERN + r"\))"
 )
 
 

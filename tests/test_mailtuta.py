@@ -247,7 +247,8 @@ class TestAuthenticationIsDeclaredByTheGateway:
         assert record["gate"]["grade"]["grade"] == mailgate.FIRST_CONTACT
         store = mailcases.CaseStore(tmp_path)
         assert store.cases == {}  # no case opened by an unauthenticated mail
-        assert store.admitted_domains((T0 + 3 * DAY, "")) == frozenset()
+        assert store.admitted_domains((T0 + 3 * DAY, ""),
+                                      mailindex.MailIndex(tmp_path)) == frozenset()
 
     def test_an_inbox_mail_claiming_his_address_is_no_act_of_his(self, tmp_path):
         """On Gmail a From naming him decides direction; through Tuta only the

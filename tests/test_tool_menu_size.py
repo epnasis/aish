@@ -87,7 +87,11 @@ from aish import tools
 # Raised 41,100 -> 41,300 on 2026-11-02 for inbox_items vouch / revoke (+245 chars
 # measured, 41,012 -> 41,257): the settler vouch is how a courier the owner never
 # writes to may settle an item (F4) without loosening the tier history rule.
-MAX_MENU_CHARS = 41_300
+# Raised 41,300 -> 41,350 on 2026-11-03 for the cases tool's trust verb (round-8
+# B3; measured 41,330 after trimming its example and leaving its field without
+# a description): admission became exact, and his trust of a second address at
+# a company is the one way it can be widened — by his act, never by a count.
+MAX_MENU_CHARS = 41_350
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.

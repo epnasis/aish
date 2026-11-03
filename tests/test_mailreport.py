@@ -36,13 +36,13 @@ def fresh_health(state, now: float = NOW) -> None:
 def add_mail(
     state, gid: str, *, frm: str, at: float, to: str = OWNER, subject: str = "",
     sent: bool = False, mid: str = "", in_reply_to: str = "", references: str = "",
-    list_id: str = "", mailbox: str = "gmail", body: str = "body",
+    list_id: str = "", mailbox: str = "gmail", body: str = "body", bcc: str = "",
 ) -> mailindex.Header:
     parsed = mailindex.from_gmail(
         gmail(gid, frm=frm, to=to, subject=subject, body=body, at=at,
               message_id=mid or f"{gid}@mail.example", in_reply_to=in_reply_to,
               references=references, labels=("SENT",) if sent else ("INBOX",),
-              list_id=list_id),
+              list_id=list_id, bcc=bcc),
         frozenset({OWNER}),
     )
     assert parsed is not None

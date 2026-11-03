@@ -57,10 +57,10 @@ def tuta_copy(state, original: mailindex.Header, *, gid: str = "copy", skew: flo
 
 
 def his_sent(state, gid: str, *, to: str, at: float, subject: str, cc: str = "",
-             in_reply_to: str = "", frm: str = OWNER) -> mailindex.Header:
+             in_reply_to: str = "", frm: str = OWNER, bcc: str = "") -> mailindex.Header:
     header = add_mail(state, gid, frm=frm, to=to + (f", {cc}" if cc else ""), at=at,
                       subject=subject, sent=True, mid=f"{gid}@owner.example",
-                      in_reply_to=in_reply_to)
+                      in_reply_to=in_reply_to, bcc=bcc)
     return header
 
 
@@ -692,7 +692,7 @@ class TestMembershipMustRestOnATrustedFact:
         stranger = add_mail(tmp_path, "k1", frm="billing@stranger.example",
                             subject="Re: Broken parcel locker", at=NOW - 2 * DAY,
                             in_reply_to="o1@owner.example")
-        shop = add_mail(tmp_path, "k2", frm="desk@store.example",
+        shop = add_mail(tmp_path, "k2", frm="shop@store.example",
                         subject="Re: Broken parcel locker", at=NOW - DAY,
                         in_reply_to="o1@owner.example")
         store = mailcases.CaseStore(tmp_path)
@@ -704,6 +704,29 @@ class TestMembershipMustRestOnATrustedFact:
         context = ctx(tmp_path)
         assert context.cases_of(stranger.digest) == []
         assert [c.id for c in context.cases_of(shop.digest)] == [case.id]
+
+
+    def test_at_a_shared_domain_only_the_address_he_wrote_to_is_trusted(self, tmp_path):
+        """N1: his mail To friend@ at a shared provider grants a stranger@
+        there replying with his Message-ID no membership."""
+        for n in range(mailindex.ENTITY_DOMAIN_MAX_SENDERS):
+            add_mail(tmp_path, f"f{n}", frm=f"user{n}@gmail.example", subject="hi",
+                     at=NOW - 20 * DAY + n)
+        his = his_sent(tmp_path, "o1", to="friend@gmail.example", at=NOW - 9 * DAY,
+                       subject="Sofa")
+        stranger = add_mail(tmp_path, "k1", frm="stranger@gmail.example", subject="Re: Sofa",
+                            at=NOW - 2 * DAY, in_reply_to="o1@owner.example")
+        friend = add_mail(tmp_path, "k2", frm="friend@gmail.example", subject="Re: Sofa",
+                          at=NOW - DAY, in_reply_to="o1@owner.example")
+        store = mailcases.CaseStore(tmp_path)
+        case = mailcases.Case(
+            id="case-shared00001", created=his.position, created_by="owner",
+            mails=sorted([his.position, stranger.position, friend.position]))
+        store.cases[case.id] = case
+        store._save(case)
+        context = ctx(tmp_path)
+        assert context.cases_of(stranger.digest) == []
+        assert [c.id for c in context.cases_of(friend.digest)] == [case.id]
 
 
 class TestAOneTimeCodeMailContributesNoKeys:
@@ -732,3 +755,142 @@ class TestAOneTimeCodeMailContributesNoKeys:
         assert context.keys(code.digest) == frozenset()
         assert not context._trusted_fact({"kind": "order", "at": list(code.position)})
         assert context._trusted_fact({"kind": "order", "at": list(his.position)})
+
+
+class TestWhomHeAddressedIncludesHisBcc:
+    """Round-7 note 5: one answer to "whom he addressed" (`Header.addressed`,
+    To+Cc+Bcc) for every reader of his addressing. In each test the Bcc is the
+    ONLY route by which he addressed the party."""
+
+    def test_his_bcc_to_the_counterparty_settles_by_the_rule(self, tmp_path):
+        offer = add_mail(tmp_path, "n1", frm="agent@broker.example", subject="Offer",
+                         at=NOW - 3 * DAY, mid="offer@broker.example")
+        add_verdict(tmp_path, offer, wanted="decide", recorded_at=NOW - 3 * DAY)
+        his_sent(tmp_path, "o1", to="assistant@other.example", bcc="agent@broker.example",
+                 at=NOW - 2 * DAY, subject="Offer accepted")
+        (item,) = [i for i in ctx(tmp_path).derive().items() if i.kind == mailitems.NEEDS]
+        state = ctx(tmp_path).state_of(item)
+        assert state.source == mailitems.RULE
+        # The decision read his Bcc; the evidence line a model reads does not
+        # name the Bcc'd address (round-8 note 1).
+        assert state.evidence.to == ("assistant@other.example", mailindex.BCC_RECIPIENT)
+
+    def test_a_party_he_only_bccd_is_waited_on(self, tmp_path):
+        his_sent(tmp_path, "o2", to="desk@else.example", bcc="carol@shop.example",
+                 at=NOW - 10 * DAY, subject="Return")
+        waited = {t.open_item.counterparty for t in ctx(tmp_path).derive().theirs}
+        assert "carol@shop.example" in waited
+
+    def test_an_address_he_bccd_in_the_conversation_is_tier_b(self, tmp_path):
+        pay_item(tmp_path)
+        his_sent(tmp_path, "o1", to="other@else.example", bcc="treasurer@bank.example",
+                 at=NOW - 2 * DAY - 3600, subject="Re: Pay", in_reply_to="n1@swim.example")
+        paid = add_mail(tmp_path, "k1", frm="treasurer@bank.example", subject="Re: Pay",
+                        at=NOW - 2 * DAY, references="<n1@swim.example>",
+                        body="Payment received, all settled.")
+        add_verdict(tmp_path, paid, recorded_at=NOW - 2 * DAY)
+        context = ctx(tmp_path)
+        (item,) = [i for i in context.derive().items() if i.kind == mailitems.NEEDS]
+        found = [c for c in context.candidates(item) if c.header.digest == paid.digest]
+        assert found and found[0].tier == "same counterparty"
+
+
+class TestABccdPartyIsNeverAnAddressAModelReads:
+    """Round-8 note 1: the Bcc fence is per SURFACE. His Bcc'd lawyer is a
+    party for every decision, and never appears as an address in the report,
+    the case tool, the item tool or the settlement judge's words — one
+    renderer, `mailindex.shown_party`."""
+
+    def test_the_lawyer_he_bccd(self, tmp_path):
+        from test_mailreport import fresh_health, identity
+
+        from aish import mailcasetool, mailitemtool, mailsettle
+
+        fresh_health(tmp_path)
+        his = his_sent(tmp_path, "o1", to="agent@broker.example", bcc="lawyer@law.example",
+                       at=NOW - 9 * DAY, subject="Order LS-48213 offer")
+        index = mailindex.MailIndex(tmp_path)
+        store = mailcases.CaseStore(tmp_path)
+        store.observe(index.get(his.digest), "Our order LS-48213, as agreed.", True, index)
+        (case,) = mailcases.CaseStore(tmp_path).cases.values()
+        assert "lawyer@law.example" in case.parties  # a party for decisions
+
+        context = ctx(tmp_path)
+        waited = {t.open_item.counterparty for t in context.derive().theirs}
+        assert "lawyer@law.example" in waited  # waited on, by Header.addressed
+
+        report = mailreport.render(mailreport.build(tmp_path, now=NOW, clean=identity),
+                                   clean=identity)
+        items = mailitemtool.list_text(tmp_path, now=NOW)
+        shown = mailcasetool.show_text(tmp_path, mailcases.CaseStore(tmp_path), case.id)
+        (lawyer,) = [t.open_item for t in context.derive().theirs
+                     if t.open_item.counterparty == "lawyer@law.example"]
+        judged = mailsettle.matter_words(context, lawyer)
+        later = add_mail(tmp_path, "k1", frm="agent@broker.example", subject="Re: Order",
+                         at=NOW - DAY, body="Received.")
+        bundle = mailsettle.compose(context, lawyer, mailitems.Candidate(
+            header=later, ties=("entity",), tier="third party"))
+        for name, text in (("report", report), ("items", items), ("case", shown),
+                           ("judge", judged), ("judge input", bundle.text)):
+            assert "lawyer@law.example" not in text, name
+            assert "law.example" not in text, name
+        assert mailindex.BCC_RECIPIENT in report and mailindex.BCC_RECIPIENT in shown
+        assert mailindex.BCC_RECIPIENT in items and mailindex.BCC_RECIPIENT in judged
+        assert mailsettle.shown_counterparty(context, lawyer) == mailindex.BCC_RECIPIENT
+        assert "agent@broker.example" in report  # a visible recipient stays an address
+
+
+class TestTheEntityTieCountsWhatTheSharedDomainWithholds:
+    """Round-8 B4: `names_one_party` stays for the entity tie (it grants no
+    tier) and the trust offer gate — each use counted, never silent."""
+
+    def setup(self, state, domain: str, fillers: int):
+        for n in range(fillers):
+            add_mail(state, f"f{n}", frm=f"user{n}@{domain}", subject="hi",
+                     at=NOW - 40 * DAY + n)
+        his = his_sent(state, "o1", to=f"friend@{domain}", at=NOW - 10 * DAY, subject="Sofa")
+        later = add_mail(state, "k1", frm=f"other@{domain}", subject="About the sofa",
+                         at=NOW - DAY, body="Is the sofa still there?")
+        add_verdict(state, later, recorded_at=NOW - DAY)
+        context = ctx(state)
+        (item,) = [t.open_item for t in context.derive().theirs
+                   if t.open_item.counterparty == f"friend@{domain}"]
+        return his, later, context, item
+
+    def test_at_a_shared_provider_the_domain_ties_nothing_and_is_counted(self, tmp_path):
+        from test_mailreport import fresh_health, identity
+
+        _his, later, context, item = self.setup(tmp_path, "gmail.example",
+                                                mailindex.ENTITY_DOMAIN_MAX_SENDERS)
+        assert "entity" not in context.ties(item, later)
+        assert (item.key, later.digest) in context.entity_withheld_shared
+        fresh_health(tmp_path)
+        report = mailreport.build(tmp_path, now=NOW, clean=identity)
+        assert report.entity_withheld_shared >= 1
+        assert "a domain many people use names nobody" in mailreport.render(
+            report, clean=identity)
+
+    def test_at_a_one_party_domain_the_domain_ties_and_nothing_is_counted(self, tmp_path):
+        _his, later, context, item = self.setup(tmp_path, "shop.example", 0)
+        assert "entity" in context.ties(item, later)
+        assert context.entity_withheld_shared == set()
+
+    def test_one_mail_withheld_against_several_items_counts_once(self, tmp_path):
+        """Round-8 N1: the footer says "later mail(s)", so it counts MAILS —
+        one mail weighed against two of his items is one."""
+        from test_mailreport import fresh_health, identity
+
+        for n in range(mailindex.ENTITY_DOMAIN_MAX_SENDERS):
+            add_mail(tmp_path, f"f{n}", frm=f"user{n}@gmail.example", subject="hi",
+                     at=NOW - 40 * DAY + n)
+        his_sent(tmp_path, "o1", to="friend@gmail.example", at=NOW - 10 * DAY, subject="Sofa")
+        his_sent(tmp_path, "o2", to="pal@gmail.example", at=NOW - 10 * DAY + 60,
+                 subject="Lamp")
+        later = add_mail(tmp_path, "k1", frm="other@gmail.example", subject="Hello",
+                         at=NOW - DAY, body="Hello there")
+        add_verdict(tmp_path, later, recorded_at=NOW - DAY)
+        fresh_health(tmp_path)
+        report = mailreport.build(tmp_path, now=NOW, clean=identity)
+        assert report.entity_withheld_shared == 1
+        assert ("1 later mail(s) from the counterparty's domain not tied by it"
+                in mailreport.render(report, clean=identity))

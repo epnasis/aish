@@ -43,6 +43,7 @@ import html
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -152,9 +153,68 @@ def domain_of(address: str) -> str:
     return address.rsplit("@", 1)[-1].lower() if "@" in address else ""
 
 
+#: A domain names ONE party (an entity: "the same domain", its first label,
+#: an act aimed at it) only when fewer than this many distinct addresses at it
+#: appear in any header of the index — a shared provider's ("gmail") names
+#: nobody. Structural, not a list of providers; the number is a CHOICE.
+ENTITY_DOMAIN_MAX_SENDERS = 5
+
+
+def addressed_to(header: Header, address: str) -> bool:
+    """`header` is his outbound mail and `address` is one of its To, Cc or Bcc
+    recipients, exactly."""
+    return header.direction == "out" and bool(address) and address.lower() in header.addressed
+
+
+#: Why `aim` answered as it did. `AIM_SIBLING` is the one NO that is recorded
+#: where the decision is (a withheld admission, a grade's `withheld`): he
+#: addressed ANOTHER address at the party's domain — never an act toward it.
+AIM_ADDRESS = "address"
+AIM_SIBLING = "sibling"
+
+#: How a party he reached ONLY by Bcc appears in any text a model reads.
+BCC_RECIPIENT = "a Bcc recipient"
+
+
+def shown_party(address: str, headers: Iterable[Header | None]) -> str:
+    """How `address` may appear in text a MODEL reads, relative to the mails
+    that text talks about (`headers`): the address when any of them names it
+    visibly (From, To or Cc), `BCC_RECIPIENT` when they name it only in his
+    Bcc. The one renderer of a party for model-visible text — the report, the
+    case tool, the item tool and the settlement judge all go through it.
+    Decisions never read it: they read `Header.addressed`, where a Bcc is
+    addressing. A Bcc is his secret from the visible recipients, and a model
+    that sees the address beside a reply it drafts can expose it."""
+    held = [h for h in headers if h is not None]
+    address = (address or "").lower()
+    if not address:
+        return address
+    if any(address == h.from_addr or address in h.to or address in h.cc for h in held):
+        return address
+    if any(address in h.bcc for h in held):
+        return BCC_RECIPIENT
+    return address
+
+
+def aim(header: Header, party: str) -> str:
+    """`aimed_at`, with its reason: `AIM_ADDRESS` when aimed, `AIM_SIBLING`
+    when he addressed another address at the party's domain, "" otherwise."""
+    if header.direction != "out" or "@" not in (party or ""):
+        return ""
+    if addressed_to(header, party):
+        return AIM_ADDRESS
+    domain = domain_of(party)
+    if any(domain_of(a) == domain for a in header.addressed):
+        return AIM_SIBLING
+    return ""
+
+
 def aimed_at(header: Header, party: str) -> bool:
-    """His act is aimed at `party` (an address, or a bare domain): `header` is
-    his outbound mail and the party's domain is among its To/Cc recipients.
+    """His act is aimed at `party` (an address): `header` is his outbound mail
+    and the address itself is among its To/Cc/Bcc (`Header.addressed`).
+    Exact, never by domain (round-8 B1): an address at the same domain is
+    somebody else until HE says otherwise (the trust chip, docs §Alias
+    admission).
 
     The one authority on whether a mail of his is an act TOWARD someone, read
     by everything that turns his act into standing — a sender's admission on a
@@ -162,9 +222,7 @@ def aimed_at(header: Header, party: str) -> bool:
     naming a party's mail is never enough on its own: his forward of a
     confirmation to his other address, or a reply sent to somebody else, is
     addressed to nobody at the original sender."""
-    target = domain_of(party) if "@" in party else party.lower()
-    return (header.direction == "out" and bool(target)
-            and any(domain_of(a) == target for a in header.correspondents))
+    return aim(header, party) == AIM_ADDRESS
 
 
 @dataclass(frozen=True)
@@ -226,6 +284,21 @@ class Header:
     # Empty on Gmail and on index files written before it existed.
     gateway_auth: str = ""
     gateway_auth_observed: str = ""
+    # HIS outbound mail's Bcc, as his own Sent copy carries it; always empty on
+    # inbound mail (a Bcc on mail TO him is nobody's addressing of anyone), and
+    # on index files written before it existed (2026-11-03).
+    bcc: tuple[str, ...] = ()
+
+    @property
+    def addressed(self) -> tuple[str, ...]:
+        """Everyone his outbound mail was addressed to — To, Cc and Bcc; ()
+        on inbound. The one answer to "whom he addressed" — a deliberate Bcc is
+        addressing — read by `aimed_at` and every reader of his addressing.
+        `correspondents` stays To/Cc for the two readers that mean the VISIBLE
+        recipients (docs/mail-assistant.md §Whom he addressed)."""
+        if self.direction != "out":
+            return ()
+        return tuple(dict.fromkeys(self.to + self.cc + self.bcc))
 
     @property
     def correspondents(self) -> tuple[str, ...]:
@@ -244,7 +317,7 @@ class Header:
 
 def header_from_json(raw: dict[str, Any]) -> Header:
     data = dict(raw)
-    for name in ("in_reply_to", "references", "to", "cc", "auth_results"):
+    for name in ("in_reply_to", "references", "to", "cc", "bcc", "auth_results"):
         data[name] = tuple(data.get(name) or ())
     data["links"] = tuple(Link(**link) for link in data.get("links") or ())
     data["attachments"] = tuple(Attachment(**a) for a in data.get("attachments") or ())
@@ -500,6 +573,7 @@ def _build_header(
         from_addr=from_addr,
         to=addresses_of(", ".join(_all(headers, "To"))),
         cc=addresses_of(", ".join(_all(headers, "Cc"))),
+        bcc=addresses_of(", ".join(_all(headers, "Bcc"))) if direction == "out" else (),
         at=at,
         at_source=at_source,
         date_header=date_header,
@@ -730,6 +804,11 @@ class MailIndex:
         self._bodies: dict[str, str] = {}
         self.health = Health()
         self._cache: dict[tuple[float, str], _Union] = {}
+        # Every distinct address seen at each domain, in any header of any
+        # message — what `names_one_party` counts. It only grows, so a domain's
+        # answer can only go from one party to shared; a grant made while it
+        # said one party is NOT retracted (docs/mail-assistant.md, the residual).
+        self.domain_addresses: dict[str, set[str]] = {}
         if self.directory is not None and self.directory.is_dir():
             self._load()
 
@@ -807,9 +886,17 @@ class MailIndex:
         self._cache.clear()
         return True
 
+    def names_one_party(self, domain: str) -> bool:
+        """The domain names one party: fewer than `ENTITY_DOMAIN_MAX_SENDERS`
+        distinct addresses at it in any header of the index."""
+        return len(self.domain_addresses.get(domain.lower(), ())) < ENTITY_DOMAIN_MAX_SENDERS
+
     def _admit(self, header: Header, count: bool = True) -> None:
         self.by_digest[header.digest] = header
         self._cache.clear()
+        for address in (header.from_addr, *header.to, *header.cc, *header.bcc):
+            if address:
+                self.domain_addresses.setdefault(domain_of(address), set()).add(address.lower())
         if header.message_id:
             members = self.mid_members.setdefault(header.message_id, [])
             if header.digest not in members:
@@ -829,6 +916,9 @@ class MailIndex:
         subject = normalize_subject(header.subject)
         if not subject:
             return None
+        # The VISIBLE recipients (To/Cc), never his Bcc: this links mail that
+        # carries no reply headers by a guess, and widening the guess to a
+        # hidden recipient adds links that no header of either mail claims.
         parties = set(header.correspondents)
         window = FALLBACK_WINDOW_DAYS * 86400
         best: Header | None = None
