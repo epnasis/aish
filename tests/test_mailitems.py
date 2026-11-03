@@ -692,7 +692,7 @@ class TestMembershipMustRestOnATrustedFact:
         stranger = add_mail(tmp_path, "k1", frm="billing@stranger.example",
                             subject="Re: Broken parcel locker", at=NOW - 2 * DAY,
                             in_reply_to="o1@owner.example")
-        shop = add_mail(tmp_path, "k2", frm="desk@store.example",
+        shop = add_mail(tmp_path, "k2", frm="shop@store.example",
                         subject="Re: Broken parcel locker", at=NOW - DAY,
                         in_reply_to="o1@owner.example")
         store = mailcases.CaseStore(tmp_path)

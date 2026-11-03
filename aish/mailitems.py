@@ -507,7 +507,7 @@ class Context:
             # stranger no membership.
             if (parent is not None and parent.direction == "out"
                     and parent.position in case.mails
-                    and mailindex.aimed_at(parent, header.from_addr, self.index)):
+                    and mailindex.aimed_at(parent, header.from_addr)):
                 return True
         return False
 
@@ -875,8 +875,8 @@ class Context:
             c for d in item.conversation
             if (h := self.index.get(d)) is not None and h.direction == "out"
             for c in h.addressed}
-        admitted = {d for c in self.cases_of(item.anchor) for d in c.admitted}
-        if sender == item.counterparty or sender in he_wrote_to or domain in admitted:
+        admitted = {a for c in self.cases_of(item.anchor) for a in c.admissions(self.index)}
+        if sender == item.counterparty or sender in he_wrote_to or sender in admitted:
             found.tier = "same counterparty"
             return found
         # His vouch: this exact domain may settle this kind of item. An
@@ -912,11 +912,10 @@ class Context:
         for case in self.store.cases.values():
             if not case.transacted_before(header.position):
                 continue
-            admitted = case.admitted_before(header.position)
             seen = [when[0] for a in case.parties if mailindex.domain_of(a) == domain
-                    if (when := case.dealt_with_at(a, admitted, self.index)) is not None]
-            if domain in admitted:
-                seen.append(case.admitted[domain]["at"][0])
+                    if (when := case.dealt_with_at(a, self.index, header.position)) is not None]
+            seen += [tuple(v["at"])[0] for a, v in case.admissions(self.index).items()
+                     if mailindex.domain_of(a) == domain and tuple(v["at"]) < header.position]
             if seen and min(seen) <= limit:
                 count += 1
         return count

@@ -166,14 +166,11 @@ def addressed_to(header: Header, address: str) -> bool:
     return header.direction == "out" and bool(address) and address.lower() in header.addressed
 
 
-#: Why `aim` answered as it did. `AIM_SHARED_DOMAIN` is the one NO that is
-#: recorded where the decision is (a withheld admission, a grade's `withheld`):
-#: he addressed someone at the party's domain, and only the domain's address
-#: count (`MailIndex.names_one_party`) withheld the aim.
+#: Why `aim` answered as it did. `AIM_SIBLING` is the one NO that is recorded
+#: where the decision is (a withheld admission, a grade's `withheld`): he
+#: addressed ANOTHER address at the party's domain — never an act toward it.
 AIM_ADDRESS = "address"
-AIM_DOMAIN = "domain"
-AIM_SHARED_DOMAIN = "shared_domain"
-AIM_NO_INDEX = "no_index"  # a domain match with no index to count it: not aimed, not recorded
+AIM_SIBLING = "sibling"
 
 #: How a party he reached ONLY by Bcc appears in any text a model reads.
 BCC_RECIPIENT = "a Bcc recipient"
@@ -199,38 +196,33 @@ def shown_party(address: str, headers: Iterable[Header | None]) -> str:
     return address
 
 
-def aim(header: Header, party: str, index: MailIndex | None) -> str:
-    """`aimed_at`, with its reason: `AIM_ADDRESS` or `AIM_DOMAIN` when aimed,
-    `AIM_SHARED_DOMAIN` when only the domain's count withheld it, "" when he
-    addressed nobody at the party at all."""
-    if header.direction != "out" or not party:
+def aim(header: Header, party: str) -> str:
+    """`aimed_at`, with its reason: `AIM_ADDRESS` when aimed, `AIM_SIBLING`
+    when he addressed another address at the party's domain, "" otherwise."""
+    if header.direction != "out" or "@" not in (party or ""):
         return ""
-    if "@" in party and addressed_to(header, party):
+    if addressed_to(header, party):
         return AIM_ADDRESS
-    domain = domain_of(party) if "@" in party else party.lower()
-    if not domain or not any(domain_of(a) == domain for a in header.addressed):
-        return ""
-    if index is None:
-        return AIM_NO_INDEX
-    if index.names_one_party(domain):
-        return AIM_DOMAIN
-    return AIM_SHARED_DOMAIN
+    domain = domain_of(party)
+    if any(domain_of(a) == domain for a in header.addressed):
+        return AIM_SIBLING
+    return ""
 
 
-def aimed_at(header: Header, party: str, index: MailIndex | None) -> bool:
-    """His act is aimed at `party` (an address, or a bare domain): `header` is
-    his outbound mail addressed to the party — the address itself among its
-    To/Cc/Bcc, or any address at the party's domain when that domain names one
-    party (`MailIndex.names_one_party`; with no index, no domain does).
+def aimed_at(header: Header, party: str) -> bool:
+    """His act is aimed at `party` (an address): `header` is his outbound mail
+    and the address itself is among its To/Cc/Bcc (`Header.addressed`).
+    Exact, never by domain (round-8 B1): an address at the same domain is
+    somebody else until HE says otherwise (the trust chip, docs §Alias
+    admission).
 
     The one authority on whether a mail of his is an act TOWARD someone, read
     by everything that turns his act into standing — a sender's admission on a
     case, a sender's grade, an inbound reply's case membership. In-Reply-To
     naming a party's mail is never enough on its own: his forward of a
     confirmation to his other address, or a reply sent to somebody else, is
-    addressed to nobody at the original sender. And at a shared provider's
-    domain, writing to friend@ is no act toward stranger@."""
-    return aim(header, party, index) in (AIM_ADDRESS, AIM_DOMAIN)
+    addressed to nobody at the original sender."""
+    return aim(header, party) == AIM_ADDRESS
 
 
 @dataclass(frozen=True)

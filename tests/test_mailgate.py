@@ -146,7 +146,9 @@ class TestLedger:
         index = index_of(friend, reply, hijack)
         assert self.grade(index, hijack).grade == mailgate.FIRST_CONTACT
 
-    def test_a_reply_to_the_addresss_own_mail_counts(self):
+    def test_a_reply_to_a_sibling_address_is_withheld_never_counted(self):
+        """Round-8 B1: his reply to desk@'s mail went To members@ at the same
+        domain — somebody else until he says otherwise. Recorded, not counted."""
         ask = gmail("a", frm="desk@club.example", subject="Membership", at=T0,
                     message_id="m@club.example")
         reply = gmail("r", frm=OWNER, to="members@club.example", subject="Re: Membership",
@@ -154,7 +156,18 @@ class TestLedger:
         later = gmail("l", frm="desk@club.example", subject="Welcome", at=T0 + DAY)
         index = index_of(ask, reply, later)
         grade = self.grade(index, later)
-        assert grade.grade == mailgate.KNOWN and grade.how == ("replied",)
+        assert grade.grade == mailgate.FIRST_CONTACT and grade.acts == 0
+        assert grade.withheld == ("replied",)
+
+    def test_a_reply_addressed_to_the_sender_is_writing_to_it(self):
+        ask = gmail("a", frm="desk@club.example", subject="Membership", at=T0,
+                    message_id="m@club.example")
+        reply = gmail("r", frm=OWNER, to="desk@club.example", subject="Re: Membership",
+                      at=T0 + 60, in_reply_to="m@club.example", labels=("SENT",))
+        later = gmail("l", frm="desk@club.example", subject="Welcome", at=T0 + DAY)
+        index = index_of(ask, reply, later)
+        grade = self.grade(index, later)
+        assert grade.grade == mailgate.KNOWN and grade.how == ("wrote",)
 
     def test_a_forward_or_reply_sent_elsewhere_is_no_act_toward_the_sender(self):
         """His act is aimed at a sender only when addressed to its domain

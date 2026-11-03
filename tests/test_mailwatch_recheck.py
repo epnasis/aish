@@ -160,7 +160,8 @@ class TestConsequences:
                           labels=("SENT",), in_reply_to="a@shop.example")
         seed_old(tmp_path, [answer], gmail_msgs=[his_first, his_reply])
         (case,) = mailcases.CaseStore(tmp_path).cases.values()
-        assert case.domains == {} and case.admitted == {} and len(case.mails) == 3
+        assert case.domains == {} and len(case.mails) == 3
+        assert case.admissions(mailindex.MailIndex(tmp_path)) == {}
 
         result = recheck(tmp_path, FakeHimalaya({"INBOX": [as_bridge_serves(answer)],
                                                  "Sent": []}))
@@ -170,8 +171,8 @@ class TestConsequences:
         reply = next(h for h in index.by_digest.values() if h.provider_id == "o2")
         assert case.domains == {"shop.example": shop.position}
         assert [c["at"] for c in case.coordinates] == [shop.position]
-        assert case.admitted == {"shop.example": {"at": reply.position,
-                                                  "by": "owner_act_toward_sender"}}
+        assert case.admissions(index) == {"shop@shop.example": {
+            "at": reply.position, "by": mailcases.BY_OWNER_ACT, "act": reply.digest}}
         assert result.gained_facts == 1 and result.admitted == 1 and result.observed == 0
 
     def test_later_mail_on_no_case_joins_the_case_the_recheck_opened(self, tmp_path):
@@ -351,7 +352,8 @@ class TestRunDiscipline:
         recheck(clean, FakeHimalaya(served))
         (case_clean,) = [c for c in mailcases.CaseStore(clean).cases.values()
                          if "ORD-55501" in c.keys]
-        assert "shop.example" in case_clean.admitted  # the scenario reaches admission
+        assert "shop@shop.example" in case_clean.admissions(
+            mailindex.MailIndex(clean))  # the scenario reaches admission
         real = mailcases.CaseStore._save
         writes = []
         monkeypatch.setattr(mailcases.CaseStore, "_save",

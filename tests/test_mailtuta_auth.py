@@ -193,4 +193,4 @@ class TestEndToEnd:
                        extra=("In-Reply-To: <o1@lampshop.example>",))
         run(tmp_path, [tuta(FakeHimalaya({"INBOX": [inbound], "Sent": [reply]}))])
         (case,) = mailcases.CaseStore(tmp_path).cases.values()
-        assert "lampshop.example" in case.admitted
+        assert "orders@lampshop.example" in case.admissions(mailindex.MailIndex(tmp_path))

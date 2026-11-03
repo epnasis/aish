@@ -210,9 +210,10 @@ def show_text(state_dir: os.PathLike | str, store: mailcases.CaseStore, case_id:
         lines.append("Parties: " + ", ".join(
             f"{_safe(info.get('name'), NAME_CHARS)} <{who}>" if info.get("name") else who
             for info, who in shown))
-    if case.admitted:
+    admitted = case.admissions(mailindex.MailIndex(state_dir))
+    if admitted:
         lines.append("Senders admitted on it (by your acts toward them): "
-                     + ", ".join(_safe(d, 60) for d in sorted(case.admitted)))
+                     + ", ".join(_safe(a, ADDRESS_CHARS) for a in sorted(admitted)))
     verdicts = mailverdicts.VerdictStore(state_dir)
     mails = sorted(case.mails)
     lines.append(f"Mails ({len(mails)}, oldest first):" if mails else "Mails: none yet.")

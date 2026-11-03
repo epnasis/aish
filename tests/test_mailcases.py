@@ -102,7 +102,7 @@ class TestAliasAdmission:
                   subject="Order LS-48213 payment failed", at=T0 + DAY),
         )
         (case,) = store.cases.values()
-        assert set(case.admitted) == {"lampshop.example"}
+        assert set(case.admissions(index)) == {"orders@lampshop.example"}
 
     def test_his_reply_addressed_to_the_sender_admits_it(self):
         index, store = build(
@@ -111,7 +111,7 @@ class TestAliasAdmission:
                   at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)),
         )
         (case,) = store.cases.values()
-        assert case.admitted["lampshop.example"]["by"] == "owner_act_toward_sender"
+        assert case.admissions(index)["orders@lampshop.example"]["by"] == mailcases.BY_OWNER_ACT
 
     def test_his_bcc_to_the_shop_admits_it(self):
         index, store = build(
@@ -121,25 +121,31 @@ class TestAliasAdmission:
                   in_reply_to="s1@lampshop.example", labels=("SENT",)),
         )
         (case,) = store.cases.values()
-        assert "lampshop.example" in case.admitted
+        assert "orders@lampshop.example" in case.admissions(index)
 
-    def test_a_shared_providers_domain_is_admitted_by_nobodys_act(self):
-        """N1: admission is domain-scoped, so at a domain many addresses use it
-        would admit everyone there; his act names one address, so nobody is."""
+    def test_at_a_shared_provider_only_the_address_he_wrote_to_is_admitted(self):
+        """Admission is EXACT (round-8 B2): at a domain many people use, the
+        seller he wrote to is admitted and a stranger there is not — it is
+        flagged on the case and recorded as withheld."""
         fillers = [gmail(f"f{n}", frm=f"user{n}@gmail.example", subject="hi", at=T0 - DAY + n)
                    for n in range(mailindex.ENTITY_DOMAIN_MAX_SENDERS)]
         seller = gmail("s1", frm="seller@gmail.example", subject="Order LS-48213 confirmed",
                        body="Your order LS-48213. Total 249,00 zł.", at=T0,
                        message_id="s1@gmail.example")
+        stranger = gmail("x", frm="stranger@gmail.example", subject="Order LS-48213 refund",
+                         body="Refund for order LS-48213.", at=T0 + DAY)
         index, store = build(
             *fillers, seller,
             gmail("o", frm=OWNER, to="seller@gmail.example", subject="Re: Order LS-48213",
                   at=T0 + 60, in_reply_to="s1@gmail.example", labels=("SENT",)),
+            stranger,
         )
         (case,) = [c for c in store.cases.values() if "LS-48213" in c.keys]
-        assert case.admitted == {}
-        # Note 2: the withholding is recorded where the admission would be.
-        assert case.withheld["gmail.example"]["by"] == mailindex.AIM_SHARED_DOMAIN
+        assert set(case.admissions(index)) == {"seller@gmail.example"}
+        flags = mailcases.case_flags(store, header(index, stranger), (), [case.id], index)
+        assert flags.sender_not_admitted == (case.id,)
+        # The withholding is recorded where the admission would be.
+        assert case.withheld["stranger@gmail.example"]["by"] == mailindex.AIM_SIBLING
         loaded = mailcases.Case.from_json(json.loads(json.dumps(case.as_json())))
         assert loaded.withheld == case.withheld
 
@@ -155,7 +161,7 @@ class TestAliasAdmission:
                       at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)),
             )
             (case,) = store.cases.values()
-            assert len(case.mails) == 2 and case.admitted == {}, to
+            assert len(case.mails) == 2 and case.admissions(index) == {}, to
 
     def test_a_domain_he_did_not_address_is_not_admitted_by_his_act(self):
         index, store = build(
@@ -166,16 +172,17 @@ class TestAliasAdmission:
                   at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)),
         )
         (case,) = store.cases.values()
-        assert set(case.admitted) == {"lampshop.example"}
+        assert set(case.admissions(index)) == {"orders@lampshop.example"}
 
     def test_a_judged_proposal_is_counted_and_admits_nothing(self):
-        _index, store = build(store_order())
+        index, store = build(store_order())
         (case,) = store.cases.values()
         store.propose(case.id, "lampshop-payments.example")
         store.propose(case.id, "lampshop-payments.example")
         assert case.proposals == {"lampshop-payments.example": 2}
-        assert "lampshop-payments.example" not in case.admitted
-        assert "lampshop-payments.example" not in store.admitted_domains((T0 + 9 * DAY, "z"))
+        assert case.admissions(index) == {}
+        assert "lampshop-payments.example" not in store.admitted_domains(
+            (T0 + 9 * DAY, "z"), index)
 
 
 class TestCorrelator:
@@ -237,23 +244,24 @@ class TestCaseFlags:
         index, store, change = self.builder_case()
         (case,) = store.cases.values()
         flags = mailcases.case_flags(store, change, mailcases.extract_coordinates(IBAN_NEW),
-                                     [case.id])
+                                     [case.id], index)
         assert flags.coordinates_changed == (case.id,)
 
     def test_the_same_account_again_is_not_flagged(self):
         index, store, change = self.builder_case()
         (case,) = store.cases.values()
         same = mailcases.case_flags(store, change, mailcases.extract_coordinates(IBAN_OLD),
-                                    [case.id])
+                                    [case.id], index)
         assert same.coordinates_changed == ()
 
     def test_a_sender_outside_the_cases_admitted_senders_is_flagged(self):
         index, store, change = self.builder_case(later_from="office@bui1der.example",
                                                  later_auth="fail")
         (case,) = store.cases.values()
-        flags = mailcases.case_flags(store, change, (), [case.id])
+        flags = mailcases.case_flags(store, change, (), [case.id], index)
         assert flags.sender_not_admitted == (case.id,)
-        assert mailgate.lookalike_of("bui1der.example", store.admitted_domains(change.position))
+        assert mailgate.lookalike_of("bui1der.example",
+                                     store.admitted_domains(change.position, index))
 
     def test_a_stranger_cannot_seed_the_account_it_later_asks_for(self):
         """Found in delivery review's wake: a sender passing DMARC on its OWN
@@ -272,9 +280,9 @@ class TestCaseFlags:
                     body=f"Pay order LS-77001 now to {IBAN_NEW}", at=T0 + 2 * DAY)
         index, store = build(order, shop, thanks, seed, ask)
         (case,) = store.cases.values()
-        assert set(case.admitted) == {"shop.example"}
+        assert set(case.admissions(index)) == {"shop@shop.example"}
         flags = mailcases.case_flags(store, header(index, ask),
-                                     mailcases.extract_coordinates(IBAN_NEW), [case.id])
+                                     mailcases.extract_coordinates(IBAN_NEW), [case.id], index)
         assert flags.coordinates_changed == (case.id,)
         assert flags.sender_not_admitted == (case.id,)
 
@@ -487,7 +495,7 @@ class TestTheReobservation:
         done = mailwatch.reobserve(forward)
         assert done.opened == 1 and done.admitted == []
         (case,) = mailcases.CaseStore(forward).cases.values()
-        assert len(case.mails) == 2 and case.admitted == {}
+        assert len(case.mails) == 2 and case.admissions(mailindex.MailIndex(forward)) == {}
 
         reply = tmp_path / "reply"
         index_all(reply, store_order(), gmail(
@@ -495,7 +503,7 @@ class TestTheReobservation:
             at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)))
         done = mailwatch.reobserve(reply)
         (case,) = mailcases.CaseStore(reply).cases.values()
-        assert done.admitted == [f"{case.id}:lampshop.example"]
+        assert done.admitted == [f"{case.id}:orders@lampshop.example"]
         assert mailwatch.reobserve(reply).admitted == []
 
 
@@ -524,3 +532,65 @@ class TestHisBccIsAddressingOnTheCase:
         legacy = mailcases.Case.from_json(case.as_json())
         legacy.parties["desk@lampshop.example"] = {"at": case.created, "name": ""}
         assert legacy.addressed_at("desk@lampshop.example", index) is not None
+
+
+class TestAdmissionsAreDerivedNeverStored:
+    """Round-8 B2: `Case.admissions` is computed from the case's mail and his
+    trust on every read — no transient state can ratchet a grant."""
+
+    def reply(self, at=T0 + 60, to="orders@lampshop.example"):
+        return gmail("o", frm=OWNER, to=to, subject="Re: Order LS-48213", at=at,
+                     in_reply_to="s1@lampshop.example", labels=("SENT",))
+
+    def test_a_legacy_stored_admission_grants_nothing(self):
+        index, store = build(store_order())
+        (case,) = store.cases.values()
+        raw = case.as_json()
+        raw["admitted"] = {"evil.example": {"at": [T0, ""], "by": "owner_act_toward_sender"}}
+        legacy = mailcases.Case.from_json(raw)
+        assert legacy.admissions(index) == {}
+        assert "admitted" not in legacy.as_json()
+
+    def test_moving_his_act_off_the_case_takes_its_admission_away(self):
+        index, store = build(store_order(), self.reply())
+        (case,) = store.cases.values()
+        assert set(case.admissions(index)) == {"orders@lampshop.example"}
+        other = store.act(mailcases.CREATE, {"title": "Elsewhere", "keys": []}, by="owner",
+                          now=T0 + DAY)["case"]
+        his = header(index, self.reply())
+        store.act(mailcases.MOVE, {"case": case.id, "into": other, "mail": his.digest},
+                  by="owner", now=T0 + 2 * DAY)
+        assert store.cases[case.id].admissions(index) == {}
+
+    def test_he_must_address_the_sender_after_its_authenticated_sighting(self):
+        """His mail BEFORE the shop's first authenticated mail admits nobody;
+        the admission is as of his act after it, never earlier."""
+        first = gmail("o0", frm=OWNER, to="orders@lampshop.example", subject="Order LS-48213",
+                      at=T0 - 60, labels=("SENT",))
+        index, store = build(first, store_order())
+        (case,) = store.cases.values()
+        assert case.admissions(index) == {}
+        index, store = build(first, store_order(), self.reply())
+        (case,) = store.cases.values()
+        his = header(index, self.reply())
+        assert case.admissions(index)["orders@lampshop.example"]["at"] == his.position
+
+    def test_an_unauthenticated_sighting_is_no_sighting(self):
+        forged = gmail("s1", frm="Lamp Shop <orders@lampshop.example>",
+                       subject="Order LS-48213 confirmed", body="Order LS-48213. 249,00 zł.",
+                       at=T0, message_id="s1@lampshop.example", auth="fail")
+        his_first = gmail("o0", frm=OWNER, to="orders@lampshop.example",
+                          subject="Order LS-48213", at=T0 - 60, labels=("SENT",))
+        index, store = build(his_first, forged, self.reply())
+        (case,) = store.cases.values()
+        assert case.admissions(index) == {}
+
+    def test_a_sibling_seen_before_his_act_is_not_admitted_by_it(self):
+        """His act To orders@ admits orders@, never billing@ at the same
+        domain, even when billing@ was seen authenticated first."""
+        billing = gmail("b1", frm="billing@lampshop.example", subject="Invoice for LS-48213",
+                        body="Invoice for order LS-48213.", at=T0 + 30)
+        index, store = build(store_order(), billing, self.reply())
+        (case,) = store.cases.values()
+        assert set(case.admissions(index)) == {"orders@lampshop.example"}
+        assert case.withheld["billing@lampshop.example"]["by"] == mailindex.AIM_SIBLING

@@ -137,20 +137,20 @@ did with it, split by which header gated it — so the gate can be narrowed on e
 `known` or `first-contact`, from `owner_acts`:
 
 - `wrote` — an outbound mail addressed to the address: the address itself among its To, Cc or
-  Bcc (`mailindex.addressed_to`; his Bcc is addressing — `test_a_bcc_to_the_address_is_writing_to_it`);
-- `replied` — an outbound mail whose OWN In-Reply-To names a mail from that address AND that is
-  aimed at it (`mailindex.aimed_at`: the address itself, or any address at its domain when that
-  domain names one party — at a shared provider, his reply To friend@ is no act toward
-  stranger@, `test_at_a_shared_domain_his_reply_to_a_friend_is_no_act_toward_a_stranger`). Membership of the same conversation
-  is not enough: a hostile mail can put an owner thread's Message-IDs in its References and join
-  it, and his earlier replies there must not become acts toward it. Nor is In-Reply-To alone
-  (2026-11-03): his forward of a sender's mail to somebody else is not an act toward the sender.
-  Measured on the frozen copy: of 1,132 inbound mails, 3 changed grade, all from
-  automated@airbnb.com — `known` (1 act, `replied`, his forward c6046a0ab382 To bip@wenda.eu) →
-  `first-contact`. `test_a_forward_or_reply_sent_elsewhere_is_no_act_toward_the_sender`;
+  Bcc (`mailindex.aimed_at`; his Bcc is addressing — `test_a_bcc_to_the_address_is_writing_to_it`).
+  **A reply is not a kind of its own** (round-8 B1): a reply is an act toward the sender only when
+  it is addressed to it, and then it is a `wrote`. In-Reply-To naming the sender's mail is never
+  enough — his forward of a sender's mail to somebody else is no act toward the sender (measured on
+  the frozen copy, 2026-11-03: 3 grades from automated@airbnb.com went `known` → `first-contact`,
+  their one act having been his forward c6046a0ab382 To bip@wenda.eu) — and neither is membership
+  of the conversation, which a hostile mail joins by naming an owner thread's Message-IDs in its
+  References. His reply to the sender's mail sent To ANOTHER address at its domain is recorded in
+  the grade's `withheld` (`["replied"]`, `mailindex.AIM_SIBLING`) and never counted.
+  `test_a_reply_to_a_sibling_address_is_withheld_never_counted`,
+  `test_a_forward_or_reply_sent_elsewhere_is_no_act_toward_the_sender`;
 - `case` — a case he transacted on includes the address AS SOMEONE HE DEALT WITH (from the case
-  store, as of): a party he addressed on that case, or one at a domain admitted there by his act
-  toward it. **Since 2026-11-02 a party records its provenance** (`via`: `owner` or `inbound`,
+  store, as of): a party he addressed on that case, or an address admitted there
+  (`Case.admissions`). **Since 2026-11-02 a party records its provenance** (`via`: `owner` or `inbound`,
   `authenticated`, and `addressed` — when he first addressed it): a sender that merely JOINED a
   case by quoting its key is a party, never a `case` act (`Case.dealt_with_at`,
   `CaseStore.owner_case_parties`). Before it, an authenticated stranger quoting his real order
@@ -201,9 +201,9 @@ mail is not his own or authenticated characterises nothing). `TestCaseFactsComeO
 it is a MEMBER for anything that grants or decides visibility only when it is his own mail, or
 authenticated AND joined through a key a trusted mail recorded, a key he typed himself, or a direct
 reply to his mail on the case — a mail of his that was aimed at the replier
-(`mailindex.aimed_at`, 2026-11-03: his Message-ID reaching a stranger by forward grants that
-stranger no membership, `test_a_reply_to_his_mail_is_trusted_only_from_whom_he_wrote_to`; and at a
-shared provider only the address he wrote to is,
+(`mailindex.aimed_at`, exact: his Message-ID reaching a stranger by forward grants that
+stranger no membership, `test_a_reply_to_his_mail_is_trusted_only_from_whom_he_wrote_to`; nor does
+a reply from another address at the same domain,
 `test_at_a_shared_domain_only_the_address_he_wrote_to_is_trusted`). `mailitems.Context.cases_of` is the one reader — the case tie, stored
 amounts, an item's meaning, admitted domains and his closed case covering an item go through it,
 and so does the keeper release on EVERY surface: the report, `/mail` and the CSV all read
@@ -253,59 +253,48 @@ tool that reads his Sent folder itself (the `gws` mail tools) hands the model wh
 provider returns; that is outside aish's renderers.
 `TestABccdPartyIsNeverAnAddressAModelReads` (`tests/test_mailitems.py`).
 
-**Alias admission is deterministic corroboration, and the corroboration is HIS.** A sender
-domain is admitted on a case when it was seen there in authenticated mail AND he then acted on
-the case TOWARD it — a mail of his with an address at that domain among its To, Cc or Bcc
-recipients, when that domain names one party (`_admit_toward`). Admission is domain-scoped by
-design (aliases: orders@ and billing@ of one shop), so at a shared provider's domain it would admit
-everyone there; his act names one address, so such a domain is admitted by nobody's act
-(`test_a_shared_providers_domain_is_admitted_by_nobodys_act`). **One predicate,
-`mailindex.aimed_at`**, owns "his act is aimed at X" for the admission, the ledger's `replied` and
-an inbound reply's case membership: the address itself among To/Cc/Bcc (`Header.addressed` —
-`correspondents` stays To/Cc), or any address at its domain when `MailIndex.names_one_party` says
-the domain names one party — fewer than `mailindex.ENTITY_DOMAIN_MAX_SENDERS` distinct addresses
-at it in any header, the same count the tier rule's `entity` reads (`TestBccAndTheSharedDomain` in
-`tests/test_mailindex.py`). **The residual, stated (round-7 review):** `names_one_party` reads ONE
-global address count at the index's size TODAY. The count only grows, so the answer for a domain
-can only go from "one party" to "shared", never back — but a GRANT made while it said "one party"
-is not taken back. On a young index (a fresh install or a rebuild) a shared provider reads as one
-party: on the frozen copy, walking the index in mail-time order from its first mail (2026-09-01),
-gmail.com reached 5 distinct addresses only on 2026-09-09 and wenda.eu on 2026-09-04. An admission
-minted in that window is stored in `case.admitted` and never retracted — `--reobserve` only adds,
-and nothing re-derives admissions. A grade is computed per mail when it is assessed and recorded
-with that verdict, and membership at read time; neither is a grant later decisions read back. An
-admission is: every later decision on the case reads `case.admitted`. The count is also not as-of (a decision cannot be
-replayed with the count it saw), and an unauthenticated mail's To/Cc lists add addresses to it.
-The replacement is a design question, not built (round-7 Step B). **When the count is the reason
-an aim is withheld it is recorded** where the decision already is: an admission his act would
-have minted is written to `case.withheld[domain]` (`at`, `by`: `shared_domain`, `act`) and admits
-nothing; a grade act it withheld is listed in the grade's `withheld` (recorded in every
-`mail_verdict`'s `gate.grade`, never counted). Membership is decided at read time and recorded
-nowhere, so its withholding has no record. On the frozen copy (round 7) both are empty. With
-no index to count it, `aim` answers `AIM_NO_INDEX` — not aimed, and never recorded as shared
-(round-8 note 3).
-**His Bcc** is
-parsed from his outbound mail only (`Header.bcc`; inbound mail never carries one, and index files
-written before 2026-11-03 load with none — on the frozen copy 0 of 22 outbound headers hold one,
-so it can act only on mail indexed from now on. Whether his Gmail Sent copy's `format full`
-headers and his Tuta Sent copy carry the Bcc line was NOT checked against his real mailboxes; the
-parse reads it wherever it is present). **Addressed TO it, nothing less** (2026-11-03): a reply or
-a forward whose In-Reply-To names the sender's mail, sent to someone else, is not an act toward that sender. The
-first version also aimed every reply at the domain of the mail it replied to, so his forward of an
-Airbnb confirmation to his own other address (`Fwd: Confirmed: …`, To bip@…) admitted airbnb.com
-on the booking's case — measured on the frozen copy by the backlog re-observation. Restrict-only:
-of the one admission the frozen copy held (janeba-time.pl, by his reply addressed to
-zamowienia@janeba-time.pl), the corrected law still mints it. One law for the live pass, the
-backfill and `--reobserve`. The design's wording is *"authenticated domain co-occurring on an
-owner-transacted case"*; co-occurrence alone was the first draft and the design review broke
-it: DMARC proves a sender owns ITS domain, and an order number is the kind of string that leaks,
-so an attacker passing DMARC from his own domain with the owner's real order number would have
-become an admitted sender on that order. Requiring his act toward the domain is stricter than
-the design's sentence and admits fewer senders — couriers he never writes to are never admitted
-— which costs correlation strength, never safety. **A Reader's judgement never admits.** Its case
-choice for a sender not admitted there is recorded as a proposal with a count
-(`CaseStore.propose`) and read by nothing. The owner-act path for admitting by hand is S3.
-`TestAliasAdmission`.
+**Admission is exact, derived, and his** (round-8 B1/B2). An ADDRESS is admitted on a case at his
+first mail on the case that addresses it exactly — the address itself among its To, Cc or Bcc
+(`Header.addressed`, read through `mailindex.aimed_at`) — AFTER it was seen on the case in
+authenticated mail, or at his trust of it (`Case.trusted` — no code writes it yet; round-8 B3
+adds the trust verb). **One predicate, `mailindex.aimed_at`**,
+owns "his act is aimed at X" for admission, the ledger's `wrote` and an inbound reply's case
+membership, and it has no domain clause: another address at the same domain is a sibling
+(`mailindex.AIM_SIBLING`), somebody else until he says otherwise. **Derived on every read, never
+stored** (`Case.admissions`): computed from the case's own mail and his trust each time it is
+asked, so a transient state — a young index, a since-moved mail — can never leave a permanent
+grant; moving his act off the case takes its admission away, and a legacy `admitted` field in a
+case file is ignored (`TestAdmissionsAreDerivedNeverStored`). This retires the round-7 residual:
+no standing decision reads the global address count any more (`MailIndex.names_one_party` stays
+only for the tier rule's `entity` tie, which grants no tier, and the trust chip's offer gate).
+**What reads it:** the sender-not-admitted flag is exact (`case_flags`: an inbound sender whose
+ADDRESS is not admitted, on a case with admitted addresses); the tier rule's "same counterparty"
+(an admitted address on the anchor's case), `Case.dealt_with_at` and the Reader's proposal
+counting read addresses. What is about a DOMAIN reads the domains of admitted addresses
+(`admitted_domains_before`): the lookalike flag, which domain a case's account history may come
+from (`coordinates_before`), and the Reader's `admitted_senders` — its charter's shape, unchanged.
+**Withheld, recorded:** an authenticated sender on the case whom he never addressed there, at a
+domain where he addressed another address on the case, is written to `case.withheld[address]`
+(`at`, `by`: `sibling`, `act`, `mail`) by `record_withheld` — at every observation and after the
+Tuta recheck. It admits nothing; it is the trust chip's trigger. **Measured on the frozen copy**
+(round 8, fresh `cp -Rp` dup, 50951a5 vs this): the one stored admission (janeba-time.pl, case
+order 265104119) re-derives as zamowienia@janeba-time.pl at the same act (76d5b7dca87a); 0 lost,
+0 gained, 0 withheld, 0 sender-not-admitted answers changed; grades, membership, the 77 derived
+items and 4 waiting-on rows identical. **His Bcc** is parsed from his outbound mail only
+(`Header.bcc`; inbound mail never carries one, and index files written before 2026-11-03 load
+with none — on the frozen copy 0 of 22 outbound headers hold one, so it can act only on mail
+indexed from now on. Whether his Gmail Sent copy's `format full` headers and his Tuta Sent copy
+carry the Bcc line was NOT checked against his real mailboxes; the parse reads it wherever it is
+present). The design's wording is *"authenticated domain co-occurring on an owner-transacted
+case"*; co-occurrence alone was the first draft and the design review broke it: DMARC proves a
+sender owns ITS domain, and an order number is the kind of string that leaks, so an attacker
+passing DMARC from his own domain with the owner's real order number would have become an
+admitted sender on that order. Requiring his exact act is stricter than the design's sentence and
+admits fewer senders — couriers he never writes to, and a shop's second address, are never
+admitted by code — which costs correlation strength, never safety. **A Reader's judgement never
+admits.** Its case choice for a sender not admitted there is recorded as a proposal with a count
+(`CaseStore.propose`) and read by nothing. `TestAliasAdmission`, `TestBccAndTheSharedDomain`
+(`tests/test_mailindex.py`).
 
 **Candidates** (`candidates`): a shared key, a shared amount, a counterparty name appearing in
 the mail (display names and domain labels; `difflib` at `NAME_SIMILARITY` (0.85) — no
@@ -1782,9 +1771,10 @@ observation already recorded is never overwritten.
   (`CaseStore.observe`), so it may open a case or join one. On every case it is on, it gains
   the facts observation records only for authenticated mail, each at its OWN position
   (`CaseStore.record_authenticated`): the sender's domain seen (moved earlier, never later), the
-  amounts, the payment coordinates. A LATER mail of his on a case a newly authenticated mail is
-  on re-asks admission as of itself (`CaseStore.admit_toward`), so his reply toward that sender
-  now admits it, at the reply's position. A LATER mail on no case that carries a key of an
+  amounts, the payment coordinates. Admissions are derived (`Case.admissions`), so once the run
+  records the new authentication in the index, his later mail on the case ADDRESSED to that
+  sender admits it, at that mail's position; the run counts what became admitted and records the
+  siblings it now withholds (`record_withheld`). A LATER mail on no case that carries a key of an
   earlier newly authenticated mail now on a case is observed, and joins it. Mail he moved is never re-observed: it stays
   where he put it and gains its sighting there. Grades, the report's Follow-ups and the
   ledger read the stores and the header at read time, so nothing else is written.

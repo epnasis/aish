@@ -265,7 +265,7 @@ def gate_facts(
     return mailreader.Facts(
         auth=auth,
         grade=mailgate.grade(index, header, auth, store.owner_case_parties(as_of, index)),
-        flags=mailgate.red_flags(header, store.admitted_domains(as_of)),
+        flags=mailgate.red_flags(header, store.admitted_domains(as_of, index)),
         newsletter=mailgate.newsletter(header),
         candidates=mailcases.candidates(store, header, body),
     )
@@ -313,8 +313,8 @@ def assess(
             linked.append(chosen)
             case = store.cases.get(chosen)
             domain = mailindex.domain_of(header.from_addr)
-            if propose and case is not None and domain not in case.admitted_before(
-                header.position
+            if propose and case is not None and header.from_addr not in case.admitted_before(
+                header.position, index
             ):
                 # The Reader placed a mail from a sender not admitted on this
                 # case: a PROPOSAL, counted on the case, admitting nothing.
@@ -322,7 +322,7 @@ def assess(
     coordinates = set(code_coordinates)
     if verdict is not None:
         coordinates |= {mailcases.normalize_coordinate(c.value) for c in verdict.coordinates}
-    flags = mailcases.case_flags(store, header, coordinates, linked)
+    flags = mailcases.case_flags(store, header, coordinates, linked, index)
     # The cases the mail is ON — those it joined or opened at ingest, and the
     # key-linked ones — which a keeper clamp holds until they close.
     on = {c.id for c in store.cases.values() if header.position in c.mails} | set(linked)
@@ -904,9 +904,9 @@ class Reobserve:
     observed: int = 0  # index mail on no case, folded through the case store
     joined: int = 0  # of those, mails that joined an EXISTING case
     opened: int = 0  # cases this run opened
-    # Senders admitted by HIS act addressed to them (`_admit_toward`) — the
-    # law the live path and the backfill run, so the fold grants exactly what
-    # watching live would have; each as "case:domain".
+    # Addresses that became admitted while folding (`Case.admissions`, derived:
+    # his act addressed to them) — the law the live path and the backfill run,
+    # so the fold grants exactly what watching live would have; "case:address".
     admitted: list[str] = field(default_factory=list)
     cases_before: int = 0
     cases_after: int = 0
@@ -921,7 +921,7 @@ def reobserve(state_dir: os.PathLike | str) -> Reobserve:
     one-time-code rule, trusted facts): every indexed mail on no case is folded
     through `observe_unplaced`, the backfill's own loop — no mailbox is read, no
     Reader is called, and a sender is admitted only by the live law (his act
-    addressed to its domain, `CaseStore._admit_toward`).
+    addressed to its exact address, `Case.admissions`).
     Idempotent: a mail placed on a case is never observed again, so a second run
     joins and opens nothing. Reports the cases it opened that hold more than one
     mail."""
@@ -998,9 +998,10 @@ def recheck_tuta_auth(
       watcher would have (`CaseStore.observe`): it may open a case or join one;
     - on every case it is on, it gains the facts observation records only for
       authenticated mail, at its own position (`record_authenticated`);
-    - a LATER owner mail on a case a newly authenticated mail is on re-asks
-      admission as of itself (`admit_toward`) — his reply toward that sender
-      now admits it;
+    - admissions are DERIVED (`Case.admissions`), so once the index records the
+      new authentication his later mail addressed to that sender admits it,
+      as of that mail; the run counts what became admitted and records the
+      siblings it now withholds (`record_withheld`);
     - a LATER mail on no case that carries a key of an earlier newly
       authenticated mail now on a case is observed, and joins it.
     Grades and the report read the stores and the header at read time, so
@@ -1065,11 +1066,18 @@ def recheck_tuta_auth(
         # applied and nothing recorded; the next run redoes the whole set.
         result.deferred = len(found)
         return result
+    # Admissions are derived from the index's headers, so what this run admits
+    # is read once its observations are recorded (`Case.admissions`).
+    before = {c.id: set(c.admissions(index)) for c in store.cases.values()}
     _follow_authentication(index, store, found, result, state_dir)
     for digest, parsed in found.items():
         if index.record_gateway_auth(digest, parsed.header.gateway_auth,
                                      parsed.header.gateway_auth_observed):
             result.rechecked += 1
+    for case in store.cases.values():
+        result.admitted += len(set(case.admissions(index)) - before.get(case.id, set()))
+        if mailcases.record_withheld(case, index):
+            store._save(case)
     result.cases_after = len(store.cases)
     return result
 
@@ -1139,7 +1147,6 @@ def _follow_authentication(
                 observation = store.observe(header, body, True, index,
                                             kind_of(header.digest))
                 result.observed += 1
-                result.admitted += len(observation.admitted)
                 changed.update(observation.cases)
                 on = cases_on(header.position)
             # Derived from where the mail IS, never from what this run changed:
@@ -1157,10 +1164,6 @@ def _follow_authentication(
                                                     kind_of(header.digest)))
             continue
         if on:
-            if header.direction == "out":
-                for case in on:
-                    if case.id in changed:
-                        result.admitted += len(store.admit_toward(case, header, index))
             continue
         if header.digest in moved or not run_keys:
             continue
@@ -1174,7 +1177,6 @@ def _follow_authentication(
             observation = store.observe(header, body, auth.authenticated, index,
                                         kind_of(header.digest))
             result.observed += 1
-            result.admitted += len(observation.admitted)
             changed.update(observation.cases)
 
 

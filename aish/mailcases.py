@@ -64,6 +64,10 @@ CLOSED = "closed"
 # — or a domain admitted by his act toward it — is someone he dealt with.
 OWNER_ADDRESSED = "owner"
 INBOUND = "inbound"
+#: How an address came to be admitted on a case (`Case.admissions`): his own
+#: mail addressed to it after it was seen there authenticated, or his trust.
+BY_OWNER_ACT = "owner_act_toward_sender"
+BY_OWNER_TRUST = "owner_trust"
 # The kind of a key he typed when he created a case: matched literally
 # (`_says_key`), where an extracted key needs its introducing word.
 OWNER_KEY = "yours"
@@ -390,14 +394,14 @@ class Case:
     mails: list[Position] = field(default_factory=list)
     parties: dict[str, dict[str, Any]] = field(default_factory=dict)  # addr -> {at, name}
     domains: dict[str, Position] = field(default_factory=dict)  # authenticated senders
-    admitted: dict[str, dict[str, Any]] = field(default_factory=dict)  # domain -> {at, by}
     owner_acts: list[Position] = field(default_factory=list)
     amounts: list[dict[str, Any]] = field(default_factory=list)  # {currency, cents, at}
     coordinates: list[dict[str, Any]] = field(default_factory=list)  # {value, at}
     proposals: dict[str, int] = field(default_factory=dict)  # "domain" -> count
-    # domain -> {at, by, act}: an admission his act would have minted but for
-    # the domain naming no single party (`mailindex.AIM_SHARED_DOMAIN`).
-    # Recorded so the withholding is observable; it admits nothing.
+    # address -> {at, by, act}: an authenticated sender on the case whom his
+    # act did NOT address, though it addressed another address at the same
+    # domain (`mailindex.AIM_SIBLING`). Recorded so the withholding is
+    # observable; it admits nothing.
     withheld: dict[str, dict[str, Any]] = field(default_factory=dict)
     # What the OWNER said about the case (the case verbs, `CaseStore.act`).
     # Code never writes these from mail: a title from his rename, a closure
@@ -410,6 +414,9 @@ class Case:
     merged_into: str = ""  # he merged this case into another; kept, never observed
     notes: list[dict[str, Any]] = field(default_factory=list)  # {at, text}
     reminders: list[dict[str, Any]] = field(default_factory=list)  # {at, due, text}
+    # {at, address, mail}: an address HE said to trust on this case (the trust
+    # verb, `CaseStore.act`) — an owner act, read by `Case.admissions`.
+    trusted: list[dict[str, Any]] = field(default_factory=list)
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -423,7 +430,6 @@ class Case:
                                if v.get("addressed") is not None else {})}
                         for a, v in self.parties.items()},
             "domains": {d: list(p) for d, p in self.domains.items()},
-            "admitted": {d: {**v, "at": list(v["at"])} for d, v in self.admitted.items()},
             "owner_acts": [list(p) for p in self.owner_acts],
             "amounts": [{**a, "at": list(a["at"])} for a in self.amounts],
             "coordinates": [{**c, "at": list(c["at"])} for c in self.coordinates],
@@ -436,6 +442,7 @@ class Case:
             "merged_into": self.merged_into,
             "notes": [dict(n) for n in self.notes],
             "reminders": [dict(r) for r in self.reminders],
+            "trusted": [dict(t) for t in self.trusted],
         }
 
     @classmethod
@@ -455,7 +462,6 @@ class Case:
             mails=[_pos(p) for p in raw.get("mails") or ()],
             parties=parties,
             domains={d: _pos(p) for d, p in (raw.get("domains") or {}).items()},
-            admitted=stamped("admitted"),
             owner_acts=[_pos(p) for p in raw.get("owner_acts") or ()],
             amounts=[{**a, "at": _pos(a["at"])} for a in raw.get("amounts") or ()],
             coordinates=[{**c, "at": _pos(c["at"])} for c in raw.get("coordinates") or ()],
@@ -468,6 +474,7 @@ class Case:
             merged_into=str(raw.get("merged_into") or ""),
             notes=[dict(n) for n in raw.get("notes") or () if isinstance(n, dict)],
             reminders=[dict(r) for r in raw.get("reminders") or () if isinstance(r, dict)],
+            trusted=[dict(t) for t in raw.get("trusted") or () if isinstance(t, dict)],
         )
 
     def display_title(self) -> str:
@@ -490,10 +497,45 @@ class Case:
             return True
         return any(p < as_of for p in self.owner_acts)
 
-    def admitted_before(self, as_of: Position) -> set[str]:
-        return {d for d, v in self.admitted.items() if v["at"] < as_of}
+    def admissions(self, index: mailindex.MailIndex | None) -> dict[str, dict[str, Any]]:
+        """Every address admitted on this case, DERIVED from scratch on every
+        call — never stored, so no transient state can ratchet a grant
+        (round-8 B2). An address is admitted at his first mail on the case
+        that ADDRESSES it exactly (To/Cc/Bcc, `mailindex.aimed_at`) after it
+        was seen on the case in authenticated mail, or at his trust of it
+        (`trusted`, the case's own record of his act). address -> {at, by,
+        act|mail}. With no index the case's mail cannot be read: nothing."""
+        if index is None:
+            return {}
+        seen = authenticated_senders(self, index)
+        out: dict[str, dict[str, Any]] = {}
+        for position in sorted(self.mails):
+            header = index.get(position[1])
+            if header is None or header.direction != "out":
+                continue
+            for address in header.addressed:
+                first = seen.get(address)
+                if first is not None and first < position and address not in out:
+                    out[address] = {"at": position, "by": BY_OWNER_ACT, "act": header.digest}
+        for act in self.trusted:
+            address = str(act.get("address") or "").lower()
+            at = (float(act.get("at") or 0.0), str(act.get("mail") or ""))
+            if address and (address not in out or at < tuple(out[address]["at"])):
+                out[address] = {"at": at, "by": BY_OWNER_TRUST, "mail": act.get("mail")}
+        return out
 
-    def coordinates_before(self, as_of: Position) -> set[str]:
+    def admitted_before(self, as_of: Position, index: mailindex.MailIndex | None) -> set[str]:
+        """The ADDRESSES admitted on the case strictly before `as_of`."""
+        return {a for a, v in self.admissions(index).items() if tuple(v["at"]) < as_of}
+
+    def admitted_domains_before(self, as_of: Position,
+                                index: mailindex.MailIndex | None) -> set[str]:
+        """The domains of those addresses — for what is about a DOMAIN (a
+        lookalike, which domain an account came from, the Reader's view)."""
+        return {mailindex.domain_of(a) for a in self.admitted_before(as_of, index)}
+
+    def coordinates_before(self, as_of: Position,
+                           index: mailindex.MailIndex | None = None) -> set[str]:
         """The case's account history as of the mail.
 
         When the case has ADMITTED senders, only accounts those senders sent
@@ -503,22 +545,23 @@ class Case:
         the very value it exists to question. With no admitted sender yet the
         whole authenticated history is all there is, and that is weaker; it
         is stated in `docs/mail-assistant.md`, not hidden."""
-        admitted = self.admitted_before(as_of)
+        admitted = self.admitted_domains_before(as_of, index)
         return {
             c["value"] for c in self.coordinates
             if c["at"] < as_of and (not admitted or c.get("domain") in admitted)
         }
 
-    def dealt_with_at(self, address: str, admitted: set[str] | frozenset[str],
-                      index: mailindex.MailIndex | None = None) -> Position | None:
+    def dealt_with_at(self, address: str, index: mailindex.MailIndex | None,
+                      as_of: Position | None = None) -> Position | None:
         """When this party became someone he dealt with on the case: he
-        addressed it, or its domain is admitted (by his act toward it)."""
+        addressed it, or it is admitted there (`admissions`) — before `as_of`
+        when given."""
         addressed = self.addressed_at(address, index)
-        domain = mailindex.domain_of(address)
-        via_admission = (self.admitted[domain]["at"] if domain in admitted
-                         and domain in self.admitted else None)
+        held = self.admissions(index).get(address)
+        via_admission = (tuple(held["at"]) if held is not None
+                         and (as_of is None or tuple(held["at"]) < as_of) else None)
         options = [p for p in (addressed, via_admission) if p is not None]
-        return min(options) if options else None
+        return min(options) if options else None  # type: ignore[type-var]
 
     def addressed_at(self, address: str, index: mailindex.MailIndex | None = None
                      ) -> Position | None:
@@ -609,9 +652,11 @@ def _absorb(into: Case, other: Case) -> None:
             kept.pop("authenticated", None)
     for domain, seen in other.domains.items():
         into.domains[domain] = min(seen, into.domains.get(domain, seen))
-    for domain, info in other.admitted.items():
-        if domain not in into.admitted or info["at"] < into.admitted[domain]["at"]:
-            into.admitted[domain] = info
+    # Admissions are derived from the mails and his trust, which both follow
+    # the merge; his trust acts and the withholding records travel with it.
+    into.trusted += [dict(t) for t in other.trusted]
+    for address, info in other.withheld.items():
+        into.withheld.setdefault(address, dict(info))
     into.owner_acts = sorted(set(into.owner_acts) | set(other.owner_acts))
     into.amounts += other.amounts
     into.coordinates += other.coordinates
@@ -770,6 +815,7 @@ class CaseStore:
         for case in touched.values():
             if position in case.mails:
                 continue
+            before = set(case.admissions(index))
             case.mails.append(position)
             # A case's recorded facts come only from his own or AUTHENTICATED
             # mail (`_record_facts`, the one list and the one law).
@@ -784,7 +830,6 @@ class CaseStore:
                     # from this act of his, never earlier.
                     if "addressed" not in info or tuple(info["addressed"]) > position:
                         info["addressed"] = position
-                admitted += self._admit_toward(case, header, index)
             else:
                 # An inbound sender is a party by joining, which is not trust:
                 # its provenance is kept, so nothing counts it as someone he
@@ -794,6 +839,8 @@ class CaseStore:
                     {"at": position, "name": mailindex.display_name(header.from_value),
                      "via": INBOUND, "authenticated": bool(authenticated)},
                 )
+            admitted += [f"{case.id}:{a}" for a in sorted(set(case.admissions(index)) - before)]
+            record_withheld(case, index)
             self._save(case)
         return Observation(keys, tuple(sorted(touched)), created, tuple(admitted))
 
@@ -853,42 +900,6 @@ class CaseStore:
                 changed = True
         return changed
 
-    def admit_toward(
-        self, case: Case, header: mailindex.Header, index: mailindex.MailIndex | None
-    ) -> list[str]:
-        """Re-ask, as of an owner act already on `case`, which senders it admits
-        (`_admit_toward`) — after the case gained an authenticated sighting
-        earlier than the act. Idempotent; saves when it admitted anything."""
-        if header.direction != "out" or header.position not in case.mails:
-            return []
-        admitted = self._admit_toward(case, header, index)
-        if admitted:
-            self._save(case)
-        return admitted
-
-    def _admit_toward(
-        self, case: Case, header: mailindex.Header, index: mailindex.MailIndex | None
-    ) -> list[str]:
-        """An owner act on a case admits the authenticated senders it was AIMED
-        at (`mailindex.aimed_at`: a domain among its To/Cc/Bcc recipients that
-        names one party — a shared provider's domain is admitted by nobody's
-        act) when they were already seen on the case. As of the act, never
-        earlier, and never a domain he did not address. Replying to or
-        forwarding a sender's mail is not by itself an act toward that sender:
-        his forward of an Airbnb confirmation to his own other address names
-        the Airbnb mail in its In-Reply-To and is addressed to nobody at Airbnb."""
-        out = []
-        for domain, seen in case.domains.items():
-            if domain in case.admitted or not seen < header.position:
-                continue
-            why = mailindex.aim(header, domain, index)
-            if why in (mailindex.AIM_ADDRESS, mailindex.AIM_DOMAIN):
-                case.admitted[domain] = {"at": header.position, "by": "owner_act_toward_sender"}
-                out.append(f"{case.id}:{domain}")
-            elif why == mailindex.AIM_SHARED_DOMAIN and domain not in case.withheld:
-                case.withheld[domain] = {"at": header.position, "by": why,
-                                         "act": header.digest}
-        return out
 
     def propose(self, case_id: str, domain: str) -> None:
         """A Reader said this mail belongs to `case_id`. Counted; admits nothing."""
@@ -1052,15 +1063,17 @@ class CaseStore:
 
     # -- as-of reads
 
-    def admitted_domains(self, as_of: Position) -> frozenset[str]:
-        return frozenset(d for c in self.cases.values() for d in c.admitted_before(as_of))
+    def admitted_domains(self, as_of: Position,
+                         index: mailindex.MailIndex | None) -> frozenset[str]:
+        return frozenset(d for c in self.cases.values()
+                         for d in c.admitted_domains_before(as_of, index))
 
     def owner_case_parties(self, as_of: Position,
                            index: mailindex.MailIndex | None = None
                            ) -> dict[str, list[float]]:
         """address -> times at which a case the owner transacted on included it
-        AS SOMEONE HE DEALT WITH: a party he addressed on that case, or one at
-        a domain admitted there by his act toward it — never a sender that
+        AS SOMEONE HE DEALT WITH: a party he addressed on that case, or an
+        address admitted there (`Case.admissions`) — never a sender that
         merely joined by quoting a key (round-3 review: an authenticated
         stranger quoting his real order number earned a "case" act, so the
         grade `known`, and third-party history)."""
@@ -1071,9 +1084,8 @@ class CaseStore:
             since = case.created if case.created_by == "owner" else min(
                 p for p in case.owner_acts if p < as_of
             )
-            admitted = case.admitted_before(as_of)
             for addr in case.parties:
-                when = case.dealt_with_at(addr, admitted, index)
+                when = case.dealt_with_at(addr, index, as_of)
                 if when is not None and when < as_of:
                     out.setdefault(addr, []).append(max(since, when)[0])
         return out
@@ -1175,28 +1187,73 @@ class CaseFlags:
         }
 
 
+def record_withheld(case: Case, index: mailindex.MailIndex | None) -> bool:
+    """Record every authenticated sender on the case whom he never addressed
+    there, at a domain where he addressed ANOTHER address on the case — the
+    sibling his exact law does not admit (`mailindex.AIM_SIBLING`), and the
+    trust chip's trigger. Only adds; admits nothing. True when it recorded."""
+    if index is None:
+        return False
+    admitted = case.admissions(index)
+    outs = [h for p in sorted(case.mails)
+            if (h := index.get(p[1])) is not None and h.direction == "out"]
+    changed = False
+    for sender, seen in authenticated_senders(case, index).items():
+        if sender in admitted or sender in case.withheld:
+            continue
+        acts = [h for h in outs if mailindex.aim(h, sender) == mailindex.AIM_SIBLING]
+        if acts and not any(mailindex.aimed_at(h, sender) for h in outs):
+            act = acts[0]
+            case.withheld[sender] = {"at": max(seen, act.position), "by": mailindex.AIM_SIBLING,
+                                     "act": act.digest, "mail": seen[1]}
+            changed = True
+    return changed
+
+
+def authenticated_senders(
+    case: Case, index: mailindex.MailIndex, *, before: Position | None = None
+) -> dict[str, Position]:
+    """Every sender address seen on the case in AUTHENTICATED inbound mail, at
+    its first such mail — strictly before `before` when given."""
+    from . import mailgate
+
+    out: dict[str, Position] = {}
+    for position in sorted(case.mails):
+        if before is not None and position >= before:
+            break
+        header = index.get(position[1])
+        if (header is None or header.direction != "in" or not header.from_addr
+                or header.from_addr in out):
+            continue
+        if mailgate.authenticate_header(header).authenticated:
+            out[header.from_addr] = position
+    return out
+
+
 def case_flags(
     store: CaseStore,
     header: mailindex.Header,
     coordinates: tuple[str, ...] | set[str],
     case_ids: tuple[str, ...] | list[str],
+    index: mailindex.MailIndex | None = None,
 ) -> CaseFlags:
     """For each case this mail is linked to: does it carry payment coordinates
     the case has never had, and is its sender outside the case's admitted
     senders? Both read history strictly before the mail."""
     as_of = header.position
-    domain = mailindex.domain_of(header.from_addr)
     changed, outsider = [], []
     wanted = {normalize_coordinate(c) for c in coordinates if c}
     for case_id in dict.fromkeys(case_ids):
         case = store.cases.get(case_id)
         if case is None:
             continue
-        history = case.coordinates_before(as_of)
+        history = case.coordinates_before(as_of, index)
         if wanted and history and not wanted <= history:
             changed.append(case_id)
-        admitted = case.admitted_before(as_of)
-        if header.direction == "in" and admitted and domain not in admitted:
+        # Exact: an address at an admitted address's domain is somebody else
+        # until he trusts it (round-8 B2).
+        admitted = case.admitted_before(as_of, index)
+        if header.direction == "in" and admitted and header.from_addr not in admitted:
             outsider.append(case_id)
     return CaseFlags(tuple(changed), tuple(outsider))
 
@@ -1221,8 +1278,8 @@ def case_file(store: CaseStore, case_id: str, index: mailindex.MailIndex,
     return {
         "keys": sorted(case.keys_before(as_of)),
         "owner_transacted": case.transacted_before(as_of),
-        "admitted_senders": sorted(case.admitted_before(as_of)),
-        "payment_coordinates_seen": sorted(case.coordinates_before(as_of)),
+        "admitted_senders": sorted(case.admitted_domains_before(as_of, index)),
+        "payment_coordinates_seen": sorted(case.coordinates_before(as_of, index)),
         "mails": mails[-12:],
     }
 
