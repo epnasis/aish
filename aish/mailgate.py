@@ -459,7 +459,7 @@ def owner_acts(
     for header in index.before(as_of):
         if header.direction != "out":
             continue
-        if address in header.correspondents:
+        if mailindex.addressed_to(header, address):
             acts.append((header.at, "wrote"))
             continue
         # A reply counts only when its OWN In-Reply-To names a message that
@@ -469,7 +469,7 @@ def owner_acts(
         # must not become acts toward it. And it must be ADDRESSED to the
         # sender's domain (`mailindex.aimed_at`): a forward of its mail to
         # someone else is not an act toward it.
-        if not mailindex.aimed_at(header, address):
+        if not mailindex.aimed_at(header, address, index):
             continue
         for parent_id in header.in_reply_to:
             parent = index.reply_parent(parent_id, header.position)

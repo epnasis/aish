@@ -48,6 +48,7 @@ def gmail(
     list_unsubscribe: str = "",
     html: str = "",
     attachments: tuple[str, ...] = (),
+    bcc: str = "",
 ) -> dict:
     """One `gws gmail users messages get --format full` response."""
     domain = frm.rsplit("@", 1)[-1].strip(">")
@@ -65,6 +66,8 @@ def gmail(
         {"name": "Subject", "value": subject},
         {"name": "Date", "value": "Mon, 1 Jan 2026 10:00:00 +0000"},
     ]
+    if bcc:
+        headers.append({"name": "Bcc", "value": bcc})
     if message_id is not None:
         headers.append({"name": "Message-ID", "value": f"<{message_id or gid + '@mail.example'}>"})
     if in_reply_to:

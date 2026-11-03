@@ -170,6 +170,28 @@ class TestLedger:
             grade = self.grade(index, later)
             assert grade.acts == 0 and grade.grade == mailgate.FIRST_CONTACT, to
 
+    def test_at_a_shared_domain_his_reply_to_a_friend_is_no_act_toward_a_stranger(self):
+        """N1: a domain with many addresses names nobody, so his reply To
+        friend@ is no `replied` act toward the stranger@ whose mail it names."""
+        fillers = [gmail(f"f{n}", frm=f"user{n}@gmail.example", at=T0 - DAY + n)
+                   for n in range(mailindex.ENTITY_DOMAIN_MAX_SENDERS)]
+        ask = gmail("a", frm="stranger@gmail.example", subject="Sofa", at=T0,
+                    message_id="m@gmail.example")
+        reply = gmail("r", frm=OWNER, to="friend@gmail.example", subject="Re: Sofa",
+                      at=T0 + 60, in_reply_to="m@gmail.example", labels=("SENT",))
+        later = gmail("l", frm="stranger@gmail.example", subject="Sofa?", at=T0 + DAY)
+        index = index_of(*fillers, ask, reply, later)
+        assert self.grade(index, later).acts == 0
+
+    def test_a_bcc_to_the_address_is_writing_to_it(self):
+        """N2: a deliberate Bcc of his is addressing."""
+        wrote = gmail("w", frm=OWNER, to="other@else.example", bcc="ania@friends.example",
+                      at=T0, labels=("SENT",))
+        mail = gmail("m", frm="ania@friends.example", at=T0 + DAY)
+        index = index_of(wrote, mail)
+        grade = self.grade(index, mail)
+        assert grade.grade == mailgate.KNOWN and grade.how == ("wrote",)
+
     def test_a_case_he_opened_counts_as_an_act_toward_its_parties(self):
         mail = gmail("m", frm="parcels@courier.example", at=T0 + DAY)
         index = index_of(mail)

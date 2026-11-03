@@ -88,11 +88,6 @@ NEAR_DUPLICATE_S = 600
 
 #: At most this many later mails are weighed against one item, newest first.
 CANDIDATES_PER_ITEM = 3
-#: A domain names an entity (its first label, and "the same domain") only when
-#: fewer than this many distinct addresses at it appear in any header of his
-#: mail — a shared provider's ("gmail") names nobody. Structural, not a list of
-#: providers; the number is a CHOICE.
-ENTITY_DOMAIN_MAX_SENDERS = 5
 ENTITY_TOKEN_MIN = 4
 #: The tier rule's third-party history: the sender's domain seen on at least
 #: this many distinct cases he transacted on, first seen this long before the
@@ -400,14 +395,6 @@ class Context:
         for case in self.store.cases.values():
             for _at, digest in case.mails:
                 self._cases_of.setdefault(digest, []).append(case)
-        # Every address seen at each domain, in any header of any mail: a
-        # domain many people use (a mail provider, his family's) names nobody.
-        seen: dict[str, set[str]] = {}
-        for h in self.index.by_digest.values():
-            for address in (h.from_addr, *h.to, *h.cc):
-                if address:
-                    seen.setdefault(mailindex.domain_of(address), set()).add(address)
-        self._domain_senders = {d: len(a) for d, a in seen.items()}
         self._passed: dict[str, float] = {}
         for reading in self.readings.values():
             header = self.index.get(reading.digest)
@@ -517,7 +504,7 @@ class Context:
             # stranger no membership.
             if (parent is not None and parent.direction == "out"
                     and parent.position in case.mails
-                    and mailindex.aimed_at(parent, header.from_addr)):
+                    and mailindex.aimed_at(parent, header.from_addr, self.index)):
                 return True
         return False
 
@@ -541,7 +528,7 @@ class Context:
     def entity_tokens(self, party: str) -> frozenset[str]:
         """Names the counterparty goes by: the display names it mailed him
         under, and its domain's first label when that domain is not a shared
-        provider's (fewer than `ENTITY_DOMAIN_MAX_SENDERS` addresses at it)."""
+        provider's (`MailIndex.names_one_party`)."""
         if party not in self._entity:
             names: set[str] = set()
             for h in self.index.by_digest.values():
@@ -550,7 +537,7 @@ class Context:
                     if len(name) >= ENTITY_TOKEN_MIN:
                         names.add(name)
             domain = mailindex.domain_of(party)
-            if domain and self._domain_senders.get(domain, 0) < ENTITY_DOMAIN_MAX_SENDERS:
+            if domain and self.index.names_one_party(domain):
                 label = domain.split(".")[-2] if domain.count(".") >= 1 else domain
                 if len(label) >= ENTITY_TOKEN_MIN:
                     names.add(label.casefold())
@@ -830,7 +817,7 @@ class Context:
             domain = mailindex.domain_of(item.counterparty)
             same_domain = (header.direction == "in" and domain
                            and mailindex.domain_of(header.from_addr) == domain
-                           and self._domain_senders.get(domain, 0) < ENTITY_DOMAIN_MAX_SENDERS)
+                           and self.index.names_one_party(domain))
             text = (self.text(header.digest) or header.subject).casefold()
             if same_domain or any(t in text for t in self.entity_tokens(item.counterparty)):
                 ties.append("entity")

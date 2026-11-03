@@ -778,7 +778,7 @@ class CaseStore:
                     # from this act of his, never earlier.
                     if "addressed" not in info or tuple(info["addressed"]) > position:
                         info["addressed"] = position
-                admitted += self._admit_toward(case, header)
+                admitted += self._admit_toward(case, header, index)
             else:
                 # An inbound sender is a party by joining, which is not trust:
                 # its provenance is kept, so nothing counts it as someone he
@@ -847,28 +847,33 @@ class CaseStore:
                 changed = True
         return changed
 
-    def admit_toward(self, case: Case, header: mailindex.Header) -> list[str]:
+    def admit_toward(
+        self, case: Case, header: mailindex.Header, index: mailindex.MailIndex | None
+    ) -> list[str]:
         """Re-ask, as of an owner act already on `case`, which senders it admits
         (`_admit_toward`) — after the case gained an authenticated sighting
         earlier than the act. Idempotent; saves when it admitted anything."""
         if header.direction != "out" or header.position not in case.mails:
             return []
-        admitted = self._admit_toward(case, header)
+        admitted = self._admit_toward(case, header, index)
         if admitted:
             self._save(case)
         return admitted
 
-    def _admit_toward(self, case: Case, header: mailindex.Header) -> list[str]:
+    def _admit_toward(
+        self, case: Case, header: mailindex.Header, index: mailindex.MailIndex | None
+    ) -> list[str]:
         """An owner act on a case admits the authenticated senders it was AIMED
-        at — the domains among its To/Cc recipients — when they were already
-        seen on the case. As of the act, never earlier, and never a domain he
-        did not address. Replying to or forwarding a sender's mail is not by
-        itself an act toward that sender: his forward of an Airbnb confirmation
-        to his own other address names the Airbnb mail in its In-Reply-To and
-        is addressed to nobody at Airbnb."""
+        at (`mailindex.aimed_at`: a domain among its To/Cc/Bcc recipients that
+        names one party — a shared provider's domain is admitted by nobody's
+        act) when they were already seen on the case. As of the act, never
+        earlier, and never a domain he did not address. Replying to or
+        forwarding a sender's mail is not by itself an act toward that sender:
+        his forward of an Airbnb confirmation to his own other address names
+        the Airbnb mail in its In-Reply-To and is addressed to nobody at Airbnb."""
         out = []
         for domain, seen in case.domains.items():
-            if (mailindex.aimed_at(header, domain) and domain not in case.admitted
+            if (mailindex.aimed_at(header, domain, index) and domain not in case.admitted
                     and seen < header.position):
                 case.admitted[domain] = {"at": header.position, "by": "owner_act_toward_sender"}
                 out.append(f"{case.id}:{domain}")

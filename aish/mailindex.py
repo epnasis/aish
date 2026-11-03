@@ -152,19 +152,39 @@ def domain_of(address: str) -> str:
     return address.rsplit("@", 1)[-1].lower() if "@" in address else ""
 
 
-def aimed_at(header: Header, party: str) -> bool:
+#: A domain names ONE party (an entity: "the same domain", its first label,
+#: an act aimed at it) only when fewer than this many distinct addresses at it
+#: appear in any header of the index — a shared provider's ("gmail") names
+#: nobody. Structural, not a list of providers; the number is a CHOICE.
+ENTITY_DOMAIN_MAX_SENDERS = 5
+
+
+def addressed_to(header: Header, address: str) -> bool:
+    """`header` is his outbound mail and `address` is one of its To, Cc or Bcc
+    recipients, exactly."""
+    return header.direction == "out" and bool(address) and address.lower() in header.addressed
+
+
+def aimed_at(header: Header, party: str, index: MailIndex | None) -> bool:
     """His act is aimed at `party` (an address, or a bare domain): `header` is
-    his outbound mail and the party's domain is among its To/Cc recipients.
+    his outbound mail addressed to the party — the address itself among its
+    To/Cc/Bcc, or any address at the party's domain when that domain names one
+    party (`MailIndex.names_one_party`; with no index, no domain does).
 
     The one authority on whether a mail of his is an act TOWARD someone, read
     by everything that turns his act into standing — a sender's admission on a
     case, a sender's grade, an inbound reply's case membership. In-Reply-To
     naming a party's mail is never enough on its own: his forward of a
     confirmation to his other address, or a reply sent to somebody else, is
-    addressed to nobody at the original sender."""
-    target = domain_of(party) if "@" in party else party.lower()
-    return (header.direction == "out" and bool(target)
-            and any(domain_of(a) == target for a in header.correspondents))
+    addressed to nobody at the original sender. And at a shared provider's
+    domain, writing to friend@ is no act toward stranger@."""
+    if header.direction != "out" or not party:
+        return False
+    if "@" in party and addressed_to(header, party):
+        return True
+    domain = domain_of(party) if "@" in party else party.lower()
+    return (bool(domain) and index is not None and index.names_one_party(domain)
+            and any(domain_of(a) == domain for a in header.addressed))
 
 
 @dataclass(frozen=True)
@@ -226,6 +246,18 @@ class Header:
     # Empty on Gmail and on index files written before it existed.
     gateway_auth: str = ""
     gateway_auth_observed: str = ""
+    # HIS outbound mail's Bcc, as his own Sent copy carries it; always empty on
+    # inbound mail (a Bcc on mail TO him is nobody's addressing of anyone), and
+    # on index files written before it existed (2026-11-03).
+    bcc: tuple[str, ...] = ()
+
+    @property
+    def addressed(self) -> tuple[str, ...]:
+        """Everyone his outbound mail was addressed to — To, Cc and Bcc; ()
+        on inbound. What `aimed_at` reads; `correspondents` stays To/Cc."""
+        if self.direction != "out":
+            return ()
+        return tuple(dict.fromkeys(self.to + self.cc + self.bcc))
 
     @property
     def correspondents(self) -> tuple[str, ...]:
@@ -244,7 +276,7 @@ class Header:
 
 def header_from_json(raw: dict[str, Any]) -> Header:
     data = dict(raw)
-    for name in ("in_reply_to", "references", "to", "cc", "auth_results"):
+    for name in ("in_reply_to", "references", "to", "cc", "bcc", "auth_results"):
         data[name] = tuple(data.get(name) or ())
     data["links"] = tuple(Link(**link) for link in data.get("links") or ())
     data["attachments"] = tuple(Attachment(**a) for a in data.get("attachments") or ())
@@ -500,6 +532,7 @@ def _build_header(
         from_addr=from_addr,
         to=addresses_of(", ".join(_all(headers, "To"))),
         cc=addresses_of(", ".join(_all(headers, "Cc"))),
+        bcc=addresses_of(", ".join(_all(headers, "Bcc"))) if direction == "out" else (),
         at=at,
         at_source=at_source,
         date_header=date_header,
@@ -730,6 +763,10 @@ class MailIndex:
         self._bodies: dict[str, str] = {}
         self.health = Health()
         self._cache: dict[tuple[float, str], _Union] = {}
+        # Every distinct address seen at each domain, in any header of any
+        # message — what `names_one_party` counts. It only grows, so a domain
+        # can only stop naming one party, never start: restrict-only over time.
+        self.domain_addresses: dict[str, set[str]] = {}
         if self.directory is not None and self.directory.is_dir():
             self._load()
 
@@ -807,9 +844,17 @@ class MailIndex:
         self._cache.clear()
         return True
 
+    def names_one_party(self, domain: str) -> bool:
+        """The domain names one party: fewer than `ENTITY_DOMAIN_MAX_SENDERS`
+        distinct addresses at it in any header of the index."""
+        return len(self.domain_addresses.get(domain.lower(), ())) < ENTITY_DOMAIN_MAX_SENDERS
+
     def _admit(self, header: Header, count: bool = True) -> None:
         self.by_digest[header.digest] = header
         self._cache.clear()
+        for address in (header.from_addr, *header.to, *header.cc, *header.bcc):
+            if address:
+                self.domain_addresses.setdefault(domain_of(address), set()).add(address.lower())
         if header.message_id:
             members = self.mid_members.setdefault(header.message_id, [])
             if header.digest not in members:

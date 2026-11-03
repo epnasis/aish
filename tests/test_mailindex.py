@@ -223,3 +223,49 @@ class TestGmailParse:
         header = parsed(gmail("a", frm="a@x.example", html='<a href="https://h.example">t</a>',
                               attachments=("a.pdf",))).header
         assert mailindex.header_from_json(json.loads(json.dumps(header.as_json()))) == header
+
+
+class TestBccAndTheSharedDomain:
+    """Round-6 notes N1/N2: his Bcc is addressing; a shared provider's domain
+    names nobody (`MailIndex.names_one_party`, `mailindex.aimed_at`)."""
+
+    def test_his_sent_bcc_is_recorded_and_an_inbound_bcc_is_not(self):
+        sent = parsed(gmail("s", frm=OWNER, to="a@shop.example", bcc="B <b@other.example>",
+                            labels=("SENT",))).header
+        assert sent.bcc == ("b@other.example",)
+        assert sent.addressed == ("a@shop.example", "b@other.example")
+        assert sent.correspondents == ("a@shop.example",)
+        inbound = parsed(gmail("i", frm="x@shop.example", bcc="c@third.example")).header
+        assert inbound.bcc == () and inbound.addressed == ()
+
+    def test_an_index_file_written_before_bcc_loads_with_none(self):
+        header = parsed(gmail("s", frm=OWNER, to="a@shop.example", labels=("SENT",))).header
+        raw = header.as_json()
+        del raw["bcc"]
+        assert mailindex.header_from_json(raw).bcc == ()
+
+    def test_a_bcc_aims_his_act(self):
+        sent = parsed(gmail("s", frm=OWNER, to="a@shop.example", bcc="b@other.example",
+                            labels=("SENT",))).header
+        assert mailindex.addressed_to(sent, "b@other.example")
+        assert mailindex.aimed_at(sent, "b@other.example", None)
+
+    def test_a_shared_domain_aims_at_the_address_only(self):
+        fillers = [gmail(f"f{n}", frm=f"user{n}@gmail.example", at=T0 + n)
+                   for n in range(mailindex.ENTITY_DOMAIN_MAX_SENDERS)]
+        sent = gmail("s", frm=OWNER, to="friend@gmail.example", at=T0 + 100, labels=("SENT",))
+        index = index_of(*fillers, sent)
+        header = index.by_digest[digest(sent)]
+        assert not index.names_one_party("gmail.example")
+        assert mailindex.aimed_at(header, "friend@gmail.example", index)
+        assert not mailindex.aimed_at(header, "stranger@gmail.example", index)
+        assert not mailindex.aimed_at(header, "gmail.example", index)
+
+    def test_a_domain_that_names_one_party_aims_at_any_address_there(self):
+        sent = gmail("s", frm=OWNER, to="orders@shop.example", labels=("SENT",))
+        index = index_of(sent)
+        header = index.by_digest[digest(sent)]
+        assert index.names_one_party("shop.example")
+        assert mailindex.aimed_at(header, "desk@shop.example", index)
+        assert mailindex.aimed_at(header, "shop.example", index)
+        assert not mailindex.aimed_at(header, "desk@shop.example", None)  # no index, no domain

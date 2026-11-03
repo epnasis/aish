@@ -706,6 +706,29 @@ class TestMembershipMustRestOnATrustedFact:
         assert [c.id for c in context.cases_of(shop.digest)] == [case.id]
 
 
+    def test_at_a_shared_domain_only_the_address_he_wrote_to_is_trusted(self, tmp_path):
+        """N1: his mail To friend@ at a shared provider grants a stranger@
+        there replying with his Message-ID no membership."""
+        for n in range(mailindex.ENTITY_DOMAIN_MAX_SENDERS):
+            add_mail(tmp_path, f"f{n}", frm=f"user{n}@gmail.example", subject="hi",
+                     at=NOW - 20 * DAY + n)
+        his = his_sent(tmp_path, "o1", to="friend@gmail.example", at=NOW - 9 * DAY,
+                       subject="Sofa")
+        stranger = add_mail(tmp_path, "k1", frm="stranger@gmail.example", subject="Re: Sofa",
+                            at=NOW - 2 * DAY, in_reply_to="o1@owner.example")
+        friend = add_mail(tmp_path, "k2", frm="friend@gmail.example", subject="Re: Sofa",
+                          at=NOW - DAY, in_reply_to="o1@owner.example")
+        store = mailcases.CaseStore(tmp_path)
+        case = mailcases.Case(
+            id="case-shared00001", created=his.position, created_by="owner",
+            mails=sorted([his.position, stranger.position, friend.position]))
+        store.cases[case.id] = case
+        store._save(case)
+        context = ctx(tmp_path)
+        assert context.cases_of(stranger.digest) == []
+        assert [c.id for c in context.cases_of(friend.digest)] == [case.id]
+
+
 class TestAOneTimeCodeMailContributesNoKeys:
     """Round-4 note 3: a 7+-digit OTP or a mixed one-time code after an
     introducing word still keyed. A mail the report already classifies as a

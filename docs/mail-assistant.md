@@ -136,9 +136,12 @@ did with it, split by which header gated it — so the gate can be narrowed on e
 **The relationship ledger counts his acts and nothing else.** `grade` is `established`,
 `known` or `first-contact`, from `owner_acts`:
 
-- `wrote` — an outbound mail addressed to the address;
+- `wrote` — an outbound mail addressed to the address: the address itself among its To, Cc or
+  Bcc (`mailindex.addressed_to`; his Bcc is addressing — `test_a_bcc_to_the_address_is_writing_to_it`);
 - `replied` — an outbound mail whose OWN In-Reply-To names a mail from that address AND that is
-  addressed to that address's domain (`mailindex.aimed_at`). Membership of the same conversation
+  aimed at it (`mailindex.aimed_at`: the address itself, or any address at its domain when that
+  domain names one party — at a shared provider, his reply To friend@ is no act toward
+  stranger@, `test_at_a_shared_domain_his_reply_to_a_friend_is_no_act_toward_a_stranger`). Membership of the same conversation
   is not enough: a hostile mail can put an owner thread's Message-IDs in its References and join
   it, and his earlier replies there must not become acts toward it. Nor is In-Reply-To alone
   (2026-11-03): his forward of a sender's mail to somebody else is not an act toward the sender.
@@ -197,9 +200,11 @@ mail is not his own or authenticated characterises nothing). `TestCaseFactsComeO
 **Membership obeys the same law** (round-4 note 1): a mail is attached to a case by any key, but
 it is a MEMBER for anything that grants or decides visibility only when it is his own mail, or
 authenticated AND joined through a key a trusted mail recorded, a key he typed himself, or a direct
-reply to his mail on the case — a mail of his that was addressed to the replier
+reply to his mail on the case — a mail of his that was aimed at the replier
 (`mailindex.aimed_at`, 2026-11-03: his Message-ID reaching a stranger by forward grants that
-stranger no membership; `test_a_reply_to_his_mail_is_trusted_only_from_whom_he_wrote_to`). `mailitems.Context.cases_of` is the one reader — the case tie, stored
+stranger no membership, `test_a_reply_to_his_mail_is_trusted_only_from_whom_he_wrote_to`; and at a
+shared provider only the address he wrote to is,
+`test_at_a_shared_domain_only_the_address_he_wrote_to_is_trusted`). `mailitems.Context.cases_of` is the one reader — the case tie, stored
 amounts, an item's meaning, admitted domains and his closed case covering an item go through it,
 and so does the keeper release on EVERY surface: the report, `/mail` and the CSV all read
 `mailitems.trusted_closure` (round-5 review: `/mail` and the CSV read the raw store closure and
@@ -216,11 +221,24 @@ can seed it; N1 removes the unauthenticated half of that, not this one (§Residu
 
 **Alias admission is deterministic corroboration, and the corroboration is HIS.** A sender
 domain is admitted on a case when it was seen there in authenticated mail AND he then acted on
-the case TOWARD it — a mail of his with an address at that domain among its To/Cc recipients
-(`_admit_toward`). **Addressed TO it, nothing less** (2026-11-03; one predicate,
-`mailindex.aimed_at`, owns "his act is aimed at X" for the admission, the ledger's `replied` and an
-inbound reply's case membership): a reply or a forward whose
-In-Reply-To names the sender's mail, sent to someone else, is not an act toward that sender. The
+the case TOWARD it — a mail of his with an address at that domain among its To, Cc or Bcc
+recipients, when that domain names one party (`_admit_toward`). Admission is domain-scoped by
+design (aliases: orders@ and billing@ of one shop), so at a shared provider's domain it would admit
+everyone there; his act names one address, so such a domain is admitted by nobody's act
+(`test_a_shared_providers_domain_is_admitted_by_nobodys_act`). **One predicate,
+`mailindex.aimed_at`**, owns "his act is aimed at X" for the admission, the ledger's `replied` and
+an inbound reply's case membership: the address itself among To/Cc/Bcc (`Header.addressed` —
+`correspondents` stays To/Cc), or any address at its domain when `MailIndex.names_one_party` says
+the domain names one party — fewer than `mailindex.ENTITY_DOMAIN_MAX_SENDERS` distinct addresses
+at it in any header, the same count the tier rule's `entity` reads. The count only grows as mail is
+indexed, so a domain can only stop naming one party: restrict-only over time
+(`TestBccAndTheSharedDomain` in `tests/test_mailindex.py`). **His Bcc** is
+parsed from his outbound mail only (`Header.bcc`; inbound mail never carries one, and index files
+written before 2026-11-03 load with none — on the frozen copy 0 of 22 outbound headers hold one,
+so it can act only on mail indexed from now on. Whether his Gmail Sent copy's `format full`
+headers and his Tuta Sent copy carry the Bcc line was NOT checked against his real mailboxes; the
+parse reads it wherever it is present). **Addressed TO it, nothing less** (2026-11-03): a reply or
+a forward whose In-Reply-To names the sender's mail, sent to someone else, is not an act toward that sender. The
 first version also aimed every reply at the domain of the mail it replied to, so his forward of an
 Airbnb confirmation to his own other address (`Fwd: Confirmed: …`, To bip@…) admitted airbnb.com
 on the booking's case — measured on the frozen copy by the backlog re-observation. Restrict-only:
@@ -1444,9 +1462,9 @@ model-free.
   code signal — `counterparty`; `conversation` (membership is fine for ASKING; the tier decides);
   a shared extracted `key`; a common `case`; an equal STORED `amount` (the case store's amounts at
   each mail's position — never re-read from a body); `entity` (the counterparty's display name in
-  the candidate's text, its domain's first label, or the same domain — the domain only when fewer
-  than `ENTITY_DOMAIN_MAX_SENDERS` (5, a choice) distinct addresses at it appear in any header of
-  his mail, which keeps a shared provider like gmail.com out structurally: on the first real run
+  the candidate's text, its domain's first label, or the same domain — the domain only when it
+  names one party (`MailIndex.names_one_party`: fewer than `mailindex.ENTITY_DOMAIN_MAX_SENDERS`
+  (5, a choice) distinct addresses at it appear in any header of his mail), which keeps a shared provider like gmail.com out structurally: on the first real run
   "gmail" tied unrelated people until the count read every header, not only senders). Newest
   first, at most `CANDIDATES_PER_ITEM` (3). His own mail aimed at the item is the rule's, not
   a candidate.

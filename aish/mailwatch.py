@@ -1160,7 +1160,7 @@ def _follow_authentication(
             if header.direction == "out":
                 for case in on:
                     if case.id in changed:
-                        result.admitted += len(store.admit_toward(case, header))
+                        result.admitted += len(store.admit_toward(case, header, index))
             continue
         if header.digest in moved or not run_keys:
             continue

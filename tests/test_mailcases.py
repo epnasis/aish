@@ -113,6 +113,32 @@ class TestAliasAdmission:
         (case,) = store.cases.values()
         assert case.admitted["lampshop.example"]["by"] == "owner_act_toward_sender"
 
+    def test_his_bcc_to_the_shop_admits_it(self):
+        index, store = build(
+            store_order(),
+            gmail("o", frm=OWNER, to="bip@wenda.example", bcc="orders@lampshop.example",
+                  subject="Fwd: Order LS-48213 confirmed", at=T0 + 60,
+                  in_reply_to="s1@lampshop.example", labels=("SENT",)),
+        )
+        (case,) = store.cases.values()
+        assert "lampshop.example" in case.admitted
+
+    def test_a_shared_providers_domain_is_admitted_by_nobodys_act(self):
+        """N1: admission is domain-scoped, so at a domain many addresses use it
+        would admit everyone there; his act names one address, so nobody is."""
+        fillers = [gmail(f"f{n}", frm=f"user{n}@gmail.example", subject="hi", at=T0 - DAY + n)
+                   for n in range(mailindex.ENTITY_DOMAIN_MAX_SENDERS)]
+        seller = gmail("s1", frm="seller@gmail.example", subject="Order LS-48213 confirmed",
+                       body="Your order LS-48213. Total 249,00 zł.", at=T0,
+                       message_id="s1@gmail.example")
+        index, store = build(
+            *fillers, seller,
+            gmail("o", frm=OWNER, to="seller@gmail.example", subject="Re: Order LS-48213",
+                  at=T0 + 60, in_reply_to="s1@gmail.example", labels=("SENT",)),
+        )
+        (case,) = [c for c in store.cases.values() if "LS-48213" in c.keys]
+        assert case.admitted == {}
+
     def test_a_reply_or_forward_addressed_elsewhere_admits_nobody(self):
         """An act toward a sender is addressed TO it: In-Reply-To naming the
         sender's mail is not enough. His forward of the shop's confirmation to
