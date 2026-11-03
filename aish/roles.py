@@ -278,8 +278,21 @@ def _parse_shape(raw: Any) -> Shape:
                 raise CharterError(f"a verdict output must declare a positive {name}")
             caps[name] = value
         return Shape(kind, mailreader.shape_fields(caps), 0, caps)
+    if kind == "settlement":
+        # The settlement judge's typed answer (#142 W5). Its vocabulary and
+        # rules live in `mailsettle`; the frontmatter declares only the caps.
+        from . import mailsettle
+
+        caps = {}
+        for name in mailsettle.SETTLEMENT_CAPS:
+            value = raw.get(name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise CharterError(f"a settlement output must declare a positive {name}")
+            caps[name] = value
+        return Shape(kind, mailsettle.shape_fields(caps), 0, caps)
     if kind != "rows":
-        raise CharterError(f"unknown output shape {kind!r} (rows | objective | verdict)")
+        raise CharterError(
+            f"unknown output shape {kind!r} (rows | objective | verdict | settlement)")
     fields = tuple(_parse_field(f) for f in (raw.get("fields") or ()))
     if not fields:
         raise CharterError("output: declares no fields")
@@ -523,6 +536,10 @@ def _case(raw: Any, input_names: set[str], shape: Shape, source: str) -> Case:
         from . import mailreader
 
         mailreader.check_expectation(name, expect)
+    if shape.kind == "settlement":
+        from . import mailsettle
+
+        mailsettle.check_expectation(name, expect)
     checks = dict(expect)
     values: dict[str, list[str]] = {}
     for fname, wanted in (expect.get("field_values") or {}).items():
@@ -749,6 +766,10 @@ def validate(
         from . import mailreader
 
         return mailreader.validate_answer(shape, payload, inputs or {})
+    if shape.kind == "settlement":
+        from . import mailsettle
+
+        return mailsettle.validate_answer(shape, payload, inputs or {})
     if not isinstance(payload, dict):
         raise ValueError("the reply must be a JSON object")
     raw = payload.get("rows")
@@ -1047,6 +1068,10 @@ def contract_text(shape: Shape, rows: tuple[int, ...]) -> str:
         from . import mailreader
 
         return mailreader.contract_text(shape)
+    if shape.kind == "settlement":
+        from . import mailsettle
+
+        return mailsettle.contract_text(shape)
     lines = [
         "Reply with ONE JSON object and nothing else. No prose before or after "
         "it, no code fence.",
@@ -1324,13 +1349,15 @@ def check_case(case: Case, value: Any) -> list[str]:
     model chooses, so a literal expectation would be unmeetable and the exam
     would be measuring formatting.
     """
-    from . import mailreader
+    from . import mailreader, mailsettle
 
     table: dict[str, Callable[[Any, Any], list[str]]]
     if isinstance(value, Rows):
         table = dict(_ASSERTIONS)
     elif isinstance(value, (mailreader.Verdict, mailreader.Ask)):
         table = dict(mailreader.ASSERTIONS)
+    elif isinstance(value, mailsettle.Settlement):
+        table = dict(mailsettle.ASSERTIONS)
     else:
         table = _objective_assertions()
     return [
@@ -1426,6 +1453,10 @@ def _assertions_for(shape: Shape) -> dict[str, Any]:
         from . import mailreader
 
         return dict(mailreader.ASSERTIONS)
+    if shape.kind == "settlement":
+        from . import mailsettle
+
+        return dict(mailsettle.ASSERTIONS)
     return _objective_assertions() if shape.kind == "objective" else dict(_ASSERTIONS)
 
 
@@ -1501,6 +1532,10 @@ def tally_flags(shape: Shape, value: Any) -> dict[str, dict[str, int]]:
         from . import mailreader
 
         return mailreader.tally(value)
+    if shape.kind == "settlement":
+        from . import mailsettle
+
+        return mailsettle.tally(value)
     out: dict[str, dict[str, int]] = {}
     for declared in shape.fields:
         if declared.type != "enum":

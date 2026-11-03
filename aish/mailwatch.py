@@ -55,7 +55,9 @@ from . import (
     mailcases,
     mailgate,
     mailindex,
+    mailitems,
     mailreader,
+    mailsettle,
     mailtuta,
     mailverdicts,
     paths,
@@ -87,6 +89,23 @@ READ_ONLY_CALLS = frozenset({
 
 DEFAULT_DAYS = 2
 DEFAULT_MAX = 50
+#: Answers an open your-turn row rests on that nobody read, read late per pass
+#: (`mailitems.gaps`). A CHOICE: bounded like the judge, oldest row first.
+LATE_READS_PER_PASS = 5
+#: Tied later mail with no reading, read per pass before the judge may weigh
+#: it (`mailitems.unread_candidates`): the caution floor needs a record. A CHOICE.
+CANDIDATE_READS_PER_PASS = 5
+#: Readings made WITHOUT the mail's body that are re-read per pass, oldest mail
+#: first (`blind_readings`): the CRLF read bug (2026-11-02) handed the Reader
+#: "[body not recorded]" for bodies the store held all along. A CHOICE; the
+#: one-shot backlog is `--reread-blind`.
+REREAD_PER_PASS = 10
+#: The text a bundle carries for a body the store did not yield
+#: (`mailreader._message_entry`).
+BODY_NOT_RECORDED = "[body not recorded]"
+#: Per model: when a scan last found no blind reading left. Verdict files not
+#: rewritten since are not evidence-read again (`blind_readings(since=…)`).
+REREAD_MARKER = "reread-marker.json"
 GWS_TIMEOUT = 60
 SOURCES = ("gmail", "tuta")
 
@@ -245,7 +264,7 @@ def gate_facts(
     auth = mailgate.authenticate_header(header)
     return mailreader.Facts(
         auth=auth,
-        grade=mailgate.grade(index, header, auth, store.owner_case_parties(as_of)),
+        grade=mailgate.grade(index, header, auth, store.owner_case_parties(as_of, index)),
         flags=mailgate.red_flags(header, store.admitted_domains(as_of)),
         newsletter=mailgate.newsletter(header),
         candidates=mailcases.candidates(store, header, body),
@@ -283,7 +302,9 @@ def assess(
         )
     verdict = reading.verdict
     code_coordinates = mailcases.extract_coordinates(f"{header.subject}\n{body}")
-    keys = set(mailcases.extract_keys(f"{header.subject}\n{body}"))
+    # The verdict is in hand here: the one-time-code rule reads its kind too.
+    keys = set(mailcases.mail_keys(header.subject, f"{header.subject}\n{body}",
+                                   verdict.kind if verdict is not None else ""))
     linked = _case_ids_by_key(store, header, keys)
     if verdict is not None and reading.bundle is not None:
         mailverdicts.count_verdict(verdict)
@@ -320,12 +341,19 @@ def ingest(
 ) -> dict[str, mailcases.Observation]:
     """Fold messages into the index and the case store, oldest first. Only a
     message the index did not already hold is observed, so re-running is a
-    no-op."""
+    no-op. Every message is indexed BEFORE any is observed, so a copy of his
+    own sent mail is recognised (`mailitems.own_copies`) whichever of the pair
+    came first — and a copy mints nothing: it is never observed into a case.
+    A copy whose original arrives in a LATER pass was observed when it came;
+    the derivation still excludes it from every item."""
+    added = [item for item in sorted(parsed, key=lambda p: p.header.position)
+             if index.add(item.header, item.body)]
+    copies = mailitems.own_copies(index) if added else {}
     observed: dict[str, mailcases.Observation] = {}
-    for item in sorted(parsed, key=lambda p: p.header.position):
-        if not index.add(item.header, item.body):
-            continue
+    for item in added:
         header = index.get(item.header.digest) or item.header
+        if header.digest in copies:
+            continue
         auth = mailgate.authenticate_header(header)
         observed[header.digest] = store.observe(header, item.body, auth.authenticated, index)
     return observed
@@ -367,6 +395,10 @@ class Pass:
     endings: dict[str, int] = field(default_factory=dict)
     listing_ok: bool = True
     sources: dict[str, SourcePass] = field(default_factory=dict)
+    own_copies: int = 0  # his own sent mail in his other inbox: not read
+    reread: int = 0  # readings made without the body, superseded and read again
+    late_read: int = 0  # answers an open follow-up rested on, read late
+    settlement: dict[str, Any] = field(default_factory=dict)  # `mailsettle.SettlePass`
 
     def as_json(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -521,11 +553,17 @@ def run_once(
     days: int = DEFAULT_DAYS,
     limit: int = DEFAULT_MAX,
     now: Callable[[], float] = time.time,
+    settler: roles.Charter | None = None,
+    settle_chat: Callable[..., Any] | None = None,
 ) -> Pass:
     """One shadow pass over every source: list, fetch what is new, index,
     assess the new inbound, record. One state tree for all of them — the
     ledger must see every act of his, whichever inbox it is in — and digest
-    dedup absorbs a mail delivered to both."""
+    dedup absorbs a mail delivered to both.
+
+    Then, when a settlement charter is given (`settle`): the answers open
+    follow-ups rest on that nobody read are read (bounded), and the settlement
+    judge weighs the later mail tied to open items (`mailsettle.settle_pass`)."""
     sources = [as_source(m) for m in (mailboxes if mailboxes is not None else [mailbox])]
     result = Pass()
     index = mailindex.MailIndex(state_dir)
@@ -553,8 +591,14 @@ def run_once(
     observed = ingest(index, store, parsed)
     result.new_in_index = len(observed)
     inbox_headers = [index.get(d) for d in dict.fromkeys(inbox_digests)]
+    copies = mailitems.own_copies(index)
     for header in sorted((h for h in inbox_headers if h is not None), key=lambda h: h.position):
         if header.direction != "in":
+            continue
+        if header.digest in copies:
+            # His own sent mail, as delivered to his other inbox: the act is
+            # the Gmail original's, and there is nothing to read.
+            result.own_copies += 1
             continue
         if verdicts.has(header.digest, model_spec, charter.digest):
             result.already_recorded += 1
@@ -569,7 +613,174 @@ def run_once(
         verdicts.write(record)
         result.assessed += 1
         result.endings[record["ending"]] = result.endings.get(record["ending"], 0) + 1
+    if model_spec:
+        result.reread = reread_blind(state_dir, index=index, store=store, charter=charter,
+                                     model_spec=model_spec, chat=chat, now=now(),
+                                     limit=REREAD_PER_PASS)
+    if settler is not None:
+        settle(state_dir, index=index, store=store, charter=charter, settler=settler,
+               model_spec=model_spec, chat=chat, settle_chat=settle_chat, now=now(),
+               result=result)
     return result
+
+
+def _reread_marker(state_dir: os.PathLike | str) -> dict[str, Any]:
+    try:
+        raw = json.loads((mailindex.mail_dir(state_dir) / REREAD_MARKER).read_text())
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _mark_clean(state_dir: os.PathLike | str, model_spec: str, at: float) -> None:
+    marker = _reread_marker(state_dir)
+    marker[model_spec] = {"none_found_at": at}
+    atomic_write.publish(mailindex.mail_dir(state_dir) / REREAD_MARKER,
+                         json.dumps(marker, sort_keys=True))
+
+
+def blind_readings(
+    state_dir: os.PathLike | str, index: mailindex.MailIndex, model_spec: str,
+    *, since: float | None = None,
+) -> list[mailindex.Header]:
+    """The mails whose final reading by `model_spec` was made WITHOUT their
+    body although the evidence store yields it now — oldest mail first.
+
+    Decided from evidence, never guessed: the reading's recorded input (its
+    first call's bundle, in the evidence store by digest) carried exactly
+    `BODY_NOT_RECORDED` as the reviewed message's text, AND `index.body` now
+    returns the body. A body genuinely absent from the store is never a
+    candidate, so it is never retried; a bundle no longer in the store cannot
+    be checked, and its reading stands."""
+    from . import evidence
+
+    out: list[mailindex.Header] = []
+    for path in sorted(mailverdicts.store_dir(state_dir).glob("*/*.json")):
+        # Files not rewritten since the last clean scan were all checked then.
+        try:
+            if since is not None and path.stat().st_mtime <= since:
+                continue
+            raw = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        record = ((raw.get("by_model") or {}).get(model_spec)
+                  if isinstance(raw, dict) else None)
+        if not isinstance(record, dict):
+            continue
+        if record.get("model") != model_spec or record.get("ending") not in (
+                mailverdicts.FINAL_ENDINGS - {mailreader.GATED}):
+            continue
+        header = index.get(str(record.get("mail") or ""))
+        calls = record.get("calls") if isinstance(record.get("calls"), list) else []
+        if header is None or not calls or not isinstance(calls[0], dict):
+            continue
+        digest = str((calls[0].get("input") or {}).get("digest") or "")
+        text = evidence.get(digest, state_dir) if digest else None
+        try:
+            bundle = json.loads(text) if text else None
+        except ValueError:
+            bundle = None
+        if not isinstance(bundle, dict):
+            continue
+        reviewed = next((m for m in bundle.get("messages") or ()
+                         if isinstance(m, dict) and m.get("ref") == bundle.get("mail")), None)
+        if reviewed is None or reviewed.get("text") != BODY_NOT_RECORDED:
+            continue
+        if index.body(header.digest) is None:
+            continue
+        out.append(header)
+    return sorted(out, key=lambda h: h.position)
+
+
+def reread_blind(
+    state_dir: os.PathLike | str,
+    *,
+    index: mailindex.MailIndex,
+    store: mailcases.CaseStore,
+    charter: roles.Charter,
+    model_spec: str,
+    now: float,
+    limit: int,
+    chat: Callable[..., Any] | None = None,
+    full: bool = False,
+) -> int:
+    """Re-read up to `limit` blind readings (`blind_readings`), in arrival
+    order. The old record is never deleted: the new one carries it whole under
+    `supersedes`, with code's sentence for why. Returns how many were read."""
+    verdicts = mailverdicts.VerdictStore(state_dir)
+    since = None if full else (_reread_marker(state_dir).get(model_spec) or {}).get(
+        "none_found_at")
+    found = blind_readings(state_dir, index, model_spec,
+                           since=float(since) if since is not None else None)
+    done = 0
+    for header in found[:limit]:
+        old = (verdicts.read(header.digest) or {}).get("by_model", {}).get(model_spec)
+        try:
+            record = assess(index, store, header, charter=charter, model_spec=model_spec,
+                            chat=chat, state_dir=state_dir, propose=False, now=now)
+        except Exception as exc:  # noqa: BLE001 — one mail's failure is its own record
+            record = mailverdicts.error_record(header, charter, model_spec, exc, now)
+        if record.get("ending") not in mailverdicts.FINAL_ENDINGS:
+            continue  # no model, no admission: the old reading stands until one answers
+        record["supersedes"] = {
+            "at": now, "record": old,
+            "why": "its reading's input carried [body not recorded] for this mail, and the "
+                   "evidence store now yields the body",
+        }
+        verdicts.write(record)
+        done += 1
+    if done == len(found):
+        # Nothing blind is left as of `now`: later passes check only what is
+        # written after it. A body restored to the store later for an older
+        # reading is the one-shot `--reread-blind`'s (it scans everything).
+        _mark_clean(state_dir, model_spec, now)
+    return done
+
+
+def settle(
+    state_dir: os.PathLike | str,
+    *,
+    charter: roles.Charter,
+    settler: roles.Charter,
+    model_spec: str,
+    now: float,
+    result: Pass,
+    index: mailindex.MailIndex | None = None,
+    store: mailcases.CaseStore | None = None,
+    chat: Callable[..., Any] | None = None,
+    settle_chat: Callable[..., Any] | None = None,
+    since: float | None = None,
+    late_reads: int = LATE_READS_PER_PASS,
+) -> None:
+    """The pass's settlement step. First the GAPS: an open your-turn row that
+    is "your turn" only because nobody read the answer gets that answer read
+    by the Reader, marked `late_read` on its record so the report names a row
+    the reading closes. Then the judge, over the pairs that are ready."""
+    index = index if index is not None else mailindex.MailIndex(state_dir)
+    store = store if store is not None else mailcases.CaseStore(state_dir)
+    verdicts = mailverdicts.VerdictStore(state_dir)
+    if model_spec:
+        ctx = mailitems.Context(state_dir, now=now, index=index, store=store)
+        unread = mailitems.unread_candidates(ctx, mailsettle.showable(ctx, since),
+                                             CANDIDATE_READS_PER_PASS)
+        for digest in [*mailitems.gaps(ctx, late_reads), *unread]:
+            header = index.get(digest)
+            if header is None or verdicts.has(digest, model_spec, charter.digest):
+                continue
+            try:
+                record = assess(index, store, header, charter=charter, model_spec=model_spec,
+                                chat=chat, state_dir=state_dir, propose=False, now=now)
+            except Exception as exc:  # noqa: BLE001 — one mail's failure is its own record
+                record = mailverdicts.error_record(header, charter, model_spec, exc, now)
+            record[mailitems.LATE_READ] = (
+                "a later mail tied to an open item had no reading" if digest in unread
+                else "an open follow-up rested on it and it had no reading")
+            verdicts.write(record)
+            result.late_read += 1
+    settled = mailsettle.settle_pass(state_dir, charter=settler, model_spec=model_spec,
+                                     now=now, chat=settle_chat, index=index, store=store,
+                                     since=since)
+    result.settlement = settled.as_json()
 
 
 # ---------------------------------------------------------------- the backfill
@@ -640,22 +851,93 @@ def backfill(
     index = mailindex.MailIndex(state_dir)
     store = mailcases.CaseStore(state_dir)
     result.cases_before = len(store.cases)
-    floor = now() - days * 86400
-    # Mail already on a case was observed, and mail he MOVED is where he put
-    # it: re-observing either would append it again to the case its key names
-    # — undoing his move, and adding its amounts and accounts twice.
+    result.observed, admitted, _joined = observe_unplaced(
+        state_dir, index, store, floor=now() - days * 86400)
+    result.admitted = len(admitted)
+    result.cases_after = len(store.cases)
+    return result
+
+
+def observe_unplaced(
+    state_dir: os.PathLike | str,
+    index: mailindex.MailIndex,
+    store: mailcases.CaseStore,
+    *,
+    floor: float | None = None,
+) -> tuple[int, list[str], int]:
+    """Fold every index mail that is on NO case through `CaseStore.observe`,
+    oldest first — the one observation loop the backfill and the
+    re-observation share. (observed, the admissions minted as "case:domain",
+    mails that joined an existing case).
+
+    Mail already on a case was observed, and mail he MOVED is where he put it:
+    re-observing either would append it again to the case its key names —
+    undoing his move, and adding its amounts and accounts twice. A copy of his
+    own sent mail mints nothing. Every law of `observe` applies: only his own
+    or authenticated mail records a fact; admission only by his act toward a
+    sender."""
     placed = {p[1] for c in (*store.cases.values(), *store.merged.values()) for p in c.mails}
     placed |= {str(a.get("mail")) for a in mailcases.read_acts(state_dir)
                if a.get("verb") == mailcases.MOVE}
+    placed |= set(mailitems.own_copies(index))
+    verdicts = mailverdicts.VerdictStore(state_dir)
+    observed = joined = 0
+    admitted: list[str] = []
     for header in sorted(index.by_digest.values(), key=lambda h: h.position):
-        if header.at < floor or header.digest in placed:
+        if (floor is not None and header.at < floor) or header.digest in placed:
             continue
         body = index.body(header.digest) or ""
         auth = mailgate.authenticate_header(header)
-        observation = store.observe(header, body, auth.authenticated, index)
-        result.observed += 1
-        result.admitted += len(observation.admitted)
+        observation = store.observe(header, body, auth.authenticated, index,
+                                    recorded_kind(verdicts, header.digest))
+        observed += 1
+        admitted.extend(observation.admitted)
+        if observation.cases and not observation.created:
+            joined += 1
+    return observed, admitted, joined
+
+
+@dataclass
+class Reobserve:
+    """What one `--reobserve` run did — counted and printed, never health."""
+
+    observed: int = 0  # index mail on no case, folded through the case store
+    joined: int = 0  # of those, mails that joined an EXISTING case
+    opened: int = 0  # cases this run opened
+    # Senders admitted by HIS act addressed to them (`_admit_toward`) — the
+    # law the live path and the backfill run, so the fold grants exactly what
+    # watching live would have; each as "case:domain".
+    admitted: list[str] = field(default_factory=list)
+    cases_before: int = 0
+    cases_after: int = 0
+    new_multi_mail_cases: list[dict[str, Any]] = field(default_factory=list)
+
+    def as_json(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
+def reobserve(state_dir: os.PathLike | str) -> Reobserve:
+    """Re-observe the backlog under TODAY's laws (key stems, alternations, the
+    one-time-code rule, trusted facts): every indexed mail on no case is folded
+    through `observe_unplaced`, the backfill's own loop — no mailbox is read, no
+    Reader is called, and a sender is admitted only by the live law (his act
+    addressed to its domain, `CaseStore._admit_toward`).
+    Idempotent: a mail placed on a case is never observed again, so a second run
+    joins and opens nothing. Reports the cases it opened that hold more than one
+    mail."""
+    result = Reobserve()
+    index = mailindex.MailIndex(state_dir)
+    store = mailcases.CaseStore(state_dir)
+    before = set(store.cases)
+    result.cases_before = len(before)
+    result.observed, result.admitted, result.joined = observe_unplaced(state_dir, index, store)
     result.cases_after = len(store.cases)
+    result.opened = result.cases_after - result.cases_before
+    for case_id in sorted(set(store.cases) - before):
+        case = store.cases[case_id]
+        if len(case.mails) > 1:
+            result.new_multi_mail_cases.append(
+                {"case": case_id, "title": case.display_title(), "mails": len(case.mails)})
     return result
 
 
@@ -792,6 +1074,15 @@ def recheck_tuta_auth(
     return result
 
 
+def recorded_kind(verdicts: mailverdicts.VerdictStore, digest: str) -> str:
+    """The Reader's `kind` on the newest recorded verdict of this mail, or ""."""
+    held = (verdicts.read(digest) or {}).get("by_model") or {}
+    records = [r for r in held.values()
+               if isinstance(r, dict) and isinstance(r.get("verdict"), dict)]
+    newest = max(records, key=lambda r: float(r.get("recorded_at") or 0), default=None)
+    return str((newest or {}).get("verdict", {}).get("kind") or "")
+
+
 def _follow_authentication(
     index: mailindex.MailIndex,
     store: mailcases.CaseStore,
@@ -804,6 +1095,11 @@ def _follow_authentication(
     `CaseStore.observe` matches keys against the whole store, so an older mail
     can join a case a later mail opened (the backfill's stated limit); every
     other step here asks only about positions before the mail."""
+    verdicts = mailverdicts.VerdictStore(state_dir)
+
+    def kind_of(digest: str) -> str:
+        return recorded_kind(verdicts, digest)
+
     authenticated: dict[str, mailindex.Header] = {}
     for digest, parsed in found.items():
         held = index.get(digest)
@@ -824,6 +1120,8 @@ def _follow_authentication(
     earliest = min(h.position for h in authenticated.values())
     moved = {str(a.get("mail")) for a in mailcases.read_acts(state_dir)
              if a.get("verb") == mailcases.MOVE}
+    # A copy of his own sent mail mints nothing, authenticated or not.
+    moved |= set(mailitems.own_copies(index))
     changed: set[str] = set()  # cases a newly authenticated mail is on
     run_keys: set[str] = set()  # keys of newly authenticated mail on a case, earlier
 
@@ -838,7 +1136,8 @@ def _follow_authentication(
             header = authenticated[header.digest]
             body = found[header.digest].body
             if not on and header.digest not in moved:
-                observation = store.observe(header, body, True, index)
+                observation = store.observe(header, body, True, index,
+                                            kind_of(header.digest))
                 result.observed += 1
                 result.admitted += len(observation.admitted)
                 changed.update(observation.cases)
@@ -847,29 +1146,33 @@ def _follow_authentication(
             # a target stays a target until its header is recorded (last), so a
             # run interrupted after its case writes rebuilds both on the redo.
             for case in on:
-                if store.record_authenticated(case, header, body):
+                if store.record_authenticated(case, header, body, kind_of(header.digest)):
                     result.gained_facts += 1
                 changed.add(case.id)
             if on:
                 # Later mail on no case carrying one of its keys would have
                 # joined, had this mail arrived authenticated.
-                run_keys.update(mailcases.extract_keys(f"{header.subject}\n{body}"))
+                run_keys.update(mailcases.mail_keys(header.subject,
+                                                    f"{header.subject}\n{body}",
+                                                    kind_of(header.digest)))
             continue
         if on:
             if header.direction == "out":
                 for case in on:
                     if case.id in changed:
-                        result.admitted += len(store.admit_toward(case, header, index))
+                        result.admitted += len(store.admit_toward(case, header))
             continue
         if header.digest in moved or not run_keys:
             continue
         body = index.body(header.digest) or ""
-        keys = mailcases.extract_keys(f"{header.subject}\n{body}")
+        keys = mailcases.mail_keys(header.subject, f"{header.subject}\n{body}",
+                                   kind_of(header.digest))
         # Every `run_keys` entry was put there by a mail EARLIER in this
         # position-ordered loop, so a key in it is a key on a case before this mail.
         if any(k in run_keys for k in keys):
             auth = mailgate.authenticate_header(header)
-            observation = store.observe(header, body, auth.authenticated, index)
+            observation = store.observe(header, body, auth.authenticated, index,
+                                        kind_of(header.digest))
             result.observed += 1
             result.admitted += len(observation.admitted)
             changed.update(observation.cases)
@@ -919,6 +1222,76 @@ def load_reader() -> roles.Charter:
     catalogue = roles.load_charters()
     roles.check_wirings(catalogue)
     return catalogue[mailreader.READER]
+
+
+def load_settler() -> roles.Charter | None:
+    """The settlement judge's charter, or None when it does not load — said,
+    and the pass runs without the step (items stay open; the report counts the
+    candidates as not yet judged)."""
+    try:
+        return mailsettle.load_settler()
+    except (roles.CharterError, KeyError) as exc:
+        log(f"the settlement judge's charter does not load; no settlement step: {exc}")
+        return None
+
+
+def _main_reread(state_dir: Path, model_spec: str, limit: int | None) -> int:
+    """`--reread-blind`: the backlog of readings made without their body, in
+    one run, under the one pass lock. Records a `mail_reread` run line."""
+    if not model_spec:
+        log("--reread-blind needs --model")
+        return 2
+    try:
+        charter = load_reader()
+    except roles.CharterError as exc:
+        log(f"the Reader's charter does not load: {exc}")
+        return 2
+    started = time.time()
+    with pass_lock(state_dir) as held:
+        if not held:
+            log("another pass holds the lock — the re-read does nothing")
+            return 3
+        index = mailindex.MailIndex(state_dir)
+        found = len(blind_readings(state_dir, index, model_spec))
+        done = reread_blind(state_dir, index=index, store=mailcases.CaseStore(state_dir),
+                            charter=charter, model_spec=model_spec, now=started,
+                            limit=limit or found, full=True)
+        flush_run(state_dir, "mail_reread", {"blind": found, "reread": done}, started)
+    print(json.dumps({"blind": found, "reread": done}, sort_keys=True))
+    return 0
+
+
+def _main_settle(state_dir: Path, model_spec: str, since_text: str) -> int:
+    """`--settle`: the settlement step alone, over what is indexed — no
+    mailbox read, under the one pass lock. Records a `mail_settle` run line."""
+    from . import mailreport
+
+    try:
+        charter = load_reader()
+    except roles.CharterError as exc:
+        log(f"the Reader's charter does not load: {exc}")
+        return 2
+    settler = load_settler()
+    if settler is None:
+        return 2
+    started = time.time()
+    try:
+        since = mailreport.parse_since(since_text, started) if since_text else None
+    except ValueError:
+        log(f"--since must be YYYY-MM-DD or <N>d, got {since_text!r}")
+        return 2
+    result = Pass()
+    with pass_lock(state_dir) as held:
+        if not held:
+            log("another pass holds the lock — the settlement step does nothing")
+            return 3
+        settle(state_dir, charter=charter, settler=settler, model_spec=model_spec,
+               now=started, result=result, since=since)
+        flush_run(state_dir, "mail_settle", {"late_read": result.late_read,
+                                             "settlement": result.settlement}, started)
+    print(json.dumps({"late_read": result.late_read, "settlement": result.settlement},
+                     sort_keys=True))
+    return 0
 
 
 def tuta_env() -> tuple[dict[str, str], str]:
@@ -975,6 +1348,21 @@ def main(argv: list[str] | None = None) -> int:
                         "bridge's authentication header, record what the header says onto "
                         "the existing entry, and follow it through the case store; no "
                         "Reader, no verdict, never --seen")
+    parser.add_argument("--settle", action="store_true",
+                        help="only the settlement step, over the mail already indexed: read "
+                        "the answers open follow-ups rest on, then judge tied later mail; no "
+                        "mailbox is read")
+    parser.add_argument("--since", default="",
+                        help="with --settle: YYYY-MM-DD or <N>d — weigh the needs items the "
+                        "report would show with the same --since (default: its own window)")
+    parser.add_argument("--reobserve", action="store_true",
+                        help="one-shot: fold every indexed mail on no case through the case "
+                        "store under today's laws (the backfill's observe loop); no mailbox, no "
+                        "Reader; idempotent")
+    parser.add_argument("--reread-blind", action="store_true",
+                        help="one-shot: re-read every reading made without its body although "
+                        "the evidence store now holds it (oldest first, up to --max); no "
+                        "mailbox is read")
     parser.add_argument("--account", default=os.environ.get("AISH_MAIL_ACCOUNT", ""),
                         help="the Gmail account (needs ~/.config/gws-accounts/<email>/)")
     parser.add_argument("--owner", action="append", default=[],
@@ -997,6 +1385,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.recheck_tuta_auth:
         return _main_recheck(state_dir, {a.lower() for a in args.owner},
                              args.max or BACKFILL_LIMIT)
+    if args.settle:
+        return _main_settle(state_dir, args.model, args.since)
+    if args.reread_blind:
+        return _main_reread(state_dir, args.model, args.max)
+    if args.reobserve:
+        with pass_lock(state_dir) as held:
+            if not held:
+                log("another pass holds the lock — the re-observation does nothing")
+                return 3
+            started = time.time()
+            done = reobserve(state_dir)
+            flush_run(state_dir, "mail_reobserve", done.as_json(), started)
+        print(json.dumps(done.as_json(), sort_keys=True, ensure_ascii=False))
+        return 0
     if not args.once and args.backfill <= 0:
         parser.print_help()
         return 2
@@ -1033,6 +1435,7 @@ def main(argv: list[str] | None = None) -> int:
     except roles.CharterError as exc:
         log(f"the Reader's charter does not load: {exc}")
         return 2
+    settler = load_settler()
     with pass_lock(state_dir) as held:
         if not held:
             log("another pass holds the lock — this one does nothing")
@@ -1046,6 +1449,7 @@ def main(argv: list[str] | None = None) -> int:
             charter=charter,
             days=args.days,
             limit=args.max or DEFAULT_MAX,
+            settler=settler,
         )
         record_health(state_dir, result, started)
         flush_counters(state_dir, result, started)

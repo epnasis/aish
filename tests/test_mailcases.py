@@ -104,14 +104,28 @@ class TestAliasAdmission:
         (case,) = store.cases.values()
         assert set(case.admitted) == {"lampshop.example"}
 
-    def test_his_reply_to_the_senders_mail_admits_it(self):
+    def test_his_reply_addressed_to_the_sender_admits_it(self):
         index, store = build(
             store_order(),
-            gmail("o", frm=OWNER, to="help@other.example", subject="Re: Order LS-48213",
+            gmail("o", frm=OWNER, to="orders@lampshop.example", subject="Re: Order LS-48213",
                   at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)),
         )
         (case,) = store.cases.values()
         assert case.admitted["lampshop.example"]["by"] == "owner_act_toward_sender"
+
+    def test_a_reply_or_forward_addressed_elsewhere_admits_nobody(self):
+        """An act toward a sender is addressed TO it: In-Reply-To naming the
+        sender's mail is not enough. His forward of the shop's confirmation to
+        his other address, and his reply sent to someone else, admit nothing."""
+        for to, subject in (("bip@wenda.example", "Fwd: Order LS-48213 confirmed"),
+                            ("help@other.example", "Re: Order LS-48213")):
+            index, store = build(
+                store_order(),
+                gmail("o", frm=OWNER, to=to, subject=subject,
+                      at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)),
+            )
+            (case,) = store.cases.values()
+            assert len(case.mails) == 2 and case.admitted == {}, to
 
     def test_a_domain_he_did_not_address_is_not_admitted_by_his_act(self):
         index, store = build(
@@ -257,3 +271,199 @@ class TestEviction:
         victim.write_text("[")
         again = mailcases.CaseStore(tmp_path)
         assert again.health.loaded == 1 and again.health.unreadable == [victim.name]
+
+
+class TestInflectedKeys:
+    """Polish declines the nouns that introduce a key; the stems find the
+    inflected forms (round-3, the owner's InPost notices yielded nothing)."""
+
+    def test_inflected_forms_yield_their_keys_with_their_kinds(self):
+        assert mailcases.extract_keys("Numer paczki: 620999000111222333444555") == {
+            "620999000111222333444555": "tracking"}
+        assert mailcases.extract_keys("Szczegóły zamówienia nr 98103010/2026") == {
+            "98103010/2026": "order"}
+        assert mailcases.extract_keys("Numer przesyłki: PX7687080605") == {
+            "PX7687080605": "tracking"}
+        assert mailcases.extract_keys("Do faktury nr VQGEQB1M-0005") == {
+            "VQGEQB1M-0005": "invoice"}
+
+    def test_a_stem_introduces_a_key_only_under_an_identity_marker(self):
+        """Round-3 note N2: "Twój PIN do odbioru paczki: 646235" is a one-time
+        secret beside the noun, not the parcel's number: a short all-digit
+        token needs an identity marker; "kod" is never one."""
+        assert mailcases.extract_keys("Twój PIN do odbioru paczki: 646235") == {}
+        assert mailcases.extract_keys("przesyłki kod 778812") == {}
+        # Without a marker, an identifier-shaped token still stands.
+        assert mailcases.extract_keys("Do faktury VQGEQB1M-0005") == {"VQGEQB1M-0005": "invoice"}
+        assert mailcases.extract_keys("fakturę do zamówienia 261509440") == {
+            "261509440": "order"}
+        assert mailcases.extract_keys("tymczasowej rezerwacji: XYO3K4") == {"XYO3K4": "booking"}
+        # Under a marker, a short number is the matter's number.
+        assert mailcases.extract_keys("zamówienia nr 66786") == {"66786": "order"}
+        assert mailcases.extract_keys("Nr przesyłki PX7687080605") == {
+            "PX7687080605": "tracking"}
+
+    def test_each_list_is_counted_by_what_it_matched(self):
+        from aish import vocab
+
+        vocab.drain()
+        mailcases.extract_keys("Order 77123 — numer paczki: 620999000111222333444555")
+        tallies = vocab.drain()
+        assert tallies["mailcases._KEY_WORDS"]["matched"] == 1
+        assert tallies["mailcases._KEY_STEMS"]["matched"] == 1
+
+    def test_a_compound_beyond_the_bounded_ending_is_not_an_introducing_word(self):
+        """`paczkomat WAW45H` names a locker shared by unrelated parcels."""
+        assert mailcases.extract_keys("Wybrany paczkomat: WAW45H") == {}
+
+    def test_the_whole_words_keep_their_unbounded_tail(self):
+        assert mailcases.extract_keys("Bestellungsnummer: 4711220") == {"4711220": "order"}
+
+    def test_a_date_is_never_a_key(self):
+        for text in ("Data zamówienia: 2026-10-10", "zamówienia: 26/08/2026",
+                     "order 16.10.2026"):
+            assert mailcases.extract_keys(text) == {}, text
+
+    def test_the_stems_are_counted_under_their_own_name(self):
+        from aish import vocab
+
+        vocab.drain()
+        mailcases.extract_keys("Numer paczki: 620999000111222333444555")
+        mailcases.extract_keys("order 77123 shipped")
+        tallies = vocab.drain()
+        assert tallies["mailcases._KEY_STEMS"]["matched"] == 1
+        assert tallies["mailcases._KEY_WORDS"]["matched"] == 1
+
+
+class TestTheRecheckRecordsKeysToo:
+    """Round-4 note 4: the Tuta recheck backfilled domains, amounts and
+    accounts but not keys. It now records exactly what observation records
+    from trusted mail (`CaseStore._record_facts`)."""
+
+    def test_a_mail_authenticated_later_gains_its_keys(self):
+        store = mailcases.CaseStore()
+        index = mailindex.MailIndex()
+        his = mailindex.from_gmail(gmail("o1", frm=OWNER, to="shop@store.example",
+                                         subject="Order AB12345", at=T0,
+                                         labels=("SENT",)), frozenset({OWNER}))
+        assert his is not None
+        index.add(his.header, his.body)
+        store.observe(his.header, his.body, True, index)
+        later = mailindex.from_gmail(gmail("i1", frm="shop@store.example",
+                                           subject="Order AB12345 — invoice FV99887",
+                                           body="Your order AB12345, invoice FV99887, 40,00 zł",
+                                           at=T0 + DAY, auth="fail"), frozenset({OWNER}))
+        assert later is not None
+        index.add(later.header, later.body)
+        store.observe(later.header, later.body, False, index)
+        (case,) = store.cases.values()
+        assert "FV99887" not in case.keys and case.amounts == []
+        assert store.record_authenticated(case, later.header, later.body)
+        assert case.keys["FV99887"]["at"] == later.header.position
+        assert case.amounts and case.amounts[0]["cents"] == 4000
+        assert not store.record_authenticated(case, later.header, later.body)  # idempotent
+
+
+class TestTheMarkersHaveOneAuthority:
+    """Round-4 note 2: the identity markers are a declared, counted list, and
+    the pattern's both marker positions derive from it."""
+
+    def test_every_declared_marker_governs_before_and_after_the_stem(self):
+        for marker in mailcases._IDENTITY_MARKERS:
+            assert mailcases.extract_keys(f"{marker} paczki 646235") == {"646235": "tracking"}
+            assert mailcases.extract_keys(f"paczki {marker} 646235") == {"646235": "tracking"}
+
+    def test_the_markers_are_counted_where_they_are_consulted(self):
+        from aish import vocab
+
+        vocab.drain()
+        mailcases.extract_keys("numer paczki 646235")
+        mailcases.extract_keys("odbioru paczki: 646235")
+        tally = vocab.drain()["mailcases._IDENTITY_MARKERS"]
+        assert tally["asked"] == 2 and tally["matched"] == 1
+
+
+class TestStemAlternationsAreARule:
+    """Round-4 note 6: the locative/dative alternate a stem's last consonant
+    (paczka -> paczce, przesyłka -> przesyłce, faktura -> fakturze). One rule
+    table applied to every stem; never a word written per form."""
+
+    def test_the_alternated_forms_introduce_keys(self):
+        assert mailcases.extract_keys("Powiadomienie o przesylce 29777837645") == {
+            "29777837645": "tracking"}
+        assert mailcases.extract_keys("w paczce nr 646235") == {"646235": "tracking"}
+        assert mailcases.extract_keys("w fakturze nr FV/2026/41") == {"FV/2026/41": "invoice"}
+
+    def test_every_stem_ending_in_an_alternating_consonant_gets_its_form(self):
+        for stem in mailcases._KEY_STEMS:
+            for tail, alternate in mailcases._STEM_ALTERNATIONS:
+                if stem.endswith(tail):
+                    assert mailcases._STEM_FORMS[stem[: -len(tail)] + alternate] == stem
+
+    def test_the_bounded_ending_and_the_date_rule_still_hold(self):
+        assert mailcases.extract_keys("Wybrany paczkomat: WAW45H") == {}
+        assert mailcases.extract_keys("w przesyłce z dnia 2026-10-10") == {}
+
+
+class TestTheReobservation:
+    """Round-5 note 4: indexed mail is folded through the case store again
+    under today's laws, deliberately (`aish-mailwatch --reobserve`)."""
+
+    def index_only(self, state, gid: str, *, at: float, auth: str = "pass"):
+        parsed = mailindex.from_gmail(gmail(
+            gid, frm="pl.no.reply@dhl.example", subject="Powiadomienie o przesylce 29777837645",
+            body="Twoja przesyłka jest w drodze.", at=at, auth=auth), frozenset({OWNER}))
+        assert parsed is not None
+        mailindex.MailIndex(state).add(parsed.header, parsed.body)
+        return parsed.header
+
+    def test_opens_the_case_the_laws_now_find_and_is_idempotent(self, tmp_path):
+        from aish import mailwatch
+
+        first = self.index_only(tmp_path, "d1", at=T0)
+        second = self.index_only(tmp_path, "d2", at=T0 + DAY)
+        done = mailwatch.reobserve(tmp_path)
+        assert done.opened == 1 and done.joined == 1
+        (case,) = done.new_multi_mail_cases
+        assert case["mails"] == 2
+        stored = mailcases.CaseStore(tmp_path).cases[case["case"]]
+        assert {p[1] for p in stored.mails} == {first.digest, second.digest}
+        again = mailwatch.reobserve(tmp_path)
+        assert again.opened == 0 and again.joined == 0 and again.new_multi_mail_cases == []
+        assert mailcases.CaseStore(tmp_path).cases[case["case"]].mails == stored.mails
+
+    def test_an_unauthenticated_mail_opens_nothing(self, tmp_path):
+        from aish import mailwatch
+
+        self.index_only(tmp_path, "d1", at=T0, auth="fail")
+        done = mailwatch.reobserve(tmp_path)
+        assert done.opened == 0 and mailcases.CaseStore(tmp_path).cases == {}
+
+    def test_the_backlog_fold_admits_by_the_live_law(self, tmp_path):
+        """One law for live, backfill and the fold: his forward to his other
+        address admits nobody; his reply addressed to the shop admits it."""
+        from aish import mailwatch
+
+        def index_all(state, *raws):
+            for raw in raws:
+                parsed = mailindex.from_gmail(raw, frozenset({OWNER}))
+                assert parsed is not None
+                mailindex.MailIndex(state).add(parsed.header, parsed.body)
+
+        forward = tmp_path / "forward"
+        index_all(forward, store_order(), gmail(
+            "f", frm=OWNER, to="bip@wenda.example", subject="Fwd: Order LS-48213 confirmed",
+            at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)))
+        done = mailwatch.reobserve(forward)
+        assert done.opened == 1 and done.admitted == []
+        (case,) = mailcases.CaseStore(forward).cases.values()
+        assert len(case.mails) == 2 and case.admitted == {}
+
+        reply = tmp_path / "reply"
+        index_all(reply, store_order(), gmail(
+            "r", frm=OWNER, to="orders@lampshop.example", subject="Re: Order LS-48213",
+            at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)))
+        done = mailwatch.reobserve(reply)
+        (case,) = mailcases.CaseStore(reply).cases.values()
+        assert done.admitted == [f"{case.id}:lampshop.example"]
+        assert mailwatch.reobserve(reply).admitted == []

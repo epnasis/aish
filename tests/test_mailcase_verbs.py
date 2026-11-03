@@ -457,3 +457,84 @@ class TestTheServerSetsWhoSentIt:
             assert server_module._auto_safe("cases", {"action": "close", "case": "c"}, origin,
                                             kept_outside=kept) is None
 
+
+
+def seed_untrusted(state_dir):
+    """His order, then a mail claiming to be the shop that FAILS authentication:
+    attached to his case by the key it quotes, kept visible by the Reader's case
+    choice (a keeper clamp) — but not a trusted member of the case."""
+    charter = reader_charter()
+    admit(state_dir, charter, MODEL)
+    mails = [
+        gmail("o1", frm=OWNER, to="shop@shop.example", subject="Order SH-90210",
+              body="My order number SH-90210", at=T0, labels=("SENT",)),
+        gmail("i1", frm="Shop <shop@shop.example>", subject="Invoice for order SH-90210",
+              body="Your order number SH-90210, invoice attached.", at=T0 + DAY,
+              attachments=("invoice.pdf",), auth="fail"),
+    ]
+
+    def reply(bundle):
+        ref = bundle["candidates"][0]["ref"] if bundle["candidates"] else "no_case"
+        return verdict_json(disposition="archive", case=ref, citations=[bundle["mail"]])
+
+    mailwatch.run_once(mailboxes=[FakeMailbox(mails)], state_dir=state_dir,
+                       owner_addresses=frozenset({OWNER}), model_spec=MODEL, charter=charter,
+                       chat=ScriptedReader(reply), now=lambda: T0 + 2 * DAY)
+    (case,) = mailcases.CaseStore(state_dir).cases.values()
+    (record,) = list(mailverdicts.iter_store(state_dir))
+    return case, record
+
+
+class TestTheThreeSurfacesAgree:
+    """Round-5 review: /mail and the CSV read a raw closure and said "keeper
+    clamp RELEASED" for a mail whose only membership is an untrusted
+    attachment, while the report did not. One trusted closure for all three."""
+
+    def surfaces(self, state_dir):
+        view = "\n".join(t for _s, t in mailview.lines(state_dir, clean=lambda s: s,
+                                                         now=T0 + 3 * DAY))
+        csv_text, _rows, _bad = mailexport.render(state_dir, clean=lambda s: s)
+        report = mailreport.build(state_dir, now=T0 + 3 * DAY, since=T0 - DAY,
+                                  clean=lambda s: s)
+        return view, csv_text, report
+
+    def test_an_untrusted_attachment_is_held_on_every_surface(self, tmp_path):
+        case, record = seed_untrusted(tmp_path)
+        assert record["keeper_clamped"] and record["mail"] in {
+            p[1] for p in mailcases.CaseStore(tmp_path).cases[case.id].mails}
+        act(tmp_path, "close", case=case.id, now=record["recorded_at"] + 60)
+        view, csv_text, report = self.surfaces(tmp_path)
+        assert "RELEASED" not in view
+        assert "released: you closed its case" not in csv_text
+        assert any(i.reading.digest == record["mail"] for i in report.interest)
+
+    def test_a_trusted_member_is_released_on_every_surface(self, tmp_path):
+        case, record = seed(tmp_path)
+        act(tmp_path, "close", case=case.id, now=record["recorded_at"] + 60)
+        view, csv_text, report = self.surfaces(tmp_path)
+        assert "RELEASED" in view and "released: you closed its case" in csv_text
+        assert all(i.reading.digest != record["mail"] for i in report.interest)
+
+
+class TestTheVerdictsKindReachesTheKeys:
+    """Round-5 note 3: assessment and the recheck had the verdict in hand but
+    called the key rule without the Reader's kind, so a code mail with a
+    neutral subject still contributed keys."""
+
+    def test_assessment_reads_the_kind_it_just_got(self, tmp_path):
+        charter = reader_charter()
+        admit(tmp_path, charter, MODEL)
+        mails = [gmail("i1", frm="verify@broker.example", subject="Let's confirm your email",
+                       body="Confirmation 5-17927992435000278-753139", at=T0)]
+        reader = ScriptedReader(lambda b: verdict_json(
+            disposition="archive", kind="verification code", citations=[b["mail"]]))
+        mailwatch.run_once(mailboxes=[FakeMailbox(mails)], state_dir=tmp_path,
+                           owner_addresses=frozenset({OWNER}), model_spec=MODEL,
+                           charter=charter, chat=reader, now=lambda: T0 + DAY)
+        (record,) = list(mailverdicts.iter_store(tmp_path))
+        assert record["verdict"]["kind"] == "verification code"
+        assert not record.get("keeper_clamped")  # no case_key signal from a code's key
+        # The recheck reads the same kind back from the store.
+        assert mailwatch.recorded_kind(mailverdicts.VerdictStore(tmp_path),
+                                       record["mail"]) == "verification code"
+

@@ -587,7 +587,7 @@ class TestRun:
         (entry,) = mailreport.read_ledger(tmp_path)
         assert entry["status"] == "delivered" and entry["session"] == "chat-1.jsonl"
         assert entry["counts"] == {"needs_action": 1, "your_turn": 0, "their_turn": 0,
-                                   "may_interest": 0}
+                                   "may_interest": 0, "probably_settled": 0}
         assert entry["digests"] == [h.digest]
 
     def test_an_empty_day_still_delivers(self, tmp_path):

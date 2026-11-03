@@ -156,6 +156,20 @@ class TestLedger:
         grade = self.grade(index, later)
         assert grade.grade == mailgate.KNOWN and grade.how == ("replied",)
 
+    def test_a_forward_or_reply_sent_elsewhere_is_no_act_toward_the_sender(self):
+        """His act is aimed at a sender only when addressed to its domain
+        (`mailindex.aimed_at`): forwarding its mail to his other address, or
+        replying to it with somebody else in To, earns it nothing."""
+        for to in ("bip@wenda.example", "help@other.example"):
+            ask = gmail("a", frm="desk@club.example", subject="Membership", at=T0,
+                        message_id="m@club.example")
+            fwd = gmail("f", frm=OWNER, to=to, subject="Fwd: Membership",
+                        at=T0 + 60, in_reply_to="m@club.example", labels=("SENT",))
+            later = gmail("l", frm="desk@club.example", subject="Welcome", at=T0 + DAY)
+            index = index_of(ask, fwd, later)
+            grade = self.grade(index, later)
+            assert grade.acts == 0 and grade.grade == mailgate.FIRST_CONTACT, to
+
     def test_a_case_he_opened_counts_as_an_act_toward_its_parties(self):
         mail = gmail("m", frm="parcels@courier.example", at=T0 + DAY)
         index = index_of(mail)

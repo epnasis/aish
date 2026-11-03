@@ -122,6 +122,9 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `mailreport._ONE_TIME_CODE_PHRASES` | PL + EN (+ ID `kode`) | friction | yes | charter v3 answers a code `nothing` + `expire_after_grace`, so a code reaches the daily report's sections only on a Reader miss AND a list miss | 28 |
 | `mailindex._REPLY_PREFIXES` | client subject prefixes | breaks | yes | In-Reply-To / References, read first — the prefix is consulted only when both are absent | 9 |
 | `mailcases._KEY_WORDS` | EN + PL + DE + FR | breaks | yes | the UPS `1Z` shape and the IBAN checksum, which need no introducing word | 22 |
+| `mailcases._KEY_STEMS` | PL (inflected stems, bounded ending ≤ 3 letters) | breaks | yes | the whole-word list above, and the UPS `1Z` shape | 8 |
+| `mailcases._IDENTITY_MARKERS` | PL + EN + DE | breaks | yes | `_identifier_shaped`: a token that is a reference by its own shape needs no marker | 5 |
+| `mailcases._KEY_CONNECTORS` | EN + PL | breaks | yes | none — the pre-existing connectors of the key pattern | 3 |
 | `mailcases._CURRENCY_WORDS` | currency signs and ISO codes | breaks | yes | — | 10 |
 | `signin._SECOND_LEVEL` | public suffixes | friction | **no** | — | 10 |
 | `web._NOT_BUYABLE` | schema.org enum | breaks | **no** | subset of `web._AVAILABILITY`, tested at the same call site | 3 |
@@ -587,3 +590,84 @@ right ones; that question is the exam's, not the counter's.
 
 **These numbers begin at this commit.** Every log written before it carries no `vocab` record
 at all, and the report says so rather than rendering an empty window as a clean bill.
+
+
+## `mailcases._KEY_STEMS` (2026-11-02, a deliberate addition with its before-picture)
+
+Polish declines the nouns that introduce a reference — *Numer paczki*, *do zamówienia*, *numer
+przesyłki* — and `_KEY_WORDS` holds only the nominatives, so on the owner's live index (a temp
+copy, read-only, 1,146 mails) **0 of his InPost notices yielded their parcel number**. The stems
+(`zamówieni`/`zamowieni`, `przesyłk`/`przesylk`, `paczk`, `rezerwacj`, `faktur`, `rachun`) are a
+NEW list, so `_KEY_WORDS` itself did not change, and they take a BOUNDED ending (`STEM_SUFFIX_MAX`,
+3 letters): `paczk` finds *paczki*, *paczkę*, *paczkami* but never *paczkomat*, whose locker id
+would otherwise read as a tracking key shared by unrelated parcels. Measured on the same copy:
+
+| | mails with a key | distinct keys | kinds — (mail, key) occurrences |
+|---|---|---|---|
+| before | 74 | 51 | order 44, booking 20, invoice 18 |
+| after the stems | 147 | 90 | order 71, tracking 46, booking 23, invoice 19 |
+| after the identity rule (below) | 145 | 89 | order 71, tracking 44, booking 23, invoice 19 |
+
+Of the stem matches, three were calendar dates (*Data zamówienia: 2026-10-10*); a key shaped like
+a date is now refused for every introducing word (`_DATE_SHAPED`, structural) — it removed none of
+the whole-word list's keys. The owner's phone number on the InPost notices (*Numer telefonu*) is no
+key and on no case.
+
+**What makes a stem's token the matter's identifier, not a one-time secret** (round-3 note N2:
+*Twój PIN do odbioru paczki: 646235* had become a tracking key). The rule reads a list of words —
+`mailcases._IDENTITY_MARKERS`, declared and counted (round-4 note 2 found it first written as an
+undeclared set); no word was added to it for the PIN, and no negative list (*kod*, *PIN*) exists: a
+stem-introduced token is a key when an IDENTITY MARKER governs it — *numer / nr / no / number*
+right before the stem (*Numer paczki: …*) or right after it (*zamówienia nr …*); without one, it
+must be identifier-shaped on its own (`_identifier_shaped`): letters and digits mixed (*XYO3K4*,
+*PX7694845874*) or at least `UNGOVERNED_DIGITS_MIN` (7) digits (*261509440*). A short all-digit
+token with no marker is the shape of a one-time code or PIN. *kod / code* are never markers: they
+name a secret. A marker-only rule was measured first and lost four real references (*fakturę do
+zamówienia 261509440*, *tymczasowej rezerwacji: XYO3K4*, *Przesyłka o numerze PX7694845874*, an
+order id) — the shape half keeps them. Measured on a fresh copy of the live index (1,149 mails):
+the rule lost exactly ONE key, `646235` (the PIN), and gained none; the InPost tracking number
+still extracts from all three notices. **Each list is counted by what IT matched** — a mail with
+a whole-word key and a stem key counts a match for both (N3). `TestInflectedKeys`. `mailcases.py` joined `TestTheCountingChangedNoMatching.FILES`, so a later
+change to either list is fenced. `TestInflectedKeys` in `tests/test_mailcases.py`.
+
+**One authority for the markers, and a fence that sees new lists** (round-4 note 2). Both places a
+marker may stand — before the stem and after it — are built from `_IDENTITY_MARKERS` (with
+`_KEY_CONNECTORS` after it), so the earlier asymmetry (*nummer* only before) is gone; measured on
+a frozen copy of the live index the restructure moved no key. `TestTheCountingChangedNoMatching`
+now fails on a collection CREATED since a file's baseline unless `NEW` declares it with its exact
+entries, and a file absent at the global baseline gets its own (`FILE_BASES`): before, it skipped
+`mailcases.py` whole and could not see a new list anywhere. Two existing new collections surfaced
+and are declared (`PAGE_READERS`, a record's `sandbox_meta` fields — neither a word list).
+`TestTheMarkersHaveOneAuthority`, `test_a_new_list_is_fenced_until_declared`.
+
+**Inflection is a rule, not more words** (round-4 note 6). Polish locatives and datives alternate a
+stem's last consonant — *paczka → w paczce*, *przesyłka → o przesyłce*, *faktura → w fakturze* —
+and none of those met the stems: the owner's DHL notices (*Powiadomienie o przesylce 29777837645*)
+connected to nothing. `_STEM_ALTERNATIONS` (k→c, g→dz, ch→sz, r→rz, t→ci, d→dzi, ł→l) is applied by
+code to EVERY stem (`_stem_forms`), so a stem added later gets its forms without anyone writing
+them; the bounded ending still keeps *paczkomat* out and dates stay refused. Measured on the frozen
+copy: one key gained, `29777837645` (tracking), now shared by the 4 DHL notices; none lost.
+`TestStemAlternationsAreARule`.
+
+**A one-time code's mail contributes no keys** (round-4 note 3). The shape rule still let a 7+-digit
+OTP, a phone number or a mixed one-time code after an introducing word become a key. Three systemic
+options were measured on the frozen copy (1,149 mails), and no negative word list (*kod*, *PIN*)
+was considered:
+(a) a token that is one of his own identifiers (appearing in his own outbound mail) is never a key —
+no ungoverned stem key appears in his mail, so it would have changed nothing measured and catches
+phones only;
+(b) a key needs a second mail or a marker — it would have LOST seven real references carried by one
+mail each (`10021306947-01`, `10021579307-01`, `10021925290-01`/`-02`, `261509440`, `348010369`,
+*G10102653771*, `PX7694845874`);
+(c) **chosen**: a mail the report already classifies as a one-time code or sign-in link
+(`mailreport.is_one_time_code`, over the Reader's kind and the subject) contributes no keys
+(`mailcases.mail_keys` — the one function every caller now uses: observation, the recheck, the
+correlator, assessment and the items' key reader; and `Context._trusted_fact` refuses a key such a
+mail recorded). Restrict-only. Measured: lost exactly two keys, both Interactive Brokers sign-in
+confirmations (`5-17927992435000278-753139`, `5-17935414849320950-789728`); gained none.
+Assessment passes the verdict it just received, and the Tuta recheck the newest recorded one
+(`mailwatch.recorded_kind`), so the Reader's half applies wherever a verdict is in hand (round-5
+note 3, `TestTheVerdictsKindReachesTheKeys`). **Residual, stated:** at INGEST there is no reading
+yet, so only the subject half applies there; and
+a phone number directly after an introducing word in an ordinary mail still keys (none on the
+frozen copy). `TestAOneTimeCodeMailContributesNoKeys`.

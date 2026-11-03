@@ -2,8 +2,9 @@
 
 `mailindex.py`, `mailgate.py`, `mailcases.py`, `mailreader.py`, `mailverdicts.py`,
 `mailwatch.py`, `mailsource.py`, `mailtuta.py`, `mailview.py`, `mailexport.py`,
-`mailbacktest.py`, `mailreport.py`, `mailcasetool.py`, `mailprefs.py`,
-`aish/charters/mail-reader.md`, `scripts/install-mailwatch-service.sh`,
+`mailbacktest.py`, `mailreport.py`, `mailcasetool.py`, `mailprefs.py`, `mailitems.py`,
+`mailsettle.py`, `mailitemtool.py`, `mailvouch.py`, `aish/charters/mail-reader.md`,
+`aish/charters/item-settler.md`, `scripts/install-mailwatch-service.sh`,
 `scripts/install-mailreport-service.sh`.
 The binding design is the comment *"W5 REWRITTEN — the inbox assistant"* on epic #142
 (2026-10-24). This file says what slice S1 built from it, what S1.5 added (the owner surface,
@@ -136,11 +137,24 @@ did with it, split by which header gated it — so the gate can be narrowed on e
 `known` or `first-contact`, from `owner_acts`:
 
 - `wrote` — an outbound mail addressed to the address;
-- `replied` — an outbound mail whose OWN In-Reply-To names a mail from that address.
-  Membership of the same conversation is not enough: a hostile mail can put an owner thread's
-  Message-IDs in its References and join it, and his earlier replies there must not become
-  acts toward it;
-- `case` — a case he transacted on includes the address (from the case store, as of).
+- `replied` — an outbound mail whose OWN In-Reply-To names a mail from that address AND that is
+  addressed to that address's domain (`mailindex.aimed_at`). Membership of the same conversation
+  is not enough: a hostile mail can put an owner thread's Message-IDs in its References and join
+  it, and his earlier replies there must not become acts toward it. Nor is In-Reply-To alone
+  (2026-11-03): his forward of a sender's mail to somebody else is not an act toward the sender.
+  Measured on the frozen copy: of 1,132 inbound mails, 3 changed grade, all from
+  automated@airbnb.com — `known` (1 act, `replied`, his forward c6046a0ab382 To bip@wenda.eu) →
+  `first-contact`. `test_a_forward_or_reply_sent_elsewhere_is_no_act_toward_the_sender`;
+- `case` — a case he transacted on includes the address AS SOMEONE HE DEALT WITH (from the case
+  store, as of): a party he addressed on that case, or one at a domain admitted there by his act
+  toward it. **Since 2026-11-02 a party records its provenance** (`via`: `owner` or `inbound`,
+  `authenticated`, and `addressed` — when he first addressed it): a sender that merely JOINED a
+  case by quoting its key is a party, never a `case` act (`Case.dealt_with_at`,
+  `CaseStore.owner_case_parties`). Before it, an authenticated stranger quoting his real order
+  number earned the grade `known` and third-party history (round-3 review). A party recorded
+  before provenance existed is resolved from his own outbound mail on the case when the index is
+  at hand (and a merge never turns a legacy record into "inbound": `TestLegacyParties`).
+`TestJoiningACaseIsNotTrust` in `tests/test_mailitems.py`.
 
 `established` needs `ESTABLISHED_MIN_ACTS` (2) acts on distinct days and the first at least
 `ESTABLISHED_MIN_AGE_DAYS` (30) days before. **Inbound volume is recorded and read by no line**
@@ -156,7 +170,9 @@ In shadow, the Reader's `suspicion` axis is the only judged signal, and it restr
 
 ## The case store and the correlator — `mailcases.py`
 
-**Everything here is code.** Keys by regex after an introducing word (`_KEY_WORDS`, counted)
+**Everything here is code.** Keys by regex after an introducing word (`_KEY_WORDS`, or since
+2026-11-02 an inflected Polish stem with a bounded ending, `_KEY_STEMS` — `docs/vocabularies.md`;
+never a date-shaped key; both counted)
 and carrying a digit, the UPS shape without one; amounts beside a currency
 (`_CURRENCY_WORDS`); IBANs by regex AND the mod-97 checksum (`iban_valid`), with a bare
 26-digit Polish account read as its PL IBAN. `TestExtraction`.
@@ -170,10 +186,47 @@ admitted sender, its account history is only what admitted senders sent (`coordi
 before it has one, the whole authenticated history is all there is, and that is weaker.
 `TestCaseCreation`.
 
+**A case's recorded facts come only from his own or authenticated mail** (round-3 note N1).
+Keys and their kinds, amounts, payment accounts and authenticated domains are written onto a case
+by observation only from his outbound mail or an AUTHENTICATED inbound one; unauthenticated mail
+that quotes a case's key is still attached to it and shown, and characterises nothing. Before,
+keys alone were written from any mail, so a forged mail quoting a real order number plus
+*"zamówienie nr FAKE123"* could plant an order key and make an item a delivery. The readers apply
+the same law to facts recorded before it (`mailitems.Context._trusted_fact`: a key whose recording
+mail is not his own or authenticated characterises nothing). `TestCaseFactsComeOnlyFromTrustedMail`.
+**Membership obeys the same law** (round-4 note 1): a mail is attached to a case by any key, but
+it is a MEMBER for anything that grants or decides visibility only when it is his own mail, or
+authenticated AND joined through a key a trusted mail recorded, a key he typed himself, or a direct
+reply to his mail on the case — a mail of his that was addressed to the replier
+(`mailindex.aimed_at`, 2026-11-03: his Message-ID reaching a stranger by forward grants that
+stranger no membership; `test_a_reply_to_his_mail_is_trusted_only_from_whom_he_wrote_to`). `mailitems.Context.cases_of` is the one reader — the case tie, stored
+amounts, an item's meaning, admitted domains and his closed case covering an item go through it,
+and so does the keeper release on EVERY surface: the report, `/mail` and the CSV all read
+`mailitems.trusted_closure` (round-5 review: `/mail` and the CSV read the raw store closure and
+said *RELEASED* where the report did not). `Closure.releases` also requires the mail to be a
+member of a case NOW, so the case ids a pre-law record wrote (`mail_cases`, raw membership)
+release nothing on their own. `TestMembershipMustRestOnATrustedFact`, `TestTheThreeSurfacesAgree`
+(`tests/test_mailcase_verbs.py`). **The list of facts has one writer**
+(`CaseStore._record_facts`, round-4 note 4): observation and the Tuta recheck
+(`record_authenticated`) both go through it, so a mail authenticated later gains its keys too, not
+only its domain, amounts and accounts. `TestTheRecheckRecordsKeysToo`.
+**A known weaker edge, stated:** a case's account history before it has an admitted sender is the
+whole AUTHENTICATED history (`coordinates_before`) — a stranger passing DMARC on its OWN domain
+can seed it; N1 removes the unauthenticated half of that, not this one (§Residuals).
+
 **Alias admission is deterministic corroboration, and the corroboration is HIS.** A sender
 domain is admitted on a case when it was seen there in authenticated mail AND he then acted on
-the case TOWARD it — wrote to an address at it, or replied to a mail from it
-(`_admit_toward`). The design's wording is *"authenticated domain co-occurring on an
+the case TOWARD it — a mail of his with an address at that domain among its To/Cc recipients
+(`_admit_toward`). **Addressed TO it, nothing less** (2026-11-03; one predicate,
+`mailindex.aimed_at`, owns "his act is aimed at X" for the admission, the ledger's `replied` and an
+inbound reply's case membership): a reply or a forward whose
+In-Reply-To names the sender's mail, sent to someone else, is not an act toward that sender. The
+first version also aimed every reply at the domain of the mail it replied to, so his forward of an
+Airbnb confirmation to his own other address (`Fwd: Confirmed: …`, To bip@…) admitted airbnb.com
+on the booking's case — measured on the frozen copy by the backlog re-observation. Restrict-only:
+of the one admission the frozen copy held (janeba-time.pl, by his reply addressed to
+zamowienia@janeba-time.pl), the corrected law still mints it. One law for the live pass, the
+backfill and `--reobserve`. The design's wording is *"authenticated domain co-occurring on an
 owner-transacted case"*; co-occurrence alone was the first draft and the design review broke
 it: DMARC proves a sender owns ITS domain, and an order number is the kind of string that leaks,
 so an attacker passing DMARC from his own domain with the owner's real order number would have
@@ -1232,6 +1285,324 @@ fixed, and what they did not:
 
 `TestTheSeed`, `TestTheSurface` (`/mail preferences` in the terminal; `list` in the chat).
 
+## Open items and settlement (2026-11-02) — `mailitems.py`, `mailsettle.py`, `mailitemtool.py`
+
+**Why.** The owner's review of the 2026-11-01 and 2026-11-02 report chats
+(session-20261101-073003-003960, session-20261102-073004-181280): *"You need to connect the
+dots … all these could be derived by connecting emails"* — a PAY item next to the club's own
+"thank you for the payment"; his BMW reply listed as a REPLY item (its Tuta copy) while the offer
+he answered sat under DECIDE; two follow-ups he had closed coming back daily; a their-turn row for
+a parcel InPost had confirmed picked up; one school notification listed twice. And, the day
+before, his denial of a per-sender patch: *"this is not local solution — always do adversarial
+review for systemic solutions"*. The binding design is the three epic comments of 2026-11-01
+(follow-up redesign, 9 review changes, his two additions), the option-A decision and 2026-11-02
+(settlement design, 12 review changes); this slice's own design review (Fable, 2026-11-02)
+changed six of its decisions, each noted below.
+
+### An item, and the one derivation
+
+An **item** is one thing the report would put in front of him, anchored by a DIGEST:
+
+| kind | anchor | counterparty | rests on |
+|---|---|---|---|
+| `needs` | the mail whose reading wants pay / reply / decide (or that his `important` preference places there) | its sender | that mail |
+| `yours` | the FIRST asking mail after his last message to them | the person he wrote to | every asking mail since |
+| `theirs` | his last message to them | the person he wrote to | that message |
+
+`mailitems.derive` is the ONE derivation (review-2 change 7): the watcher's settlement step and
+the 07:30 report both call it, so they cannot disagree about what is open. The report still shows
+a needs item only while it is news (§What is new) — the watcher judges only what the report could
+show (`mailsettle.showable`, reading the report's own `news_window`, and nothing his hide
+preferences take out). It is a slight SUPERSET in one corner — a your-turn row whose ask the report
+folds under a shown Needs item, or a near-duplicate's twin — so the watcher can spend a call on a
+row the report will not draw; never the other way. Follow-ups are unchanged in what they list (per counterparty, B3), and a
+your-turn row he answered in its own conversation is simply not derived: his answer moved his
+last message past it, as before. The item key is `kind|anchor|counterparty`.
+`TestTheOneDerivation` in `tests/test_mailitems.py`.
+
+### The clock — aish's first read, never a sender's date
+
+Every comparison (revive, cover, "later") uses `Context.first_read`: the earliest reading's
+`recorded_at`; for his own sent mail its time (the SENT label / Sent folder is his evidence); for
+any other mail with no reading — backfilled, a lapse — the modification time of its index file,
+which is when aish WROTE the entry (a later recheck rewrite only moves it later, the safe way);
+and with none of those, never (`inf`): such a mail is never covered by a resolution and never
+anyone's evidence. **Changed by the design review**: the first plan fell back to the mail's own
+`at`, which for Tuta is the sender-written Date — a backdated unread mail would then have been
+"covered" by an older resolution. On the real index it is what lets his 2026-10-31 close cover
+Janeba's answer: indexed 17:30, closed 19:35, while its sender-written Date says 10-09.
+`TestTheFirstReadClock`.
+
+**"Later" is both clocks** (`Context.later`): a candidate or his reply must be first read after
+the anchor AND carry its own time after the anchor's. Either alone fails: a mail backfilled today
+is first read today however old it is (the first real run tied a 2026-09-25 bank notice to a
+2026-10-17 item that way), and a sender writes its own Date. Requiring both only ever excludes.
+`test_a_backfilled_old_mail_is_not_later_than_the_item`.
+
+### Whether an item is open — `Context.state_of`
+
+States `open` | `settled` | `cannot_tell`; sources in a fixed order, **owner > judge > rule**:
+
+1. **His word.** `resolve` / `restore` on the anchor, from `<state>/mail/item-acts.jsonl` (the
+   newest act wins; it applies to every item on that anchor), and a **case he closed** that the
+   anchor is on, under `Closure.releases`' law (every case it is on closed at or after the latest
+   first read of what it rests on). A resolution covers ONLY mail aish read at or before it: any
+   non-gated inbound mail in the item's conversation, from anyone, or any new ask, first read
+   later, **revives** it (reviving only shows more). His **restore** pins the item open against
+   every judgement and rule whose evidence was read at or before the restore; evidence read after
+   may settle it again. A restore later than a close outranks the close. Settled by his word, an
+   item leaves the report, counted in the footer. `TestHisWord`, `TestHisClosedCase`.
+2. **A verified judgement** (§The settlement judge) — re-verified by code on EVERY read: the
+   candidate still in the index, later on both clocks, still passing the tier rule with no
+   caution, and nothing read after the judgement reviving the item. `TestAJudgementIsReverified`.
+3. **The rule** — his own outbound mail, later than the anchor, ADDRESSED to the item's
+   counterparty, or whose OWN In-Reply-To resolves (`reply_parent`, squat-safe) to one of the
+   item's mails or to a mail from the counterparty inside its conversation. Never conversation
+   membership: a stranger joins a conversation by naming a Message-ID; only his own header says
+   what he answered. The In-Reply-To half is deliberately NOT `mailindex.aimed_at`: the rule grants
+   no sender anything — it says HE answered his own matter — and whether forwarding an item's mail
+   to somebody else answers it is the owner's question, not decided here. Measured on the frozen
+   copy (2026-11-03): for none of the items `Context.derive` returns does a mail of his that
+   is not addressed to the counterparty count as aimed at it. The rule is not "revived": what continues the matter is its own new item (on
+   the real index, Przemysław's next reply is a your-turn row). `TestTheRule`.
+
+Settled by a judgement or the rule is **probably settled** (option A, the owner's choice of
+2026-11-02): demoted into the report's named line, never removed — only his word removes it, or
+the window.
+
+### His own mail in his other inbox — `own_copies`
+
+**The design's law could not work on his mail, and was replaced on evidence** (review-2 changes 3
+and 4: verify on the actual F2 pair first). Through the Tuta bridge **every** Message-ID is the
+bridge's own (`…@tutabridge.local`, 660 of 660 Tuta entries on 2026-11-02) and **no** In-Reply-To
+or References survives (0 of 660). His BMW pair: Gmail SENT `b83aae…` and Tuta inbound copy
+`298813…` — same From, To, Cc and subject; the Date re-rendered 3 s later in another zone; the
+body 1092 vs 1050 characters, a different digest. So same-Message-ID matching (and
+`mailreport._one_copy`, which keys on it) never pairs a Gmail/Tuta cross-delivery, and a body
+comparison would fail too. What the evidence supports, every part required: the gateway
+AUTHENTICATED the copy; its From is an address his Gmail SENT mail is sent from; a Gmail SENT
+original exists from that address with the same subject and the same To and Cc sets, received
+within `OWN_COPY_SKEW_S` (300 s, a choice) of the copy's Date. A recognised copy MINTS NOTHING:
+never an item, never observed into the case store (`ingest` indexes the whole batch before
+observing any of it, so the pair is recognised whichever came first; the backfill and the recheck
+skip it too), never read by the Reader (the pass counts it `own_copies`) — **within one batch**.
+Across passes it is weaker: a copy fetched in a pass where its Gmail original was not (a quota
+stop, a failed sent fetch) is observed into the case store as ordinary authenticated inbound when
+it comes, and nothing undoes that observation. The derivation re-tests at read time, so such a copy
+still stops being an ITEM once its original is indexed. The
+footer names each copy with both refs. `TestHisOwnCopy`.
+
+### The settler vouch — `mailvouch.py` (his word for a third party)
+
+**Why.** F4: InPost's *"your parcel from Uncico was picked up"* is a third party with no
+history in his case store (it is on no case he transacted on), so the tier rule refuses it — and
+must, since the history rule is what stops an authenticated stranger with a name in its text from
+settling items. Loosening it would be the local optimum. The missing fact is HIS: whether mail
+from that sender may speak for that kind of matter.
+
+- **The grant is his act, per EXACT domain and closed meaning.** `inbox_items` action=vouch /
+  revoke, the case verbs' law (a task he sent, a code-composed card, under the item acts' lock,
+  SAVED only after the write): *Allow mail from paczkomaty.pl to settle delivery items in your
+  inbox reports? Only mail from exactly paczkomaty.pl — not a subdomain or a lookalike — …*.
+  Every act is a line in `<state>/mail/settler-vouch-acts.jsonl`; the current set is the newest act
+  per (domain, meaning); permanent until revoked; listed by `inbox_items` list. Membership is an
+  exact string compare (the `vouches.py` law).
+- **Meanings are predicates of the ITEM, over recorded facts on its own mails**
+  (`mailvouch.MEANINGS`, `mailitems.Context.settle_meanings`): `delivery` — one of them is on a case
+  whose RECORDED keys (`mailcases`, extracted at ingest) include an order or tracking key
+  (`DELIVERY_KEY_KINDS`); `payment` — one of them carries a recorded money fact. **Never a property
+  of the later mail** (round-2 review, blocking): the first version made `delivery` "the later mail
+  names the counterparty", which is the entity tie itself, so a (domain, delivery) vouch would have
+  let that domain settle ANY kind of item whose counterparty it names — on the real index it
+  offered *let clsu.pl settle delivery items* on an insurance offer. The tie stays a reason to
+  ASK; the chip is offered only when the item satisfies the meaning.
+  `test_naming_the_counterparty_does_not_make_an_item_a_delivery`.
+- **What it grants is eligibility, nothing more**: a vouched (domain, meaning) is tier
+  `vouched sender`, an alternative to the third-party history rule, which is unchanged. The
+  candidate must still be authenticated, read, tied by code, free of any caution, later on both
+  clocks — and the settlement judge must still read it as settling the item, which then only
+  moves to *Probably settled*.
+- **Code offers it, never answers it.** A refused third party for which a meaning applies carries
+  `Candidate.vouchable`, and the item's *later mail aish did not weigh* line ends with a one-tap
+  chip `[let <domain> settle <meaning> items](aish-reply://vouch settler <domain> <meaning>)` —
+  the report's third link shape, built from a validated domain and a closed meaning
+  (`mailvouch.chip_text`) and the only extra shape `server._REPORT_FOREIGN_LINK` keeps — its
+  meanings derived from `mailvouch.MEANINGS`, the one authority, never a second literal. A tap
+  sends the words as his message; the grant is still his card.
+
+`TestTheGrant`, `TestTheOffer` and the vouch verbs' `TestTheVerbs` in `tests/test_mailvouch.py`.
+
+### The settlement judge — `mailsettle.py`, `aish/charters/item-settler.md`
+
+A toolless role (kind `judge`, model class `caller`, degradation `skip`, the `settlement`
+output shape delegated to `mailsettle` as `verdict` is to `mailreader`), asked about ONE
+(item, candidate) pair: `settled_by k1` | `still_open` | `cannot_tell`, a capped reason, and
+citations. It runs in the WATCHER pass, after assessment (`mailwatch.settle`); the report stays
+model-free.
+
+- **Code finds the pairs** (`Context.candidates`): later mail tied to an open item by at least one
+  code signal — `counterparty`; `conversation` (membership is fine for ASKING; the tier decides);
+  a shared extracted `key`; a common `case`; an equal STORED `amount` (the case store's amounts at
+  each mail's position — never re-read from a body); `entity` (the counterparty's display name in
+  the candidate's text, its domain's first label, or the same domain — the domain only when fewer
+  than `ENTITY_DOMAIN_MAX_SENDERS` (5, a choice) distinct addresses at it appear in any header of
+  his mail, which keeps a shared provider like gmail.com out structurally: on the first real run
+  "gmail" tied unrelated people until the count read every header, not only senders). Newest
+  first, at most `CANDIDATES_PER_ITEM` (3). His own mail aimed at the item is the rule's, not
+  a candidate.
+- **Code applies the tier rule BEFORE any call** (`Context.check`, review-2 change 1): (a) his own
+  outbound mail; (b) the same counterparty — the item's counterparty, **an address he wrote to in
+  the item's conversation**, or a domain admitted on a case the anchor is on; (c) a third party
+  only if authenticated AND tied by a case it shares with the anchor or an equal stored amount AND
+  with history — its domain DEALT WITH by him (a party he addressed, or an admitted domain;
+  never a sighting alone) on `THIRD_PARTY_MIN_CASES` (2) distinct cases he transacted on, at
+  least `THIRD_PARTY_MIN_AGE_DAYS` (30) before the candidate (both choices). Never
+  `mailgate.grade`. A caution mark on any model's record of the candidate, or failed
+  authentication from a sender that passed before (`mailprefs.floor`), refuses every tier.
+  **Changed by the design review (blocking)**: tier (b) first read "a sender in the item's
+  conversation", which a stranger satisfies by its own membership — one hostile Gmail mail naming
+  the thread's Message-ID would have been its own credential to demote the item.
+  `test_a_stranger_joining_the_conversation_is_not_tier_b`; `TestTheTierRule`,
+  `TestTheThirdPartyTier`.
+- **Every inbound candidate, whatever its tier, must be authenticated and read** (the delivery
+  review, blocking): an unauthenticated From is a claim anyone can write, and the caution floor
+  reads the Reader's record — a mail with no reading had no floor at all, so a forged,
+  never-assessed From of the counterparty passed tier (b). An unauthenticated candidate is refused
+  (*its sender is not authenticated*); an authenticated one with no reading WAITS (`unread`, never
+  judged, and a judgement on it settles nothing) until the settlement step reads it
+  (`mailitems.unread_candidates`, `CANDIDATE_READS_PER_PASS` (5, a choice), newest first). The
+  footer counts what waits. `TestEvidenceMustBeAuthenticatedAndRead`.
+- **A refused pair is never sent, and is named.** The open item's line says *later mail aish did
+  not weigh: from <address> (<date>): <code's reason>* — an address and code's words only, never
+  the later mail's subject or text (review: an attacker-writable channel pinned to a chosen item).
+  A pair whose bodies are not recorded is not judged and is counted.
+- **Bounded and idempotent.** At most `MAX_JUDGED_PER_PASS` (12, a choice) calls per pass, newest
+  candidate first, the rest counted `capped`; one judgement per (item key, candidate, charter
+  digest) — a charter edit is a new judgement. `unadmitted` stops the step without a call;
+  `unavailable` writes nothing and is retried; `ok` and `invalid` are final. The record is
+  trace contract §3.26; one unreadable judgement file costs that anchor's judgements
+  (`TestHealthOfTheStore`). `TestTheWatcherPass` in `tests/test_mailsettle.py`.
+- **The exam** (8 synthetic cases): the owner's three positives reconstructed with invented
+  parties — a club's PAY reminder settled by its own payment confirmation (F1), an offer settled by
+  his own choice (F2), a their-turn parcel-locker problem settled by the courier's pickup of THAT
+  shop's parcel (F4: the judge's reading; the tier rule may still refuse it in code) — and the
+  adversarial negatives: a stranger's "payment received" for another payee, a lookalike pickup of
+  another shop's parcel, a first-contact domain saying "your invoice is settled", a second
+  reminder from the same club, and a mail telling the judge to settle. `TestTheExam`.
+
+### The gap reading — the follow-ups that rest on unread answers
+
+A your-turn row whose asking mail has NO reading is "your turn" only because an unread answer
+counts as an ask (the fail-visible direction). In each pass the settlement step reads those answers
+with the Reader (`mailitems.gaps`, oldest row first, `LATE_READS_PER_PASS` (5, a choice)),
+stamping the record `late_read`. A reading that asks nothing closes the row — a model's reading
+taking a row out, so the footer NAMES each such counterparty (*N follow-up(s) left Your turn
+because aish read the answer late and it asks nothing*), never silently. **This amends** §The live
+backfill's "older backfilled mail is never assessed": an old answer an open follow-up rests on is.
+`TestTheLateReading` in `tests/test_mailsettle.py`.
+
+### The report
+
+- **Probably settled (N)** — its own section, cut by its own cap (`SETTLED_MAX_CHARS`, whole
+  lines only, so a cut never splits a chip, and only the rows drawn are recorded as shown;
+  `TestTheSectionCap`) and never by the sections' (review-2 change 11). Each line: the item in code's words, *probably settled:*
+  the evidence code verified — *you wrote to X on <date>* (the rule) or *mail from X on <date>
+  (the same party / a third party with history; the stored amount), as aish's settlement judge
+  read it* with the evidence mail's ref — and two one-tap chips, `[restore]` and `[done]`. **The
+  chips are the report's second link shape**: `aish-reply://restore ref <12 hex>` /
+  `…resolve ref <12 hex>`, built by code from the anchor alone; `server.presented_report` keeps
+  exactly that shape and breaks every other (`mailreport.safe` disarms every `aish-reply:` in mail
+  text first). A tap sends the words as his message; the change is still his card. **Changed by
+  the design review**: the plan had typed words ("say restore ref …"), which is not the owner's
+  "one-tap-restorable". The judge's reason is never rendered. A needs item shown here was shown.
+  `TestTheReport`, `TestTheServerKeepsOnlyTheChip`.
+- **Near-duplicates** (`mailitems.near_duplicates`): one sender, one subject, first read within
+  `NEAR_DUPLICATE_S` (600 s, a choice) render once, *(×2 — also ref …)*, every copy's ref on the
+  line and *their texts differ* when the body digests differ; every copy recorded as shown.
+  **Changed by the design review**: collapsing alone could have hidden a second distinct invoice
+  under one subject forever. `TestNearDuplicates`.
+- **Continuity** — the line under the headline: *Since the last report: you resolved N item(s),
+  closed M case(s), saved K preference(s)* — each a filter over its acts ledger
+  (`mailreport.acts_since`; the seed is not his act).
+- **The footer** adds: items his word took out; *Settlement:* candidates not yet judged (those
+  items stay open), later mail the tier rule does not let settle anything, pairs whose body is not
+  recorded, unreadable judgement files; his own copies with both refs; rows a late reading closed.
+- A needs item he **restored** is shown again after it was news, until he resolves it or it
+  leaves the window.
+
+### The verbs — `inbox_items` (`mailitemtool.py`)
+
+`list` (free, outside content) | `resolve` (this matter is done, no reply needed — on the ITEM,
+not a preference) | `restore` (still open). The case verbs' law, reused whole: refused with no
+card unless a person sent the task (`ITEMS_CHANGE_NOT_FROM_OWNER`); the ref resolves to exactly
+one anchor or the call errs; the card is ONE code-composed sentence stating the consequence and
+the revival (*Mark as done: PAY from … It leaves your inbox reports; new mail in that conversation
+brings it back. Nothing in your mailboxes is changed.*); applied under the item acts' own lock
+against a fresh derivation (an item that changed since the card is refused); SAVED is the only
+confirmation; no cardless licence in any origin; a renderless `item_act` record (§3.25); on the
+report chat's required menu beside `cases` and `inbox_preferences`. **The false-promise rule now
+names resolutions** (`mailprefs.MEMORY_RULE`). The conversation-scoped `not_a_follow_up` is
+retired into `resolve` (review change 7 of 2026-11-01): a new one is refused with that guidance;
+saved ones keep applying (none existed live); the counterparty-standing kind stays a preference.
+`TestTheVerbs`, `TestTheWiring`, `TestSaveTimeRefusals` (the held lock and the item that changed since its card) in `tests/test_mailitemtool.py`.
+
+### `important` — entity and meaning, with an effect preview
+
+The owner's addition of 2026-11-01. `important` names an ENTITY (`sender`, or `domain` with its
+subdomains) and a MEANING from a closed set, each defined by RECORDED facts, never words
+(`Context.meanings`; **changed by the design review**, which refused a body scan for amounts):
+`money` — the Reader read it as asking him to pay, the case store recorded an amount on it, or a
+payment account was recorded from it; `documents` — a document attachment; `anything`. Matching
+mail that is news joins Needs your action, its line saying *HERE BECAUSE OF YOUR PREFERENCE
+pref-…* — never a PAY or REPLY the Reader did not record; mail the Reader already wanted action on
+keeps its own word. It applies to read, newsletter-gated or unread mail (showing is free), never
+to a one-time code. **Every mail-matching card previews its effect** (`mailprefs.preview`, the
+last `PREVIEW_DAYS` (90) days): *it would have matched N mail(s): “…” — and not these M from
+<entity>: “…”*. The existing `show_first` preference for billing@hetzner.com is untouched; on his
+real 2026-11-01 Hetzner notice (no amount recorded, Reader wanted nothing) `money` would NOT match
+and `anything` would — the preview shows him which before he saves.
+`TestTheImportantPreference`.
+
+### Stated choices, and what they cost
+
+`OWN_COPY_SKEW_S` 300 s, `NEAR_DUPLICATE_S` 600 s, `ENTITY_DOMAIN_MAX_SENDERS` 5 addresses,
+`ENTITY_TOKEN_MIN` 4 characters, `CANDIDATES_PER_ITEM` 3, `MAX_JUDGED_PER_PASS` 12,
+`LATE_READS_PER_PASS` 5, `THIRD_PARTY_MIN_CASES` 2, `THIRD_PARTY_MIN_AGE_DAYS` 30 (the design's),
+`PREVIEW_DAYS` 90: all CHOICES, none a measurement, moved only on evidence or his word. None is a
+word list; their misses are visible in the footer counts (not judged, not weighed, body not
+recorded) and the judgement store, not yet in `aish vocab`.
+
+### Readings made without the body, read again (2026-11-02) — `mailwatch.reread_blind`
+
+**An explicit amendment of "a verdict already recorded … is never recomputed"** (§The thread
+index, §The Tuta authentication recheck), with this exact premise: *a recorded Reader reading
+whose recorded input carried `[body not recorded]` as the reviewed mail's text, while the
+evidence store now yields that body, did not judge the mail.* The CRLF read bug (fixed in
+`evidence.get`, 2026-11-02) produced exactly that for bodies the store held all along — 367 of
+the owner's 454 Gmail index bodies read as absent.
+
+- **Decided from evidence** (`mailwatch.blind_readings`): the reading's first call's input bundle
+  is read from the evidence store by its recorded digest; its reviewed message's `text` must be
+  exactly `[body not recorded]`, and `index.body` must return the body NOW. A body genuinely
+  absent is never a candidate, so it is never retried; a bundle no longer in the store cannot be
+  checked, and its reading stands. Only final readings (`ok`, `invalid`) by the pass's own model
+  are considered.
+- **Superseded, never deleted**: the new record carries the old one whole under `supersedes`
+  (`{at, record, why}`); a re-read that gets no answer (no model, no admission) writes nothing and
+  the old reading stands. The first-read clock still counts the superseded reading
+  (`mailreport._with_superseded`), so a re-read never makes an old mail look new.
+- **Bounded, oldest mail first**: `REREAD_PER_PASS` (10, a choice) in every `--once` pass, before
+  the settlement step; the backlog in one run is `aish-mailwatch --reread-blind --model <spec>
+  [--max N]` (driver step 3i), which scans the whole store.
+- **The scan is bounded too**: once a pass finds no blind reading left, it records *none found
+  since <at>* per model (`<state>/mail/reread-marker.json`), and later passes evidence-read only
+  verdict files written after it (`blind_readings(since=…)`; `TestTheScanIsBounded`). A body
+  restored to the store later for an OLDER reading is found only by the one-shot.
+- **Stated edge: an `invalid` re-read supersedes an `ok` blind one**, leaving the mail with no
+  verdict — counted under "with no reading", never a guess; the conservative direction.
+
+`TestBlindReadings` in `tests/test_mailreread.py`.
+
 ## The live backfill (2026-10-31) — `aish-mailwatch --backfill DAYS`
 
 **Why.** On 2026-10-28 the live index held 0 of his sent messages: the watcher lists a window of
@@ -1277,6 +1648,39 @@ Follow-ups are computed from those two stores at read time, so nothing else is w
   is not listed.
 
 `tests/test_mailwatch_backfill.py` — `TestTheBackfill`, `TestTheCommand`.
+
+## The backlog re-observation (2026-11-03) — `aish-mailwatch --reobserve`
+
+**Why.** Case observation runs once per mail, when the mail is indexed. Mail indexed before the
+key rule gained its stems, alternations and identity markers was folded under the OLD rule, and
+nothing folds it again, so a parcel's earlier notices stay off the case a later notice opens.
+Measured on a frozen copy of the live state (2026-11-03): 1,088 indexed mails on no case;
+re-observing them took the store from 39 to 75 cases (36 opened, 40 mails joined an existing
+case), among them a 5-mail InPost parcel and a 4-mail DHL parcel.
+
+**What it does** (`mailwatch.reobserve`): every indexed mail on no case, oldest first, through
+`observe_unplaced` — the same loop `--backfill` runs after fetching, with no date floor. It reads
+no mailbox and calls no Reader. Mail already on a case, mail he moved (`case-acts.jsonl`), and the
+Tuta copies of his own sent mail are skipped, exactly as in the backfill. The Reader's recorded
+`kind` reaches the key rule (`recorded_kind`), so a one-time-code mail contributes no key.
+
+- **No new trust.** It runs the one observation law: facts are recorded only from his own or
+  authenticated mail, and a sender is admitted only by his act addressed to its domain
+  (§Alias admission) — exactly what watching live would have admitted for the same history, so
+  the fold and the live pass cannot disagree about who is admitted. Each admission is printed
+  (`admitted`, as `case:domain`). On the frozen copy (2026-11-03) it admitted none.
+- **Idempotent.** A placed mail is never observed again, so a second run opens, joins and admits
+  nothing. Mail that lands on no case (no key) is folded again on every run and changes nothing:
+  `observed` counts those folds. That costs nothing worth caching: on the frozen copy the second
+  run folded 1,012 such mails in 0.61 s wall and wrote only its `runs-*.jsonl` line.
+- **One pass at a time**: it takes `pass_lock` (exit 3 when a pass holds it).
+- **Recorded**: a `mail_reobserve` line in `runs-YYYYMMDD.jsonl` and the summary printed as JSON —
+  `observed`, `opened`, `joined`, `cases_before`/`cases_after`, and `new_multi_mail_cases` (each
+  case it opened that holds more than one mail: id, title, mail count).
+- **Stated limit.** Late observation has the backfill's limit: a case opened by a mail observed
+  first keeps that creation position.
+
+`tests/test_mailcases.py` — `TestTheReobservation`.
 
 ## The Tuta authentication recheck (2026-10-31) — `aish-mailwatch --recheck-tuta-auth`
 
@@ -1426,7 +1830,8 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **Reminders reach him only inside the daily report.** A case reminder and a `remind` preference
   are listed in Follow-ups when due; no push, no other surface. A report that is not delivered
   delivers no reminder; a dated one stays listed for 7 days to cover a missed morning.
-- **The false-promise rule is an instruction, not a gate.** `MEMORY_RULE` rides the report note's
+- **The false-promise rule is an instruction, not a gate** — for resolutions too since
+  2026-11-02. `MEMORY_RULE` rides the report note's
   heading and the tool's description; nothing in code checks the model's answer for a promise to
   remember. A report chat delivered before this slice carries the old heading and not the rule.
 - **A hide keys on strings a sender writes.** Sender address, display-free subject phrase, kind
@@ -1436,9 +1841,10 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **Super Duo is seeded as a subject phrase** (no address in the comment); mail naming it only in
   the From name is not hidden. **kuba@wenda…** is not seeded at all.
 - **Corrections are recorded, not adopted**, and the backtest's report does not read them.
-- **"Until a new message arrives" orders by the report's clock**, which for a Tuta mail is the
-  sender-written Date (bounded by when aish first read it, when it has a reading). A reply
-  backdated to before the preference does not revive a not-a-follow-up conversation.
+- **"Until a new message arrives" orders by the report's clock** for a conversation-scoped
+  not-a-follow-up SAVED before 2026-11-02 (new ones are refused into `inbox_items resolve`, whose
+  revival reads aish's first-read clock): for a Tuta mail that is the sender-written Date, so a
+  reply backdated to before such a preference does not revive it.
 - **A moved mail keeps its keys on the case it came from**, so a later mail carrying the same key
   still joins the old case; and a merge has no undo verb (the absorbed file is kept, so it is
   recoverable by hand).
@@ -1509,8 +1915,35 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
   note writes) stay, as in every chat.
 - **The report's follow-ups do not judge whether his last message asked anything**: a closing
   *"thanks"* shows as *their turn* after 5 days, and a thread he finished by phone keeps showing
-  until it leaves the 60-day window. There is no "handled" control yet. The section's footer says
-  so.
+  until the settlement judge connects later mail to it, he says *done* (`inbox_items resolve`), or
+  it leaves the 60-day window. The section's footer says so.
+- **Mail he sends only to himself is never his "copy".** A Gmail mail whose To and Cc are all his
+  own addresses is a mail TO him (a note to self across inboxes), so it is excluded from the
+  own-copy law and read like any other (`test_mail_he_sends_only_to_himself_is_not_a_copy`). The
+  owner addresses are `mailreport.owner_addresses`: an alias of his that never sent mail and is
+  not in `recipients.OWNER_ADDRESSES` is not known to be his.
+- **His own mail is recognised only Tuta-side.** A Tuta copy of his Gmail SENT mail is matched
+  (§Open items and settlement); a Gmail inbound copy of mail he sent from Tuta is not — no such
+  pair was observed, and none is matched.
+- **Readings made blind are re-read only by their own model.** The 367 Gmail bodies that read as
+  absent on 2026-11-02 were held all along — `evidence.get` failed CRLF bodies on its own hash
+  (fixed). Readings made meanwhile are re-read `REREAD_PER_PASS` at a time and only for the
+  pass's model; a reading by another model stays blind until a pass or `--reread-blind` runs with
+  it, and a reading whose recorded bundle left the evidence store cannot be checked and stands.
+  A body genuinely absent is still never judged and is counted in the footer.
+- **A third party with no case history settles an item only by his vouch.** Tier (c) reads the
+  case store only; a courier or payment provider on no case he transacted on (InPost on
+  2026-11-02: on none) is named on the item as "not weighed", with the vouch offered as a chip,
+  until he vouches for its exact domain and that kind of item (§The settler vouch).
+- **An item's anchor can move.** An older asking mail indexed later becomes the first asking mail,
+  so a your-turn row's anchor (and with it his resolve) moves — the row shows again: the visible
+  direction.
+- **The entity tie is a substring.** A counterparty's display name or domain label appearing in a
+  later mail ties it as a candidate; that is a reason to ASK only — the tier rule decides, and a
+  refused tie is named on the line — but it can name an unrelated later mail there.
+- **The settlement judge is not admitted by this slice**, and its exam has not been run against a
+  real model in the repository; until the driver admits it per model, every pair is counted *not
+  yet judged* and every item stays open.
 - **A forged OLD Date through Tuta can hide an answer from Follow-ups** (it sorts before his
   message). A future date is clamped to when aish first read the mail; a past one is not, since
   mail older than the watcher's first pass is legitimately first read late.
@@ -1527,7 +1960,7 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
 - **Act.** No label, no archive, no trash, no push, no chip, no proposal, no draft. There is no
   code path to a mutating Gmail call (`READ_ONLY_CALLS`).
 - **Judge the sender's pattern.** The Gate's judged half is S2.
-- **Close cases deterministically, follow up, or snooze** — his close and the `cases` tool exist (§The case verbs); a closure rule from evidence, the follow-up queue and snoozing do not.
+- **Close cases deterministically, or snooze** — his close and the `cases` tool exist (§The case verbs), and since 2026-11-02 an ITEM can be settled from evidence (§Open items and settlement, demoted and named, never removed); a case is still closed only by him, and nothing snoozes.
 - **Open any trust lane** — S4, by his explicit per-lane act, never a threshold.
 - **Match interests** — S5. The Reader never sees the interest profile.
 - **Run inside aish-web** — S2.
@@ -1614,6 +2047,32 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    The seed prints what it saved, that kuba@wenda… was NOT seeded (truncated address), and the
    `cases` hint for (d). The dry run's footer must read *Using 3 of your preferences (hide 3)*. A
    report chat delivered before the restart keeps the old heading, without the memory rule.
+3i. **Open items and settlement** (2026-11-02). Restart aish-web on this build (the
+   `inbox_items` tool, the report note's extended memory rule, the restore / done chips the server
+   now keeps). Then admit the settlement judge per model — real model calls, `--dry-run` first
+   lists the 8 cases:
+   ```sh
+   uv run python scripts/role-admission.py --dry-run item-settler
+   uv run python scripts/role-admission.py --model gemini:gemini-3.8-flash item-settler
+   ```
+   Then, once, the backlog of readings made without their body (the CRLF bug; real Reader
+   calls, one per such mail, oldest first — run with `--max N` to spread the cost):
+   ```sh
+   aish-mailwatch --reread-blind --model gemini:gemini-3.8-flash
+   ```
+   Then, once, the backlog's case observation under today's key rule (no mailbox, no Reader,
+   no sender admitted; idempotent; prints the cases it opened —
+   §The backlog re-observation):
+   ```sh
+   aish-mailwatch --reobserve
+   ```
+   Nothing else changes in the jobs: every `--once` pass now runs the settlement step when the
+   charter loads (unadmitted: no call, the report counts the candidates as not yet judged). To run
+   the step alone over what is indexed (no mailbox read):
+   `aish-mailwatch --settle --model gemini:gemini-3.8-flash [--since YYYY-MM-DD]`, then
+   `aish-mailreport --dry-run --account pawel@wenda.eu`. Report chats delivered before the restart
+   keep the old heading, without the extended memory rule, and their chips are broken by the old
+   server.
 4. **The mined replay scenario** — a real courier/store pair from his inbox — goes in the private
    tree (`~/.config/aish/evals/<name>/`, `docs/replay.md`), never here: find the pair in the
    backtest run's verdict store (`case_choice` on the courier mail), and replay it end to end

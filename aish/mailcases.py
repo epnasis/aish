@@ -60,6 +60,10 @@ ACTS_NAME = "case-acts.jsonl"
 
 OPEN = "open"
 CLOSED = "closed"
+# How an address became a party of a case (its `via`). Only one HE addressed
+# — or a domain admitted by his act toward it — is someone he dealt with.
+OWNER_ADDRESSED = "owner"
+INBOUND = "inbound"
 # The kind of a key he typed when he created a case: matched literally
 # (`_says_key`), where an extracted key needs its introducing word.
 OWNER_KEY = "yours"
@@ -104,22 +108,106 @@ _KEY_WORDS = vocab.declare(
     "name and time window.",
 )
 
+# Polish declines these nouns ("Numer paczki", "do zamówienia", "przesyłkę"),
+# and a whole-word entry above finds only the nominative. Each stem is an
+# introducing word with a BOUNDED ending — at most `STEM_SUFFIX_MAX` letters —
+# so `paczk` finds paczki / paczkę / paczkami but never "paczkomat", whose
+# locker id ("WAW45H") would otherwise read as a tracking key and link
+# unrelated parcels to one locker. The whole words keep their unbounded tail
+# (German "Bestellungsnummer"). Counted under its own name.
+_KEY_STEMS = vocab.declare(
+    "mailcases._KEY_STEMS",
+    ("zamówieni", "zamowieni", "przesyłk", "przesylk", "paczk", "rezerwacj", "faktur",
+     "rachun"),
+    languages="PL (inflected stems)",
+    on_miss=vocab.BREAKS,
+    demanded=False,
+    structural="the whole-word list above, and the UPS `1Z` shape",
+    note="A miss is a key in an inflected form not found (the before-picture: 0 of the "
+    "owner's InPost notices yielded their parcel number). A false match is recorded on a "
+    "case only from his own or an authenticated mail — other mail may attach to a case by "
+    "it and characterises nothing; the bounded ending keeps compounds like 'paczkomat' out, "
+    "and without an identity marker a short all-digit token (a PIN) is no key.",
+)
+STEM_SUFFIX_MAX = 3
+# Polish declension alternates a stem's LAST consonant in the locative and
+# dative (paczka -> paczce, przesyłka -> przesyłce, faktura -> fakturze). One
+# rule table, applied by code to EVERY stem (`_stem_forms`), so a new stem gets
+# its alternations without anyone writing them: the method, not the word.
+_STEM_ALTERNATIONS = (("k", "c"), ("g", "dz"), ("ch", "sz"), ("r", "rz"), ("t", "ci"),
+                      ("d", "dzi"), ("ł", "l"))
+
+
+def _stem_forms(stems: tuple[str, ...]) -> dict[str, str]:
+    """Every form a stem may take before its bounded ending -> the stem."""
+    forms = {stem: stem for stem in stems}
+    for stem in stems:
+        for tail, alternate in _STEM_ALTERNATIONS:
+            if stem.endswith(tail):
+                forms.setdefault(stem[: -len(tail)] + alternate, stem)
+    return forms
+
+
+_STEM_FORMS = _stem_forms(tuple(_KEY_STEMS))
+
 _KEY_KINDS = {
-    "order": ("order", "zamówienie", "zamowienie", "bestellung", "commande"),
+    "order": ("order", "zamówienie", "zamowienie", "bestellung", "commande", "zamówieni",
+              "zamowieni"),
     "tracking": ("tracking", "przesyłka", "przesylka", "paczka", "parcel", "shipment",
-                 "sendung", "awb"),
-    "booking": ("booking", "rezerwacja", "reservation", "confirmation", "pnr", "reference"),
-    "invoice": ("invoice", "faktura", "rachunek"),
+                 "sendung", "awb", "przesyłk", "przesylk", "paczk"),
+    "booking": ("booking", "rezerwacja", "reservation", "confirmation", "pnr", "reference",
+                "rezerwacj"),
+    "invoice": ("invoice", "faktura", "rachunek", "faktur", "rachun"),
 }
+
+# The words that say a token IDENTIFIES the matter ("Numer paczki: …",
+# "zamówienia nr …"). Under one of them a stem-introduced token is a key in
+# any key shape; without one it must be identifier-shaped (`_identifier_shaped`).
+# Matched against mail text, so declared and counted. One authority for BOTH
+# places a marker may stand (before the stem, after it).
+_IDENTITY_MARKERS = vocab.declare(
+    "mailcases._IDENTITY_MARKERS",
+    ("numer", "nr", "no", "number", "nummer"),
+    languages="PL + EN + DE",
+    on_miss=vocab.BREAKS,
+    demanded=False,
+    structural="`_identifier_shaped`: a token that is a reference by its own shape needs no marker",
+    note="A miss is a short all-digit reference after an inflected stem with no marker: not "
+    "a key (it has the shape of a one-time code). Never consulted for the whole words.",
+)
+# The connectors that may stand between an introducing word and its token
+# without saying it is the matter's number ("order code X9123"); NOT identity
+# markers — "kod odbioru" names a one-time secret, not the parcel.
+_KEY_CONNECTORS = vocab.declare(
+    "mailcases._KEY_CONNECTORS",
+    ("code", "kod", "id"),
+    languages="EN + PL",
+    on_miss=vocab.BREAKS,
+    demanded=False,
+    note="Pre-existing connectors of the key pattern, declared when the markers were.",
+)
+
+
+def _alternation(words: tuple[str, ...]) -> str:
+    return "|".join(re.escape(w) + r"\.?" for w in sorted(words, key=len, reverse=True))
+
 
 _KEY_PATTERN = re.compile(
     # The leading \b: "border 12345" and "preorder X9123" are not orders.
-    r"\b(?P<word>" + "|".join(re.escape(w) for w in sorted(_KEY_WORDS, key=len, reverse=True))
-    + r")\w*\.?\s*(?:no\.?|nr\.?|number|numer|code|kod|id)?\s*[:#]?\s*"
+    r"(?:\b(?P<pre>" + _alternation(_IDENTITY_MARKERS) + r")\s+)?"
+    r"\b(?:(?P<word>" + "|".join(re.escape(w) for w in sorted(_KEY_WORDS, key=len, reverse=True))
+    + r")\w*|(?P<stem>" + "|".join(re.escape(w) for w in sorted(_STEM_FORMS, key=len,
+                                                                 reverse=True))
+    + r")\w{0," + str(STEM_SUFFIX_MAX) + r"}\b)"
+    + r"\.?\s*(?P<post>" + _alternation((*_IDENTITY_MARKERS, *_KEY_CONNECTORS)) + r")?"
+    + r"\s*[:#]?\s*"
     r"(?P<key>[A-Z0-9][A-Z0-9/-]{3,29})\b",
     re.I,
 )
 _UPS = re.compile(r"\b1Z[0-9A-Z]{16}\b")
+# A calendar date after an introducing word ("Data zamówienia: 2026-10-10") is
+# a date, not a reference: many unrelated orders share one. Structural.
+_DATE_SHAPED = re.compile(r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}")
 
 _CURRENCY_WORDS = vocab.declare(
     "mailcases._CURRENCY_WORDS",
@@ -152,17 +240,74 @@ def extract_keys(text: str) -> dict[str, str]:
     """{normalized key: kind}. A key must carry a digit — `order confirmed`
     has no reference in it."""
     out: dict[str, str] = {}
+    by_word = by_stem = by_connector = False
     for match in _KEY_PATTERN.finditer(text or ""):
         key = match.group("key").upper().strip("-/")
-        if not any(ch.isdigit() for ch in key) or len(key) < 4:
+        if not any(ch.isdigit() for ch in key) or len(key) < 4 or _DATE_SHAPED.fullmatch(key):
             continue
-        word = match.group("word").lower()
+        if match.group("stem") and not _governed(match) and not _identifier_shaped(key):
+            continue
+        word = (match.group("word") or match.group("stem")).lower()
+        word = _STEM_FORMS.get(word, word)
         kind = next((k for k, words in _KEY_KINDS.items() if word in words), "reference")
+        if match.group("stem"):
+            by_stem = True
+        else:
+            by_word = True
+        post = (match.group("post") or "").rstrip(".").lower()
+        by_connector = by_connector or post in _KEY_CONNECTORS
         out.setdefault(key, kind)
     for match in _UPS.finditer(text or ""):
         out.setdefault(match.group(0).upper(), "tracking")
-    vocab.note("mailcases._KEY_WORDS", matched=bool(out))
+    # Each list counted by what IT matched: a mail can hit both.
+    vocab.note("mailcases._KEY_WORDS", matched=by_word)
+    vocab.note("mailcases._KEY_STEMS", matched=by_stem)
+    vocab.note("mailcases._KEY_CONNECTORS", matched=by_connector)
     return out
+
+
+
+
+#: An all-digit token shorter than this, with no identity marker, has the
+#: shape of a one-time code or PIN (4-6 digits), not of a matter's reference.
+UNGOVERNED_DIGITS_MIN = 7
+
+
+def _identifier_shaped(key: str) -> bool:
+    """Does the token carry the shape of a REFERENCE on its own — letters and
+    digits mixed ("XYO3K4", "PX7694845874"), or a long number ("261509440")?
+    A short all-digit token is the shape of a one-time code ("646235"). Used
+    only where no identity marker says what the token is. Structural."""
+    letters = any(c.isalpha() for c in key)
+    digits = sum(c.isdigit() for c in key)
+    return (letters and digits > 0) or digits >= UNGOVERNED_DIGITS_MIN
+
+
+def _governed(match: re.Match) -> bool:
+    """Is a stem-introduced token directly governed by an identity marker,
+    before the stem or right after it? The genitive forms the stems exist for
+    are exactly the ones a marker governs ("numer paczki"); without one the
+    inflected noun only stands near a token ("PIN do odbioru paczki: 646235")."""
+    marks = (match.group("pre"), match.group("post"))
+    governed = any(m and m.rstrip(".").lower() in _IDENTITY_MARKERS for m in marks)
+    vocab.note("mailcases._IDENTITY_MARKERS", matched=governed)
+    return governed
+
+
+def mail_keys(subject: str, text: str, reader_kind: str = "") -> dict[str, str]:
+    """The keys ONE MAIL contributes — none at all when the mail is a one-time
+    code or sign-in link by the classification the report already uses
+    (`mailreport.is_one_time_code`, over the Reader's kind and the subject):
+    such a mail's references are one-time secrets, not a matter's identity
+    (round-4 note 3: a 7+-digit OTP or a mixed one-time code after an
+    introducing word). Restrict-only: it can drop keys, never add one. At
+    ingest there is no reading yet, so only the subject half applies there;
+    the readers apply the Reader's kind as well."""
+    from . import mailreport  # mailreport imports this module
+
+    if mailreport.is_one_time_code(reader_kind, subject):
+        return {}
+    return extract_keys(text)
 
 
 def _cents(number: str) -> int | None:
@@ -269,7 +414,10 @@ class Case:
             "created_by": self.created_by,
             "keys": {k: {**v, "at": list(v["at"])} for k, v in self.keys.items()},
             "mails": [list(p) for p in self.mails],
-            "parties": {a: {**v, "at": list(v["at"])} for a, v in self.parties.items()},
+            "parties": {a: {**v, "at": list(v["at"]),
+                            **({"addressed": list(v["addressed"])}
+                               if v.get("addressed") is not None else {})}
+                        for a, v in self.parties.items()},
             "domains": {d: list(p) for d, p in self.domains.items()},
             "admitted": {d: {**v, "at": list(v["at"])} for d, v in self.admitted.items()},
             "owner_acts": [list(p) for p in self.owner_acts],
@@ -290,13 +438,17 @@ class Case:
         def stamped(name: str) -> dict[str, dict[str, Any]]:
             return {k: {**v, "at": _pos(v["at"])} for k, v in (raw.get(name) or {}).items()}
 
+        parties = stamped("parties")
+        for info in parties.values():
+            if info.get("addressed") is not None:
+                info["addressed"] = _pos(info["addressed"])
         return cls(
             id=str(raw["id"]),
             created=_pos(raw["created"]),
             created_by=str(raw["created_by"]),
             keys=stamped("keys"),
             mails=[_pos(p) for p in raw.get("mails") or ()],
-            parties=stamped("parties"),
+            parties=parties,
             domains={d: _pos(p) for d, p in (raw.get("domains") or {}).items()},
             admitted=stamped("admitted"),
             owner_acts=[_pos(p) for p in raw.get("owner_acts") or ()],
@@ -351,6 +503,34 @@ class Case:
             if c["at"] < as_of and (not admitted or c.get("domain") in admitted)
         }
 
+    def dealt_with_at(self, address: str, admitted: set[str] | frozenset[str],
+                      index: mailindex.MailIndex | None = None) -> Position | None:
+        """When this party became someone he dealt with on the case: he
+        addressed it, or its domain is admitted (by his act toward it)."""
+        addressed = self.addressed_at(address, index)
+        domain = mailindex.domain_of(address)
+        via_admission = (self.admitted[domain]["at"] if domain in admitted
+                         and domain in self.admitted else None)
+        options = [p for p in (addressed, via_admission) if p is not None]
+        return min(options) if options else None
+
+    def addressed_at(self, address: str, index: mailindex.MailIndex | None = None
+                     ) -> Position | None:
+        """When he first ADDRESSED this party on this case, or None. A party
+        recorded before provenance existed (no `via`) is derived from his own
+        outbound mail on the case when an index is at hand — never assumed."""
+        info = self.parties.get(address)
+        if info is None:
+            return None
+        if info.get("addressed") is not None:
+            return tuple(info["addressed"])  # type: ignore[return-value]
+        if "via" in info or index is None:
+            return None
+        his = [p for p in self.mails
+               if (h := index.get(p[1])) is not None and h.direction == "out"
+               and address in h.correspondents]
+        return min(his) if his else None
+
     def last_before(self, as_of: Position) -> Position | None:
         earlier = [p for p in self.mails if p < as_of]
         return max(earlier) if earlier else None
@@ -382,9 +562,15 @@ class Closure:
         them was closed at or after aish first read the mail (`read_at`, aish's
         own clock). A mail that arrives on a case after he closed it stays
         held: his close was about the mail he had seen."""
-        cases = set(recorded_cases) | set(self.members.get(digest, ()))
-        return bool(cases) and all(
-            c in self.closed_at and read_at <= self.closed_at[c] for c in cases)
+        members = set(self.members.get(digest, ()))
+        if not members:
+            # The mail must be a MEMBER of a case now (with a trusted closure,
+            # `mailitems.trusted_closure`, a trusted one): recorded case ids
+            # alone — a record's raw membership, written before the trust law —
+            # release nothing (round-5 review).
+            return False
+        cases = set(recorded_cases) | members
+        return all(c in self.closed_at and read_at <= self.closed_at[c] for c in cases)
 
 
 def _absorb(into: Case, other: Case) -> None:
@@ -401,8 +587,20 @@ def _absorb(into: Case, other: Case) -> None:
             into.keys[key] = info
     into.mails = sorted(set(into.mails) | set(other.mails))
     for addr, info in other.parties.items():
-        if addr not in into.parties or info["at"] < into.parties[addr]["at"]:
-            into.parties[addr] = info
+        held = into.parties.get(addr)
+        if held is None or info["at"] < held["at"]:
+            into.parties[addr] = {**info}
+        kept = into.parties[addr]
+        marks = [p for p in (info.get("addressed"), (held or {}).get("addressed")) if p]
+        if marks:
+            kept["addressed"] = min(tuple(p) for p in marks)
+            kept["via"] = OWNER_ADDRESSED
+        elif held is not None and ("via" not in info or "via" not in held):
+            # One side predates provenance: keep it UNKNOWN (derivable from his
+            # own mail on the case), never "inbound" — a merge must not strip
+            # the standing the legacy record could still prove.
+            kept.pop("via", None)
+            kept.pop("authenticated", None)
     for domain, seen in other.domains.items():
         into.domains[domain] = min(seen, into.domains.get(domain, seen))
     for domain, info in other.admitted.items():
@@ -520,12 +718,13 @@ class CaseStore:
         body: str,
         authenticated: bool,
         index: mailindex.MailIndex | None = None,
+        reader_kind: str = "",
     ) -> Observation:
         """Fold one mail into the case store. Deterministic; idempotent per
         mail (a mail already on a case changes nothing)."""
         position = header.position
         text = f"{header.subject}\n{body}"
-        keys = extract_keys(text)
+        keys = mail_keys(header.subject, text, reader_kind)
         touched: dict[str, Case] = {}
         for key in keys:
             for case in self.by_key(key):
@@ -566,44 +765,71 @@ class CaseStore:
             if position in case.mails:
                 continue
             case.mails.append(position)
-            for key, kind in keys.items():
-                case.keys.setdefault(key, {"kind": kind, "at": position})
+            # A case's recorded facts come only from his own or AUTHENTICATED
+            # mail (`_record_facts`, the one list and the one law).
+            self._record_facts(case, header, text, authenticated, keys)
             if header.direction == "out":
                 if case.created != position:
                     case.owner_acts.append(position)
                 for addr in header.correspondents:
-                    case.parties.setdefault(addr, {"at": position, "name": ""})
-                admitted += self._admit_toward(case, header, index)
+                    info = case.parties.setdefault(
+                        addr, {"at": position, "name": "", "via": OWNER_ADDRESSED})
+                    # A party that joined inbound becomes one he ADDRESSED only
+                    # from this act of his, never earlier.
+                    if "addressed" not in info or tuple(info["addressed"]) > position:
+                        info["addressed"] = position
+                admitted += self._admit_toward(case, header)
             else:
+                # An inbound sender is a party by joining, which is not trust:
+                # its provenance is kept, so nothing counts it as someone he
+                # dealt with (`addressed_at`).
                 case.parties.setdefault(
                     header.from_addr,
-                    {"at": position, "name": mailindex.display_name(header.from_value)},
+                    {"at": position, "name": mailindex.display_name(header.from_value),
+                     "via": INBOUND, "authenticated": bool(authenticated)},
                 )
-                if authenticated:
-                    domain = mailindex.domain_of(header.from_addr)
-                    case.domains.setdefault(domain, position)
-                    for currency, cents in extract_amounts(text):
-                        case.amounts.append({"currency": currency, "cents": cents, "at": position})
-                    for value in extract_coordinates(text):
-                        case.coordinates.append(
-                            {"value": value, "at": position, "domain": domain}
-                        )
             self._save(case)
         return Observation(keys, tuple(sorted(touched)), created, tuple(admitted))
 
-    def record_authenticated(self, case: Case, header: mailindex.Header, body: str) -> bool:
-        """The facts `observe` records only for AUTHENTICATED inbound mail —
-        the sender's domain seen on the case, its amounts, its coordinates —
-        for a mail already on `case` that was observed unauthenticated and is
-        authenticated now (the Tuta recheck). Every fact at the mail's own
-        position; idempotent per fact; the domain's first sighting moves only
-        EARLIER, never later. True when anything changed (and was saved)."""
+    def record_authenticated(self, case: Case, header: mailindex.Header, body: str,
+                             reader_kind: str = "") -> bool:
+        """The facts observation records only from TRUSTED mail — for a mail
+        already on `case` that was observed unauthenticated and is
+        authenticated now (the Tuta recheck): exactly `_record_facts`, keys
+        included, so the list of facts and the law have one authority. True
+        when anything changed (and was saved)."""
         if header.direction != "in" or header.position not in case.mails:
             return False
-        position = header.position
         text = f"{header.subject}\n{body}"
-        domain = mailindex.domain_of(header.from_addr)
+        changed = self._record_facts(case, header, text, True,
+                                     mail_keys(header.subject, text, reader_kind))
+        if changed:
+            self._save(case)
+        return changed
+
+    @staticmethod
+    def _record_facts(case: Case, header: mailindex.Header, text: str, authenticated: bool,
+                      keys: dict[str, str]) -> bool:
+        """THE facts a case records about one of its mails, and the one law
+        for them: written only from his own mail or AUTHENTICATED mail;
+        unauthenticated mail is attached and characterises nothing. Keys with
+        their kinds from either; the sender's domain, amounts and payment
+        accounts from authenticated INBOUND mail. Each at the mail's own
+        position, idempotent per fact; a first sighting moves only EARLIER.
+        True when anything changed."""
+        position = header.position
+        trusted = header.direction == "out" or authenticated
+        if not trusted:
+            return False
         changed = False
+        for key, kind in keys.items():
+            held = case.keys.get(key)
+            if held is None:
+                case.keys[key] = {"kind": kind, "at": position}
+                changed = True
+        if header.direction != "in":
+            return changed
+        domain = mailindex.domain_of(header.from_addr)
         if domain and (domain not in case.domains or position < case.domains[domain]):
             case.domains[domain] = position
             changed = True
@@ -611,45 +837,39 @@ class CaseStore:
         for currency, cents in extract_amounts(text):
             if (currency, cents) not in amounts:
                 case.amounts.append({"currency": currency, "cents": cents, "at": position})
+                amounts.add((currency, cents))
                 changed = True
         values = {c["value"] for c in case.coordinates if c["at"] == position}
         for value in extract_coordinates(text):
             if value not in values:
                 case.coordinates.append({"value": value, "at": position, "domain": domain})
+                values.add(value)
                 changed = True
-        if changed:
-            self._save(case)
         return changed
 
-    def admit_toward(
-        self, case: Case, header: mailindex.Header, index: mailindex.MailIndex | None
-    ) -> list[str]:
+    def admit_toward(self, case: Case, header: mailindex.Header) -> list[str]:
         """Re-ask, as of an owner act already on `case`, which senders it admits
         (`_admit_toward`) — after the case gained an authenticated sighting
         earlier than the act. Idempotent; saves when it admitted anything."""
         if header.direction != "out" or header.position not in case.mails:
             return []
-        admitted = self._admit_toward(case, header, index)
+        admitted = self._admit_toward(case, header)
         if admitted:
             self._save(case)
         return admitted
 
-    def _admit_toward(
-        self, case: Case, header: mailindex.Header, index: mailindex.MailIndex | None
-    ) -> list[str]:
+    def _admit_toward(self, case: Case, header: mailindex.Header) -> list[str]:
         """An owner act on a case admits the authenticated senders it was AIMED
-        at — the domains he wrote to, and the domain of the mail he replied to
-        — when they were already seen on the case. As of the act, never
-        earlier, and never a domain he did not address."""
-        aimed = {mailindex.domain_of(a) for a in header.correspondents}
-        if index is not None:
-            for parent_id in header.in_reply_to:
-                parent = index.reply_parent(parent_id, header.position)
-                if parent is not None and parent.direction == "in":
-                    aimed.add(mailindex.domain_of(parent.from_addr))
+        at — the domains among its To/Cc recipients — when they were already
+        seen on the case. As of the act, never earlier, and never a domain he
+        did not address. Replying to or forwarding a sender's mail is not by
+        itself an act toward that sender: his forward of an Airbnb confirmation
+        to his own other address names the Airbnb mail in its In-Reply-To and
+        is addressed to nobody at Airbnb."""
         out = []
         for domain, seen in case.domains.items():
-            if domain in aimed and domain not in case.admitted and seen < header.position:
+            if (mailindex.aimed_at(header, domain) and domain not in case.admitted
+                    and seen < header.position):
                 case.admitted[domain] = {"at": header.position, "by": "owner_act_toward_sender"}
                 out.append(f"{case.id}:{domain}")
         return out
@@ -819,8 +1039,15 @@ class CaseStore:
     def admitted_domains(self, as_of: Position) -> frozenset[str]:
         return frozenset(d for c in self.cases.values() for d in c.admitted_before(as_of))
 
-    def owner_case_parties(self, as_of: Position) -> dict[str, list[float]]:
-        """address -> times at which a case the owner transacted on included it."""
+    def owner_case_parties(self, as_of: Position,
+                           index: mailindex.MailIndex | None = None
+                           ) -> dict[str, list[float]]:
+        """address -> times at which a case the owner transacted on included it
+        AS SOMEONE HE DEALT WITH: a party he addressed on that case, or one at
+        a domain admitted there by his act toward it — never a sender that
+        merely joined by quoting a key (round-3 review: an authenticated
+        stranger quoting his real order number earned a "case" act, so the
+        grade `known`, and third-party history)."""
         out: dict[str, list[float]] = {}
         for case in self.cases.values():
             if not case.transacted_before(as_of):
@@ -828,9 +1055,11 @@ class CaseStore:
             since = case.created if case.created_by == "owner" else min(
                 p for p in case.owner_acts if p < as_of
             )
-            for addr, info in case.parties.items():
-                if info["at"] < as_of:
-                    out.setdefault(addr, []).append(max(since, info["at"])[0])
+            admitted = case.admitted_before(as_of)
+            for addr in case.parties:
+                when = case.dealt_with_at(addr, admitted, index)
+                if when is not None and when < as_of:
+                    out.setdefault(addr, []).append(max(since, when)[0])
         return out
 
 
@@ -879,7 +1108,7 @@ def candidates(
     as_of = header.position
     text = f"{header.subject}\n{body}"
     folded = text.casefold()
-    keys = set(extract_keys(text))
+    keys = set(mail_keys(header.subject, text))
     amounts = set(extract_amounts(text))
     sender_name = mailindex.display_name(header.from_value).casefold()
     found: list[Candidate] = []

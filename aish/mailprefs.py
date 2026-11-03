@@ -15,6 +15,14 @@ Five kinds, each a closed set of TYPED fields (`docs/mail-assistant.md`
 - `correction` — "this needed action" / "this was junk" on one mail: an owner
   ground-truth label in a ledger the review file reads. NOT applied to the
   Reader; a later, measured charter round may adopt them.
+- `important` — mail from an ENTITY (a sender, or anyone at a domain) that
+  MEANS something (`MEANINGS`, each defined by recorded facts, never words):
+  listed under Needs your action, marked as there because of this preference —
+  never with a want the Reader did not record.
+
+**Every card that matches mail previews its effect** (`preview`): the past
+mail it would have matched, and the mail from the same entity it would not —
+so a scope error is visible before he saves (the owner, 2026-11-01).
 
 **The model never writes the stored text.** `plan` validates the typed fields
 and composes the one sentence (`sentence`) that is the card, the stored
@@ -52,9 +60,27 @@ SHOW_FIRST = "show_first"
 NOT_A_FOLLOW_UP = "not_a_follow_up"
 REMIND = "remind"
 CORRECTION = "correction"
-KINDS = (HIDE, SHOW_FIRST, NOT_A_FOLLOW_UP, REMIND, CORRECTION)
+IMPORTANT = "important"
+KINDS = (HIDE, SHOW_FIRST, NOT_A_FOLLOW_UP, REMIND, CORRECTION, IMPORTANT)
 #: The kinds the report APPLIES; corrections are recorded, never applied.
-APPLIED_KINDS = (HIDE, SHOW_FIRST, NOT_A_FOLLOW_UP, REMIND)
+APPLIED_KINDS = (HIDE, SHOW_FIRST, NOT_A_FOLLOW_UP, REMIND, IMPORTANT)
+#: What an `important` preference means, each defined by RECORDED facts so no
+#: word list decides it (`mailitems.Context.meanings`): `money` — the Reader read
+#: it as asking him to pay, the case store recorded an amount on it, or a
+#: payment account was recorded from it; `documents` — it carries a document
+#: attachment; `anything` — any mail from the entity.
+MEANINGS = ("money", "documents", "anything")
+_MEANING_WORDS = {
+    "money": "about money (the Reader read it as asking you to pay, or aish recorded an "
+             "amount or a payment account from it)",
+    "documents": "carrying a document attachment",
+    "anything": "of any kind",
+}
+#: How far back a card's preview looks, and how many mails it names; `clock` is
+#: its "now", one seam a test pins.
+clock = time.time
+PREVIEW_DAYS = 90
+PREVIEW_NAMED = 4
 
 LOOK_ACTIONS = ("list",)
 CHANGE_ACTIONS = ("add", "edit", "remove")
@@ -65,6 +91,7 @@ MATCHERS: dict[str, tuple[str, ...]] = {
     HIDE: ("sender", "domain", "recipient", "mail_kind", "subject"),
     SHOW_FIRST: ("sender", "domain", "mail_kind"),
     NOT_A_FOLLOW_UP: ("counterparty", "conversation"),
+    IMPORTANT: ("sender", "domain"),
 }
 REMIND_TARGETS = ("case", "counterparty")
 REMIND_WHEN = ("due", "every", "no_answer_days")
@@ -72,7 +99,8 @@ LABELS = ("needed_action", "junk")
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 #: Every field a preference may carry; anything else the model sends is dropped.
 FIELDS = ("sender", "domain", "recipient", "mail_kind", "subject", "counterparty",
-          "conversation", "case", "due", "every", "no_answer_days", "note", "mail", "label")
+          "conversation", "case", "due", "every", "no_answer_days", "note", "mail", "label",
+          "meaning")
 
 PHRASE_MIN = 3
 PHRASE_MAX = 80
@@ -107,7 +135,9 @@ SAVED_WORDS = "SAVED"
 MEMORY_RULE = (
     "Never tell the owner you will remember, ignore, hide or stop listing something in "
     "future reports unless an inbox_preferences answer in this chat began with SAVED as "
-    "or SAVED: deleted; otherwise say plainly that it is not saved, and offer to save it"
+    "or SAVED: deleted; otherwise say plainly that it is not saved, and offer to save it. "
+    "Never tell him a matter is resolved, done, restored or will leave the report unless an "
+    "inbox_items answer began with SAVED"
 )
 _PREF_ID = re.compile(r"pref-[0-9a-f]{10}")
 
@@ -188,6 +218,8 @@ def _shape_problem(kind: str, fields: dict[str, Any]) -> str:
             return f"{given[0]} must be at least {PHRASE_MIN} characters"
         if given[0] == "conversation" and not _HEX.fullmatch(value):
             return "conversation must be a mail id"
+        if kind == IMPORTANT and fields.get("meaning") not in MEANINGS:
+            return f"an important preference has a meaning: one of {', '.join(MEANINGS)}"
         return ""
     if kind == REMIND:
         targets = [f for f in REMIND_TARGETS if fields.get(f) not in (None, "")]
@@ -418,10 +450,16 @@ def _typed(state_dir: os.PathLike | str, kind: str, args: dict[str, Any]) -> dic
         if label not in LABELS:
             raise PrefError(f"label must be one of {', '.join(LABELS)}")
         out["label"] = label
+    if "meaning" in given:
+        meaning = str(given["meaning"]).strip().lower()
+        if meaning not in MEANINGS:
+            raise PrefError(f"meaning must be one of {', '.join(MEANINGS)}")
+        out["meaning"] = meaning
     # Only the fields this kind uses: a stray field must not ride into the store.
     allowed = {*MATCHERS.get(kind, ()),
                *((*REMIND_TARGETS, *REMIND_WHEN, "note") if kind == REMIND else ()),
-               *(("mail", "label") if kind == CORRECTION else ())}
+               *(("mail", "label") if kind == CORRECTION else ()),
+               *(("meaning",) if kind == IMPORTANT else ())}
     out = {k: v for k, v in out.items() if k in allowed}
     problem = _shape_problem(kind, out)
     if problem:
@@ -458,6 +496,10 @@ def sentence(state_dir: os.PathLike | str, kind: str, fields: dict[str, Any]) ->
                 "risk is shown anyway)")
     if kind == SHOW_FIRST:
         return f"show {_mail_matcher_words(f)} first in each section of your inbox reports"
+    if kind == IMPORTANT:
+        return (f"treat {_mail_matcher_words(f)} {_MEANING_WORDS[str(f['meaning'])]} as "
+                "important: list it under Needs your action in your inbox reports, marked as "
+                "there because of this preference")
     if kind == NOT_A_FOLLOW_UP:
         if "counterparty" in f:
             return (f"do not list {_safe(f['counterparty'], 120)} under Follow-ups in your "
@@ -514,6 +556,13 @@ def plan(state_dir: os.PathLike | str, args: dict[str, Any]) -> Plan:
         held = None
     if kind not in KINDS:
         raise PrefError(f"kind must be one of {', '.join(KINDS)}")
+    if kind == NOT_A_FOLLOW_UP and args.get("conversation") not in (None, ""):
+        # Retired into the item verb (design 2026-11-01, change 7): a matter
+        # that is done is his act on the ITEM, revived by new mail — not a
+        # standing preference. Saved ones keep applying.
+        raise PrefError("a conversation that is done is no longer a preference — call "
+                        "inbox_items with action=resolve and the report's ref; it is carded "
+                        "like this, and new mail in that conversation brings it back")
     fields = _typed(state_dir, kind, args)
     text = sentence(state_dir, kind, fields)
     probe = Preference("", kind, fields, text, 0.0, {})
@@ -521,10 +570,14 @@ def plan(state_dir: os.PathLike | str, args: dict[str, Any]) -> Plan:
         if other.key() == probe.key() and (held is None or other.id != held.id):
             raise PrefError(f"that is already saved as {other.id}: {_safe(other.text, 400)}")
     if held is not None:
-        card = (f"Change your preference {_q(held.text, 400)} to: from now on, {text}. Save?")
+        shown = preview(state_dir, kind, fields)
+        card = (f"Change your preference {_q(held.text, 400)} to: from now on, {text}."
+                f"{' ' + shown if shown else ''} Save?")
         return Plan(action, kind, fields, text, card, target=held.id, was=held.text)
     lead = "Record" if kind == CORRECTION else "From now on"
-    return Plan(action, kind, fields, text, f"{lead}: {text}. Save?")
+    shown = preview(state_dir, kind, fields)
+    return Plan(action, kind, fields, text,
+                f"{lead}: {text}.{' ' + shown if shown else ''} Save?")
 
 
 @dataclass
@@ -645,6 +698,70 @@ def matches_mail(pref: Preference, header: mailindex.Header | None, kind_word: s
     if "subject" in f:
         return _phrase_in(str(f["subject"]), header.subject or "")
     return False
+
+
+def matches_entity(pref: Preference, address: str) -> bool:
+    """Is `address` the entity an `important` preference names?"""
+    f = pref.fields
+    address = (address or "").lower()
+    if "sender" in f:
+        return address == f["sender"]
+    return bool(address) and _at_domain(address, str(f.get("domain") or ""))
+
+
+def matches_important(pref: Preference, header: mailindex.Header | None,
+                      meanings: frozenset[str]) -> bool:
+    """Entity AND meaning: mail from the entity whose recorded facts carry the
+    preference's meaning (`mailitems.Context.meanings`)."""
+    return (header is not None and matches_entity(pref, header.from_addr)
+            and str(pref.fields.get("meaning")) in meanings)
+
+
+def preview(state_dir: os.PathLike | str, kind: str, fields: dict[str, Any],
+            now: float | None = None) -> str:
+    """What a mail-matching preference would have done to his last
+    `PREVIEW_DAYS` days of inbound mail, in code's words: the mails it would
+    have matched, and — where it names an entity — the mail from that entity it
+    would NOT have (the owner's 2026-11-01 addition: scope errors visible before
+    he saves). "" for kinds that match no mail."""
+    if kind not in (HIDE, SHOW_FIRST, IMPORTANT):
+        return ""
+    from . import mailitems  # mailitems reads this module
+
+    now = clock() if now is None else now
+    ctx = mailitems.Context(state_dir, now=now)
+    probe = Preference("", kind, fields, "", 0.0, {})
+    floor = now - PREVIEW_DAYS * 86400
+    hit: list[mailindex.Header] = []
+    missed: list[mailindex.Header] = []
+    entity = str(fields.get("domain") or "") or mailindex.domain_of(str(fields.get("sender")
+                                                                          or ""))
+    for header in sorted(ctx.index.by_digest.values(), key=lambda h: -h.at):
+        if header.direction != "in" or header.at < floor or header.digest in ctx.copies:
+            continue
+        reading = ctx.readings.get(header.digest)
+        if kind == IMPORTANT:
+            matched = matches_important(probe, header, ctx.meanings(header.digest))
+        else:
+            kind_word = str((reading.verdict if reading else {}).get("kind") or "")
+            matched = matches_mail(probe, header, kind_word)
+        if matched:
+            hit.append(header)
+        elif entity and _at_domain(header.from_addr, entity):
+            missed.append(header)
+
+    def named(headers: list[mailindex.Header]) -> str:
+        shown = ", ".join(f"{_q(h.subject or '(no subject)', 60)} ({_day(h.at)})"
+                          for h in headers[:PREVIEW_NAMED])
+        more = f" and {len(headers) - PREVIEW_NAMED} more" if len(headers) > PREVIEW_NAMED else ""
+        return shown + more
+
+    words = (f"In your last {PREVIEW_DAYS} days of mail it would have matched "
+             f"{len(hit)} mail(s)" + (f": {named(hit)}" if hit else ""))
+    if entity and missed:
+        words += (f" — and not these {len(missed)} from {_safe(entity, 80)}: "
+                  f"{named(missed)}")
+    return words + "."
 
 
 def matches_party(pref: Preference, address: str) -> bool:

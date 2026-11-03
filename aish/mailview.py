@@ -120,7 +120,11 @@ def collect(state_dir: os.PathLike | str, limit: int = MAIL_SHOWN) -> View:
     view.total = len(rows)
     rows.sort(key=lambda r: (r.sort_at, _float(r.record.get("recorded_at"))), reverse=True)
     view.rows = rows[: max(0, limit)]
-    closure = mailcases.CaseStore(state_dir).closure()
+    # The SAME closure the report reads: membership through the trusted
+    # reader, so /mail, the CSV and the report render one fact.
+    from . import mailitems  # mailitems reads this module through mailreport
+
+    closure = mailitems.trusted_closure(state_dir)
     for row in view.rows:
         row.header = mailindex.load_header(state_dir, str(row.record.get("mail") or ""))
         row.closure = closure

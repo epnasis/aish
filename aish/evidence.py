@@ -101,8 +101,9 @@ def get(digest: str, state_dir: os.PathLike | str | None) -> str | None:
 
     `UnicodeDecodeError` is caught beside `OSError` because this store is
     text-only by CONSTRUCTION and not by enforcement: `digest_of` hashes UTF-8
-    bytes and `put` writes with `write_text`, so nothing here can produce a
-    blob that `read_text` chokes on — but nothing here refuses one either. A
+    bytes and `put` writes text (byte-faithful on POSIX, CRLF included), so
+    nothing here can produce a blob the UTF-8 decode chokes on — but nothing
+    here refuses one either. A
     digest arriving from anywhere else (a hand-made file under the store, a
     future writer, a state dir carried between machines) whose bytes are binary
     would raise straight out of a READER whose stated law is that unreadable
@@ -113,7 +114,11 @@ def get(digest: str, state_dir: os.PathLike | str | None) -> str | None:
         return None
     path = _blob_path(state_dir, digest)
     try:
-        text = path.read_text()
+        # The exact bytes, decoded — never `read_text()`, whose universal
+        # newlines turn "\r\n" into "\n": every recorded mail body written with
+        # CRLF then failed its own hash and read as "not recorded" (367 of the
+        # owner's 454 Gmail bodies, found 2026-11-02).
+        text = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
     return text if digest_of(text) == digest else None

@@ -67,8 +67,9 @@ GLOBAL_TOOLS_DIR = config_home() / "tools"
 # added the native `automations`, and to 29 by the native `make_report`, and
 # to 30 by the native `processes` (epic #462 S1: `ps` cannot run sandboxed),
 # and to 31 by the native `cases` (epic #142 W5), and to 32 by the native
-# `inbox_preferences` (epic #142 W5).
-TOOL_BUDGET = 32
+# `inbox_preferences` (epic #142 W5), and to 33 by the native `inbox_items`
+# (epic #142 W5, the settlement redesign).
+TOOL_BUDGET = 33
 NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")

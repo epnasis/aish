@@ -80,7 +80,14 @@ from aish import tools
 # Raised 38,900 -> 40,200 on 2026-10-31 for ONE new tool, inbox_preferences
 # (+1,259 chars; epic #142 W5): in session-20261031-191100-732487 the report
 # chat promised to ignore a sender and had no way to make that true.
-MAX_MENU_CHARS = 40_200
+# Raised 40,200 -> 41,100 on 2026-11-02 for ONE new tool, inbox_items (+812
+# chars measured, 40,200 budget -> 41,012; epic #142 W5 settlement design):
+# in session-20261101-073003-003960 the owner said a follow-up was done and the
+# only verb was a per-sender preference, which he refused as a local patch.
+# Raised 41,100 -> 41,300 on 2026-11-02 for inbox_items vouch / revoke (+245 chars
+# measured, 41,012 -> 41,257): the settler vouch is how a courier the owner never
+# writes to may settle an item (F4) without loosening the tier history rule.
+MAX_MENU_CHARS = 41_300
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.

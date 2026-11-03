@@ -30,6 +30,11 @@ Issue #297, stage 1 of the epic in #295.
 > names, and it extended the framework in two places, each with this one customer: a third
 > output shape, `verdict` (delegated to `mailreader.py` as `objective` is to `objective.py`),
 > and a third model class, `caller`. `docs/mail-assistant.md`.
+>
+> **The third caller (2026-11-02): `item-settler`**, the settlement judge, called by the
+> watcher's settlement step (`mailsettle.settle_pass`) — again no session, no Agent, no entry in
+> `roles.WIRINGS`: its one capped text field, `reason`, is stored and rendered nowhere; the report's
+> evidence line is code's. A fourth output shape, `settlement`, delegated to `mailsettle.py`.
 
 > ## Read this first: no role is called today, and the thing that replaced one was reverted
 >
@@ -184,6 +189,14 @@ declared as `Field`s so the wiring law and the counters see them. A verdict exam
 `axis_in`, `case_in`, `deadline_in`, `coordinates_include`, `cites_any`, `absent` and
 `meaning_mentions_any` (`mailreader.ASSERTIONS`), and an expected word outside a vocabulary is
 refused at load (`mailreader.check_expectation`). `tests/test_mailreader.py::TestTheCharter`.
+
+**`shape: settlement`** (#142 W5, 2026-11-02) is the fourth, for the settlement judge. Its
+frontmatter declares only caps (`mailsettle.SETTLEMENT_CAPS`: the reason's length and the
+citations), and the framework hands off to `mailsettle` exactly as for `verdict`: the answer is a
+`Settlement` — `answer` in a closed vocabulary that can say `cannot_tell`, a settling ref that
+must be the bundle's one candidate, citations that must be in the bundle, a capped reason. An exam
+case may use `answer_in`, `cites_any` and `absent`, checked at load
+(`mailsettle.check_expectation`). `tests/test_mailsettle.py::TestTheExam`.
 
 `roles.capped` is the enforcement: control characters are flattened first (a field that
 can carry a newline can carry a fake banner into whatever renders it), then the cap is

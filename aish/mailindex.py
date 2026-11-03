@@ -152,6 +152,21 @@ def domain_of(address: str) -> str:
     return address.rsplit("@", 1)[-1].lower() if "@" in address else ""
 
 
+def aimed_at(header: Header, party: str) -> bool:
+    """His act is aimed at `party` (an address, or a bare domain): `header` is
+    his outbound mail and the party's domain is among its To/Cc recipients.
+
+    The one authority on whether a mail of his is an act TOWARD someone, read
+    by everything that turns his act into standing — a sender's admission on a
+    case, a sender's grade, an inbound reply's case membership. In-Reply-To
+    naming a party's mail is never enough on its own: his forward of a
+    confirmation to his other address, or a reply sent to somebody else, is
+    addressed to nobody at the original sender."""
+    target = domain_of(party) if "@" in party else party.lower()
+    return (header.direction == "out" and bool(target)
+            and any(domain_of(a) == target for a in header.correspondents))
+
+
 @dataclass(frozen=True)
 class Link:
     """One link in a body: where it goes, and what its visible text said."""
