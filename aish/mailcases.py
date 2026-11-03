@@ -75,11 +75,44 @@ OWNER_KEY = "yours"
 # The owner's verbs (`CaseStore.act`). Each is HIS act: nothing in the
 # pipeline calls one, and the agent offers them only through a card in a task
 # he sent (`docs/mail-assistant.md` §The case verbs).
-CLOSE, REOPEN, MERGE, MOVE, RENAME, DISMISS, RESTORE, NOTE, REMIND, CREATE = (
+CLOSE, REOPEN, MERGE, MOVE, RENAME, DISMISS, RESTORE, NOTE, REMIND, CREATE, TRUST = (
     "close", "reopen", "merge", "move", "rename", "dismiss", "restore", "note", "remind",
-    "create",
+    "create", "trust",
 )
-VERBS = (CLOSE, REOPEN, MERGE, MOVE, RENAME, DISMISS, RESTORE, NOTE, REMIND, CREATE)
+VERBS = (CLOSE, REOPEN, MERGE, MOVE, RENAME, DISMISS, RESTORE, NOTE, REMIND, CREATE, TRUST)
+
+#: The address grammar of the trust verb — the ONE authority, read by the
+#: verb's check, the report's chip and the server's link fence
+#: (`server._REPORT_FOREIGN_LINK`). The address comes from an inbound header,
+#: so this grammar is the fence: nothing outside it reaches a link or a card.
+TRUST_ADDRESS_PATTERN = (
+    r"[a-z0-9](?:[a-z0-9._+-]{0,62}[a-z0-9])?"
+    r"@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+"
+)
+#: What a case id looks like — code-made, `case-` and twelve hex.
+CASE_ID_PATTERN = r"case-[0-9a-f]{12}"
+_DIGEST_PATTERN = r"[0-9a-f]{64}"
+
+
+def trust_address(value: Any) -> str:
+    """`value` as a trustable address, lowercased, or ValueError: exactly the
+    grammar's, never an address with anything else in it."""
+    address = str(value or "").strip().lower()
+    if not re.fullmatch(TRUST_ADDRESS_PATTERN, address) or len(address) > 254:
+        raise ValueError("an address to trust must be one plain address (name@domain)")
+    return address
+
+
+def trust_chip_text(address: str, case_id: str) -> str:
+    """The words the report's trust chip sends — code-built from a validated
+    address and a case id, or "" when either is not."""
+    try:
+        address = trust_address(address)
+    except ValueError:
+        return ""
+    if not re.fullmatch(CASE_ID_PATTERN, case_id or ""):
+        return ""
+    return f"trust sender {address} on case {case_id}"
 
 CASE_TITLE_CHARS = 80
 CASE_NOTE_CHARS = 400
@@ -929,6 +962,16 @@ class CaseStore:
     def find(self, case_id: str) -> Case | None:
         return self.cases.get(case_id) or self.merged.get(case_id)
 
+    def resolve(self, case_id: str) -> Case | None:
+        """The live case `case_id` is, following his merges (`merged_into`),
+        or None. Bounded, so a corrupt cycle cannot loop."""
+        case = self.find(case_id)
+        for _ in range(len(self.merged) + 1):
+            if case is None or not case.merged_into:
+                return case
+            case = self.find(case.merged_into)
+        return None
+
     def check(self, verb: str, fields: dict[str, Any]) -> str:
         """Why this act cannot be applied to the store as it stands, or "".
         Asked when the card is composed AND again under the lock just before
@@ -973,6 +1016,16 @@ class CaseStore:
             digest = str(fields.get("mail") or "")
             if not any(p[1] == digest for p in case.mails):
                 return f"that mail is not on case {case.id}"
+        if verb == TRUST:
+            try:
+                address = trust_address(fields.get("address"))
+            except ValueError as exc:
+                return str(exc)
+            if any(str(t.get("address")) == address for t in case.trusted):
+                return f"{address} is already trusted on case {case.id}"
+            mail = str(fields.get("mail") or "")
+            if mail and not re.fullmatch(_DIGEST_PATTERN, mail):
+                return "the trust's mail must be a mail id"
         return ""
 
     def act(self, verb: str, fields: dict[str, Any], *, by: str, now: float) -> dict[str, Any]:
@@ -1010,6 +1063,13 @@ class CaseStore:
                 case.dismissed = True
             elif verb == RESTORE:
                 case.dismissed = False
+            elif verb == TRUST:
+                # His act, on the case's own record: `Case.admissions` reads
+                # it. A closed or dismissed case keeps it too.
+                address = trust_address(fields["address"])
+                mail = str(fields.get("mail") or "")
+                case.trusted.append({"at": now, "address": address, "mail": mail})
+                record.update(address=address, mail=mail)
             elif verb == RENAME:
                 record["from"] = case.title
                 case.title = str(fields["title"]).strip()[:CASE_TITLE_CHARS]

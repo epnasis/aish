@@ -256,8 +256,7 @@ provider returns; that is outside aish's renderers.
 **Admission is exact, derived, and his** (round-8 B1/B2). An ADDRESS is admitted on a case at his
 first mail on the case that addresses it exactly — the address itself among its To, Cc or Bcc
 (`Header.addressed`, read through `mailindex.aimed_at`) — AFTER it was seen on the case in
-authenticated mail, or at his trust of it (`Case.trusted` — no code writes it yet; round-8 B3
-adds the trust verb). **One predicate, `mailindex.aimed_at`**,
+authenticated mail, or at his trust of it (§The trust chip). **One predicate, `mailindex.aimed_at`**,
 owns "his act is aimed at X" for admission, the ledger's `wrote` and an inbound reply's case
 membership, and it has no domain clause: another address at the same domain is a sibling
 (`mailindex.AIM_SIBLING`), somebody else until he says otherwise. **Derived on every read, never
@@ -295,6 +294,42 @@ admitted by code — which costs correlation strength, never safety. **A Reader'
 admits.** Its case choice for a sender not admitted there is recorded as a proposal with a count
 (`CaseStore.propose`) and read by nothing. `TestAliasAdmission`, `TestBccAndTheSharedDomain`
 (`tests/test_mailindex.py`).
+
+### The trust chip (round-8 B3)
+
+**Why.** Exact admission is right for a stranger and wrong for a shop's second address: an
+invoice from billing@ after he wrote to orders@ reads "sender not admitted" on his own order, and
+its mail cannot settle the case's items. The answer is his, never a count's.
+
+**The offer.** The report's section *Senders on your cases you have not written to* renders the
+case's withheld records (`record_withheld`, §Admission): one line per (case, address), naming the
+address, the case, whom he did write to there (`mailindex.shown_party`, so a Bcc'd recipient is
+"a Bcc recipient"), the offering mail's ref, and a chip
+`[trust <address> on this case](aish-reply://trust sender <address> on case <case-id>)`; the
+section's note says the consequence — *their mail can then settle this case's items*. Code-built
+from a validated address and a case id only (`mailcases.trust_chip_text`): the address comes
+from an inbound header, so its grammar (`mailcases.TRUST_ADDRESS_PATTERN`) is the fence, and an
+address outside it gets no chip. **Offered only where the domain names one party**
+(`MailIndex.names_one_party` — the count's one restrict-only use in standing): at a shared
+provider no chip is ever offered, and the footer counts the senders it held back; the only path
+there is his explicit command through the case tool. **Once per (case, address)**: an offer a
+DELIVERED report showed is recorded in that report's ledger line (`trust_offers`) and never
+offered again; a dry run records nothing. Open, undismissed cases only; at most
+`TRUST_OFFERS_SHOWN` (3) per report, whole lines, never cut by the size cap. **The server keeps
+exactly this link shape** (`server._REPORT_FOREIGN_LINK`, its fourth): the address grammar and
+the case-id shape come from their one authority in `mailcases`, never a second literal.
+
+**The tap is his message; the trust is his card.** The chip sends *trust sender X on case C*;
+the model proposes `cases` `trust` (case, address); the card's one sentence is code's —
+*Trust X on case "…" (n mails) — their authenticated mail can then settle this case's items, and
+is no longer flagged as a sender you have not dealt with here. Only this case, only this address;
+there is no undo verb for a trust.* Applied, it is recorded on the case (`Case.trusted`: `at`,
+`address`, `mail` — the offering mail from the case's own withheld record, never the model's
+words) and in the acts ledger (`case-acts.jsonl`: `verb: trust`, `case`, `address`, `mail`).
+`Case.admissions` reads it on every read. A chip naming a case he merged since lands on the case
+it became (`CaseStore.resolve`); a merge carries his trusts and the withheld records with it; a
+trust on a closed case is recorded too. A second trust of the same address is refused.
+`TestTheOffer`, `TestTheTap` (`tests/test_mailtrust.py`).
 
 **Candidates** (`candidates`): a shared key, a shared amount, a counterparty name appearing in
 the mail (display names and domain labels; `difflib` at `NAME_SIMILARITY` (0.85) — no
@@ -1169,9 +1204,10 @@ file is KEPT with `merged_into` and no longer observed; no undo verb), `move` (o
 to another), `rename`, `dismiss` ("not a case": hidden from `list`, nothing deleted, correlation
 unchanged) and `restore`, `note`, `remind` (a due date and text, stored, shown by `show`, and —
 since the preferences slice — listed in the daily report's Follow-ups from its due date for 7 days
-while the case is open; nothing else notifies him), and `create` (a title and optional keys he gives; mail carrying such a
-key joins the case wherever it says it — `OWNER_KEY`, `_says_key` — and opens nothing). There is
-no delete verb.
+while the case is open; nothing else notifies him), `create` (a title and optional keys he gives; mail carrying such a
+key joins the case wherever it says it — `OWNER_KEY`, `_says_key` — and opens nothing), and
+`trust` (one exact address admitted on one case by his act — §The trust chip). There is no delete
+verb.
 
 - **Provenance — refused, no card, unless a person sent the task.** `Agent.task_from_owner` is set
   by the server before EVERY task from `_run_task`'s `owner_sent` (typed, a chip tapped, Retry),

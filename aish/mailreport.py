@@ -382,6 +382,54 @@ class Due:
 
 
 @dataclass
+class TrustOffer:
+    """An authenticated sender on one of his cases whom he never addressed
+    there, at a domain where he addressed another address (`Case.withheld`)."""
+
+    case_id: str
+    title: str
+    address: str
+    wrote_to: tuple[str, ...]  # whom he addressed there, AS SHOWN (`mailindex.shown_party`)
+    mail: str  # the offering mail's digest
+
+    @property
+    def key(self) -> str:
+        return f"{self.case_id}|{self.address}"
+
+
+def trust_offers(store: mailcases.CaseStore, index: mailindex.MailIndex,
+                 offered: frozenset[str]) -> tuple[list[TrustOffer], int]:
+    """The trust chips to offer, and how many the shared-provider gate held
+    back. From each open case's withheld records (`record_withheld`): never an
+    address already admitted, never one a delivered report offered, never one
+    outside the address grammar, and NEVER at a domain that names no single
+    party (`MailIndex.names_one_party`) — there, only his explicit command
+    through the case tool trusts an address."""
+    offers: list[TrustOffer] = []
+    shared = 0
+    for case in sorted(store.cases.values(), key=lambda c: c.id):
+        if case.status == mailcases.CLOSED or case.dismissed or case.merged_into:
+            continue
+        admitted = case.admissions(index)
+        for address, info in sorted(case.withheld.items()):
+            if address in admitted or f"{case.id}|{address}" in offered:
+                continue
+            if not mailcases.trust_chip_text(address, case.id):
+                continue
+            domain = mailindex.domain_of(address)
+            if not index.names_one_party(domain):
+                shared += 1
+                continue
+            act = index.get(str(info.get("act") or ""))
+            wrote = tuple(dict.fromkeys(
+                mailindex.shown_party(a, (act,)) for a in (act.addressed if act else ())
+                if mailindex.domain_of(a) == domain))
+            offers.append(TrustOffer(case.id, case.display_title(), address, wrote,
+                                     str(info.get("mail") or "")))
+    return offers, shared
+
+
+@dataclass
 class Report:
     now: float
     since: float
@@ -422,12 +470,22 @@ class Report:
     late_closed: list[str] = field(default_factory=list)
     since_acts: dict[str, int] = field(default_factory=dict)
     settled_drawn: int = -1  # rows "Probably settled" drew under its cap (-1: not rendered)
+    # The trust chip (`trust_offers`): offers, the ones drawn, and the ones the
+    # shared-provider gate held back (counted, never silent).
+    trust_offers: list[TrustOffer] = field(default_factory=list)
+    trust_drawn: int = -1
+    trust_withheld_shared: int = 0
     since_acts_from: float = 0.0
 
     def counts(self) -> dict[str, int]:
         return {"needs_action": len(self.needs), "your_turn": len(self.yours),
                 "their_turn": len(self.theirs), "may_interest": len(self.interest),
                 "probably_settled": len(self.settled)}
+
+    def trust_offer_keys(self) -> list[str]:
+        """The trust offers this report SHOWED — never offered again."""
+        drawn = TRUST_OFFERS_SHOWN if self.trust_drawn < 0 else self.trust_drawn
+        return sorted(o.key for o in self.trust_offers[:drawn])
 
     def shown_digests(self) -> list[str]:
         """The new mail this report SHOWS — never again in a later report.
@@ -758,6 +816,10 @@ def build(
     # The ONE derivation the watcher's settlement pass uses too.
     derived = ctx.derive(needs_since=min(floor, now - FOLLOWUP_WINDOW_DAYS * 86400))
     report.late_closed = derived.closed_by_late_reading
+    offered = frozenset(
+        k for line in read_ledger(state_dir) if line.get("status") in SHOWN_STATUSES
+        for k in line.get("trust_offers") or () if isinstance(k, str))
+    report.trust_offers, report.trust_withheld_shared = trust_offers(store, index, offered)
     needs_by = {i.reading.digest: i for i in derived.needs}
     # A needs item he RESTORED stays in front of him after it was shown once:
     # his word that it is still open outranks "news".
@@ -1211,6 +1273,40 @@ def _settled_section(report: Report, clean: Clean) -> str:
     return "\n".join(lines)
 
 
+TRUST_OFFERS_SHOWN = 3
+TRUST_NOTE = (
+    "They wrote on a case of yours from an address you never wrote to there, at the same "
+    "domain as one you did. aish trusts only the exact address you wrote to; tap trust if "
+    "this one is the same organisation — their mail can then settle this case's items. "
+    "Each is offered once."
+)
+
+
+def _trust_section(report: Report, clean: Clean) -> str:
+    """The trust chips — code-built from a validated address and a case id,
+    the report's fourth link shape (`server.presented_report`). Whole lines,
+    never cut by the size cap; the tap sends the words, the trust is his card."""
+    if not report.trust_offers:
+        report.trust_drawn = 0
+        return ""
+    lines = ["", f"## Senders on your cases you have not written to "
+                 f"({len(report.trust_offers)})", TRUST_NOTE]
+    shown = report.trust_offers[:TRUST_OFFERS_SHOWN]
+    for offer in shown:
+        words = mailcases.trust_chip_text(offer.address, offer.case_id)
+        wrote = ", ".join(safe(clean, a, ADDRESS_CHARS) for a in offer.wrote_to) or "others there"
+        lines.append(
+            f"- {safe(clean, offer.address, ADDRESS_CHARS)} wrote on case "
+            f"“{safe(clean, offer.title, 80)}” — you wrote to {wrote}, not to them"
+            f"{_ref(offer.mail) if offer.mail else ''} — "
+            f"[trust {offer.address} on this case](aish-reply://{words})")
+    report.trust_drawn = len(shown)
+    if len(report.trust_offers) > len(shown):
+        lines.append(f"(+{len(report.trust_offers) - len(shown)} more, offered in a later "
+                     "report)")
+    return "\n".join(lines)
+
+
 def _since_line(report: Report) -> str:
     """Continuity: what he did since the last report, each count a filter over
     its acts ledger (`acts_since`)."""
@@ -1404,6 +1500,11 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
         + ". `/mail` lists every reading."
     )
     lines += _settlement_lines(report, clean)
+    if report.trust_withheld_shared:
+        lines.append(
+            f"{report.trust_withheld_shared} sender(s) on your cases at a domain many people "
+            "use were not offered a trust chip — there only an address you wrote to is "
+            "trusted, or one you trust by asking (the cases tool's trust).")
     lines += _preference_lines(report, clean)
     window = {"the last report": f"since the last report ({_when(report.since)})",
               "first report": f"since {_when(report.since)} (first report: "
@@ -1423,10 +1524,12 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
         footer = footer[: FOOTER_MAX_CHARS - 60] + "\n(the footer was cut here, at its size cap)"
     text = "\n".join(body)
     settled = _settled_section(report, clean)
-    room = REPORT_MAX_CHARS - len(footer) - len(settled) - 2
+    trust = _trust_section(report, clean)
+    room = REPORT_MAX_CHARS - len(footer) - len(settled) - len(trust) - 3
     if len(text) > room:
         text = text[: room - 60] + "\n(the report was cut here, at its size cap)"
-    return text + ("\n" + settled if settled else "") + "\n" + footer
+    return (text + ("\n" + settled if settled else "") + ("\n" + trust if trust else "")
+            + "\n" + footer)
 
 
 # ---------------------------------------------------------------- the ledger
@@ -1669,6 +1772,7 @@ def run(
                      attempts=delivery.attempts)
         if delivery.status in SHOWN_STATUSES:
             entry["digests"] = report.shown_digests()
+            entry["trust_offers"] = report.trust_offer_keys()
         append_ledger(state_dir, entry)
         flush_counters(state_dir, now)
     out(json.dumps({k: v for k, v in entry.items() if k != "digests"}, sort_keys=True))

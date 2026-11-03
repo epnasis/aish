@@ -303,6 +303,12 @@ def plan(state_dir: os.PathLike | str, args: dict[str, Any]) -> Plan:
         fields = {"title": title, "keys": _new_keys(args.get("keys"))}
     else:
         fields["case"] = str(args.get("case") or "").strip()
+        if verb == mailcases.TRUST:
+            # A chip may name a case he merged since: trust lands on the case
+            # it became.
+            live = store.resolve(fields["case"])
+            if live is not None:
+                fields["case"] = live.id
         case = store.cases.get(fields["case"])
         if verb in (mailcases.RENAME,):
             fields["title"] = " ".join(str(args.get("title") or "").split())[
@@ -321,6 +327,15 @@ def plan(state_dir: os.PathLike | str, args: dict[str, Any]) -> Plan:
             fields["into"] = str(args.get("into") or "").strip()
         if verb == mailcases.MOVE and case is not None:
             fields["mail"] = _resolve_mail(case, str(args.get("mail") or ""))
+        if verb == mailcases.TRUST:
+            try:
+                fields["address"] = mailcases.trust_address(args.get("address"))
+            except ValueError as exc:
+                raise CaseError(str(exc)) from exc
+            # The offering mail, from the case's own withheld record — never
+            # from the model's words.
+            held = (case.withheld.get(fields["address"]) if case is not None else None) or {}
+            fields["mail"] = str(held.get("mail") or "")
     problem = store.check(verb, fields)
     if problem:
         raise CaseError(problem)
@@ -351,6 +366,11 @@ def _sentence(state_dir: os.PathLike | str, store: mailcases.CaseStore, verb: st
         return f"Restore case {name} to your case list."
     if verb == mailcases.RENAME:
         return f"Rename case {name} to {_q(fields['title'])}."
+    if verb == mailcases.TRUST:
+        return (f"Trust {_safe(fields['address'], ADDRESS_CHARS)} on case {name} "
+                f"({_n(case)}) — their authenticated mail can then settle this case's items, "
+                "and is no longer flagged as a sender you have not dealt with here. Only this "
+                "case, only this address; there is no undo verb for a trust.")
     if verb == mailcases.NOTE:
         return f"Add a note to case {name}: {_q(fields['text'], NOTE_SHOWN)}."
     if verb == mailcases.REMIND:
