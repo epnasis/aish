@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # tests/test_vocab.py compares each word list with its shipped
+          # before-picture via `git show`; a shallow clone has no history.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v7
       - name: Lint
         run: uv run ruff check .
