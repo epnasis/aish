@@ -179,6 +179,12 @@ class TestUntrust:
         assert f"[untrust](aish-reply://{words})" in text
         assert f"(aish-reply://{words})" in server.presented_report(text)
 
+    def test_an_undo_only_section_is_headed_by_what_it_holds(self, tmp_path):
+        self.trusted(tmp_path)
+        _report, text = report_text(tmp_path)
+        assert "## Senders you trusted on your cases since the last report (1)" in text
+        assert "have not written to (0)" not in text
+
     def test_the_trust_card_names_its_real_reach_and_it_is_true(self, tmp_path):
         """Round-8 N3: a trusted address counts as someone he dealt with — a
         `case` act in the ledger, read for its mail anywhere."""
@@ -186,7 +192,7 @@ class TestUntrust:
         (case,) = store.cases.values()
         planned = mailcasetool.plan(tmp_path, {"action": "trust", "case": case.id,
                                                "address": "billing@lampshop.example"})
-        assert "their mail anywhere is graded as known" in planned.sentence
+        assert "their authenticated mail anywhere is graded as known" in planned.sentence
         assert "no undo" not in planned.sentence
         later = gmail("b2", frm="billing@lampshop.example", subject="Another thing",
                       body="Hello.", at=NOW + DAY)

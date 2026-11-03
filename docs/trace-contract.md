@@ -1070,7 +1070,7 @@ Written by `Agent._inbox_items` through `_emit_record` for every resolve, restor
 **Change discipline.** `v` is the record version (`RECORD_VERSION`); a field added keeps `v`, a field whose meaning changes bumps it, and a reader keys on `v` rather than guessing from shape. **`v: 2` since 2026-11-03 (round 8):** `observation.admitted` entries are `case:address` (were `case:domain`), `gate.grade.how` no longer carries `replied` (a reply addressed to the sender is `wrote`), and `gate.grade.withheld` was added. No code reads those three fields today (`mailview` reads `gate.grade.grade`, unchanged); a reader of them keys on `v`.
 
 ```json
-{"kind": "mail_verdict", "v": 1,
+{"kind": "mail_verdict", "v": 2,
  "mail": "3f1c…", "provider_id": "18c2…", "at": 1780086400.0, "at_source": "provider",
  "direction": "in", "model": "gemini:<flash>",
  "charter": "mail-reader", "version": "1", "charter_digest": "9a0e…",

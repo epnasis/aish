@@ -383,8 +383,8 @@ def _sentence(state_dir: os.PathLike | str, store: mailcases.CaseStore, verb: st
                 f"({_n(case)}) — their authenticated mail can then settle this case's items "
                 "and is no longer flagged as a sender you have not dealt with here, and "
                 f"{_safe(fields['address'], ADDRESS_CHARS)} counts as someone you have dealt "
-                "with: their mail anywhere is graded as known, not first contact. Untrust "
-                "takes it back.")
+                "with: their authenticated mail anywhere is graded as known, not first "
+                "contact. Untrust takes it back.")
     if verb == mailcases.UNTRUST:
         return (f"Stop trusting {_safe(fields['address'], ADDRESS_CHARS)} on case {name} "
                 f"({_n(case)}) — their mail settles this case's items and counts as someone "

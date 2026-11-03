@@ -331,7 +331,7 @@ the case-id shape come from their one authority in `mailcases`, never a second l
 the model proposes `cases` `trust` (case, address); the card's one sentence is code's and states
 the trust's REAL reach — *Trust X on case "…" (n mails) — their authenticated mail can then settle
 this case's items and is no longer flagged as a sender you have not dealt with here, and X counts
-as someone you have dealt with: their mail anywhere is graded as known, not first contact.
+as someone you have dealt with: their authenticated mail anywhere is graded as known, not first contact.
 Untrust takes it back.* The reach is not a case-scoped one, and the card does not pretend it is:
 an admitted address is someone he dealt with on the case (`Case.dealt_with_at`), which is a
 `case` act in the relationship ledger (`CaseStore.owner_case_parties`), and the ledger grades

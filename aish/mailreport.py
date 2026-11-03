@@ -1327,8 +1327,10 @@ def _trust_section(report: Report, clean: Clean) -> str:
     if not report.trust_offers and not undo:
         report.trust_drawn = 0
         return ""
-    lines = ["", f"## Senders on your cases you have not written to "
-                 f"({len(report.trust_offers)})"] + ([TRUST_NOTE] if report.trust_offers else [])
+    heading = (f"## Senders on your cases you have not written to ({len(report.trust_offers)})"
+               if report.trust_offers else
+               f"## Senders you trusted on your cases since the last report ({len(undo)})")
+    lines = ["", heading] + ([TRUST_NOTE] if report.trust_offers else [])
     for offer in undo[:TRUST_OFFERS_SHOWN]:
         words = mailcases.trust_chip_text(offer.address, offer.case_id, mailcases.UNTRUST)
         lines.append(f"- you trusted {safe(clean, offer.address, ADDRESS_CHARS)} on case "
