@@ -511,8 +511,13 @@ class Context:
             return True
         for mid in header.in_reply_to:
             parent = self.index.reply_parent(mid, header.position)
+            # A reply to his mail on the case is trusted there only when his
+            # mail was addressed to the replier (`mailindex.aimed_at`): a
+            # Message-ID of his that reached a stranger by forward grants that
+            # stranger no membership.
             if (parent is not None and parent.direction == "out"
-                    and parent.position in case.mails):
+                    and parent.position in case.mails
+                    and mailindex.aimed_at(parent, header.from_addr)):
                 return True
         return False
 

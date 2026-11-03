@@ -137,10 +137,14 @@ did with it, split by which header gated it — so the gate can be narrowed on e
 `known` or `first-contact`, from `owner_acts`:
 
 - `wrote` — an outbound mail addressed to the address;
-- `replied` — an outbound mail whose OWN In-Reply-To names a mail from that address.
-  Membership of the same conversation is not enough: a hostile mail can put an owner thread's
-  Message-IDs in its References and join it, and his earlier replies there must not become
-  acts toward it;
+- `replied` — an outbound mail whose OWN In-Reply-To names a mail from that address AND that is
+  addressed to that address's domain (`mailindex.aimed_at`). Membership of the same conversation
+  is not enough: a hostile mail can put an owner thread's Message-IDs in its References and join
+  it, and his earlier replies there must not become acts toward it. Nor is In-Reply-To alone
+  (2026-11-03): his forward of a sender's mail to somebody else is not an act toward the sender.
+  Measured on the frozen copy: of 1,132 inbound mails, 3 changed grade, all from
+  automated@airbnb.com — `known` (1 act, `replied`, his forward c6046a0ab382 To bip@wenda.eu) →
+  `first-contact`. `test_a_forward_or_reply_sent_elsewhere_is_no_act_toward_the_sender`;
 - `case` — a case he transacted on includes the address AS SOMEONE HE DEALT WITH (from the case
   store, as of): a party he addressed on that case, or one at a domain admitted there by his act
   toward it. **Since 2026-11-02 a party records its provenance** (`via`: `owner` or `inbound`,
@@ -193,7 +197,9 @@ mail is not his own or authenticated characterises nothing). `TestCaseFactsComeO
 **Membership obeys the same law** (round-4 note 1): a mail is attached to a case by any key, but
 it is a MEMBER for anything that grants or decides visibility only when it is his own mail, or
 authenticated AND joined through a key a trusted mail recorded, a key he typed himself, or a direct
-reply to his mail on the case. `mailitems.Context.cases_of` is the one reader — the case tie, stored
+reply to his mail on the case — a mail of his that was addressed to the replier
+(`mailindex.aimed_at`, 2026-11-03: his Message-ID reaching a stranger by forward grants that
+stranger no membership; `test_a_reply_to_his_mail_is_trusted_only_from_whom_he_wrote_to`). `mailitems.Context.cases_of` is the one reader — the case tie, stored
 amounts, an item's meaning, admitted domains and his closed case covering an item go through it,
 and so does the keeper release on EVERY surface: the report, `/mail` and the CSV all read
 `mailitems.trusted_closure` (round-5 review: `/mail` and the CSV read the raw store closure and
@@ -211,7 +217,9 @@ can seed it; N1 removes the unauthenticated half of that, not this one (§Residu
 **Alias admission is deterministic corroboration, and the corroboration is HIS.** A sender
 domain is admitted on a case when it was seen there in authenticated mail AND he then acted on
 the case TOWARD it — a mail of his with an address at that domain among its To/Cc recipients
-(`_admit_toward`). **Addressed TO it, nothing less** (2026-11-03): a reply or a forward whose
+(`_admit_toward`). **Addressed TO it, nothing less** (2026-11-03; one predicate,
+`mailindex.aimed_at`, owns "his act is aimed at X" for the admission, the ledger's `replied` and an
+inbound reply's case membership): a reply or a forward whose
 In-Reply-To names the sender's mail, sent to someone else, is not an act toward that sender. The
 first version also aimed every reply at the domain of the mail it replied to, so his forward of an
 Airbnb confirmation to his own other address (`Fwd: Confirmed: …`, To bip@…) admitted airbnb.com
@@ -1351,7 +1359,11 @@ States `open` | `settled` | `cannot_tell`; sources in a fixed order, **owner > j
    counterparty, or whose OWN In-Reply-To resolves (`reply_parent`, squat-safe) to one of the
    item's mails or to a mail from the counterparty inside its conversation. Never conversation
    membership: a stranger joins a conversation by naming a Message-ID; only his own header says
-   what he answered. The rule is not "revived": what continues the matter is its own new item (on
+   what he answered. The In-Reply-To half is deliberately NOT `mailindex.aimed_at`: the rule grants
+   no sender anything — it says HE answered his own matter — and whether forwarding an item's mail
+   to somebody else answers it is the owner's question, not decided here. Measured on the frozen
+   copy (2026-11-03): for none of the items `Context.derive` returns does a mail of his that
+   is not addressed to the counterparty count as aimed at it. The rule is not "revived": what continues the matter is its own new item (on
    the real index, Przemysław's next reply is a your-turn row). `TestTheRule`.
 
 Settled by a judgement or the rule is **probably settled** (option A, the owner's choice of

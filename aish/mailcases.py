@@ -866,10 +866,10 @@ class CaseStore:
         itself an act toward that sender: his forward of an Airbnb confirmation
         to his own other address names the Airbnb mail in its In-Reply-To and
         is addressed to nobody at Airbnb."""
-        aimed = {mailindex.domain_of(a) for a in header.correspondents}
         out = []
         for domain, seen in case.domains.items():
-            if domain in aimed and domain not in case.admitted and seen < header.position:
+            if (mailindex.aimed_at(header, domain) and domain not in case.admitted
+                    and seen < header.position):
                 case.admitted[domain] = {"at": header.position, "by": "owner_act_toward_sender"}
                 out.append(f"{case.id}:{domain}")
         return out

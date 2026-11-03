@@ -683,6 +683,29 @@ class TestMembershipMustRestOnATrustedFact:
         assert context.trusted_closure().members  # his own mail still is
 
 
+    def test_a_reply_to_his_mail_is_trusted_only_from_whom_he_wrote_to(self, tmp_path):
+        """An inbound reply to his mail on the case is trusted there only when
+        his mail was addressed to the replier (`mailindex.aimed_at`): his
+        Message-ID reaching a stranger by forward grants it no membership."""
+        his = his_sent(tmp_path, "o1", to="shop@store.example", at=NOW - 9 * DAY,
+                       subject="Broken parcel locker")
+        stranger = add_mail(tmp_path, "k1", frm="billing@stranger.example",
+                            subject="Re: Broken parcel locker", at=NOW - 2 * DAY,
+                            in_reply_to="o1@owner.example")
+        shop = add_mail(tmp_path, "k2", frm="desk@store.example",
+                        subject="Re: Broken parcel locker", at=NOW - DAY,
+                        in_reply_to="o1@owner.example")
+        store = mailcases.CaseStore(tmp_path)
+        case = mailcases.Case(
+            id="case-replied0001", created=his.position, created_by="owner",
+            mails=sorted([his.position, stranger.position, shop.position]))
+        store.cases[case.id] = case
+        store._save(case)
+        context = ctx(tmp_path)
+        assert context.cases_of(stranger.digest) == []
+        assert [c.id for c in context.cases_of(shop.digest)] == [case.id]
+
+
 class TestAOneTimeCodeMailContributesNoKeys:
     """Round-4 note 3: a 7+-digit OTP or a mixed one-time code after an
     introducing word still keyed. A mail the report already classifies as a

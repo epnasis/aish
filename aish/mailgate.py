@@ -449,10 +449,10 @@ def owner_acts(
     """Every owner act toward `address` at or before `as_of`, as (at, kind).
 
     `wrote`: an outbound message addressed to it. `replied`: an outbound
-    message in a conversation it took part in. `case`: a case he opened that
-    includes it (from the case store, as of). Gmail labels are deliberately
-    not acts: a label carries no timestamp, so reading one would let a March
-    grade see an April star.
+    reply to a message from it, addressed to its domain (`mailindex.aimed_at`).
+    `case`: a case he opened that includes it (from the case store, as of).
+    Gmail labels are deliberately not acts: a label carries no timestamp, so
+    reading one would let a March grade see an April star.
     """
     address = address.lower()
     acts: list[tuple[float, str]] = []
@@ -466,7 +466,11 @@ def owner_acts(
         # came from this address. Membership of the same conversation is not
         # enough: a hostile mail can put an owner thread's Message-IDs in its
         # References and join that conversation, and his earlier replies there
-        # must not become acts toward it.
+        # must not become acts toward it. And it must be ADDRESSED to the
+        # sender's domain (`mailindex.aimed_at`): a forward of its mail to
+        # someone else is not an act toward it.
+        if not mailindex.aimed_at(header, address):
+            continue
         for parent_id in header.in_reply_to:
             parent = index.reply_parent(parent_id, header.position)
             if (
