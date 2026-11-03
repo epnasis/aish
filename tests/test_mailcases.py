@@ -104,14 +104,28 @@ class TestAliasAdmission:
         (case,) = store.cases.values()
         assert set(case.admitted) == {"lampshop.example"}
 
-    def test_his_reply_to_the_senders_mail_admits_it(self):
+    def test_his_reply_addressed_to_the_sender_admits_it(self):
         index, store = build(
             store_order(),
-            gmail("o", frm=OWNER, to="help@other.example", subject="Re: Order LS-48213",
+            gmail("o", frm=OWNER, to="orders@lampshop.example", subject="Re: Order LS-48213",
                   at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)),
         )
         (case,) = store.cases.values()
         assert case.admitted["lampshop.example"]["by"] == "owner_act_toward_sender"
+
+    def test_a_reply_or_forward_addressed_elsewhere_admits_nobody(self):
+        """An act toward a sender is addressed TO it: In-Reply-To naming the
+        sender's mail is not enough. His forward of the shop's confirmation to
+        his other address, and his reply sent to someone else, admit nothing."""
+        for to, subject in (("bip@wenda.example", "Fwd: Order LS-48213 confirmed"),
+                            ("help@other.example", "Re: Order LS-48213")):
+            index, store = build(
+                store_order(),
+                gmail("o", frm=OWNER, to=to, subject=subject,
+                      at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)),
+            )
+            (case,) = store.cases.values()
+            assert len(case.mails) == 2 and case.admitted == {}, to
 
     def test_a_domain_he_did_not_address_is_not_admitted_by_his_act(self):
         index, store = build(
@@ -425,23 +439,31 @@ class TestTheReobservation:
         done = mailwatch.reobserve(tmp_path)
         assert done.opened == 0 and mailcases.CaseStore(tmp_path).cases == {}
 
-    def test_the_backlog_fold_admits_no_sender(self, tmp_path):
-        """No new trust: his reply on the backlog places and records, and the
-        sender it was aimed at stays unadmitted — while the live path admits."""
+    def test_the_backlog_fold_admits_by_the_live_law(self, tmp_path):
+        """One law for live, backfill and the fold: his forward to his other
+        address admits nobody; his reply addressed to the shop admits it."""
         from aish import mailwatch
 
-        for raw in (store_order(),
-                    gmail("o", frm=OWNER, to="help@other.example", subject="Re: Order LS-48213",
-                          at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",))):
-            parsed = mailindex.from_gmail(raw, frozenset({OWNER}))
-            assert parsed is not None
-            mailindex.MailIndex(tmp_path).add(parsed.header, parsed.body)
-        done = mailwatch.reobserve(tmp_path)
-        assert done.opened == 1
-        (case,) = mailcases.CaseStore(tmp_path).cases.values()
-        assert len(case.mails) == 2 and case.admitted == {}
-        index, store = build(store_order(), gmail(
-            "o", frm=OWNER, to="help@other.example", subject="Re: Order LS-48213",
+        def index_all(state, *raws):
+            for raw in raws:
+                parsed = mailindex.from_gmail(raw, frozenset({OWNER}))
+                assert parsed is not None
+                mailindex.MailIndex(state).add(parsed.header, parsed.body)
+
+        forward = tmp_path / "forward"
+        index_all(forward, store_order(), gmail(
+            "f", frm=OWNER, to="bip@wenda.example", subject="Fwd: Order LS-48213 confirmed",
             at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)))
-        (lived,) = store.cases.values()
-        assert "lampshop.example" in lived.admitted
+        done = mailwatch.reobserve(forward)
+        assert done.opened == 1 and done.admitted == []
+        (case,) = mailcases.CaseStore(forward).cases.values()
+        assert len(case.mails) == 2 and case.admitted == {}
+
+        reply = tmp_path / "reply"
+        index_all(reply, store_order(), gmail(
+            "r", frm=OWNER, to="orders@lampshop.example", subject="Re: Order LS-48213",
+            at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)))
+        done = mailwatch.reobserve(reply)
+        (case,) = mailcases.CaseStore(reply).cases.values()
+        assert done.admitted == [f"{case.id}:lampshop.example"]
+        assert mailwatch.reobserve(reply).admitted == []

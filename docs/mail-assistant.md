@@ -210,8 +210,15 @@ can seed it; N1 removes the unauthenticated half of that, not this one (§Residu
 
 **Alias admission is deterministic corroboration, and the corroboration is HIS.** A sender
 domain is admitted on a case when it was seen there in authenticated mail AND he then acted on
-the case TOWARD it — wrote to an address at it, or replied to a mail from it
-(`_admit_toward`). The design's wording is *"authenticated domain co-occurring on an
+the case TOWARD it — a mail of his with an address at that domain among its To/Cc recipients
+(`_admit_toward`). **Addressed TO it, nothing less** (2026-11-03): a reply or a forward whose
+In-Reply-To names the sender's mail, sent to someone else, is not an act toward that sender. The
+first version also aimed every reply at the domain of the mail it replied to, so his forward of an
+Airbnb confirmation to his own other address (`Fwd: Confirmed: …`, To bip@…) admitted airbnb.com
+on the booking's case — measured on the frozen copy by the backlog re-observation. Restrict-only:
+of the one admission the frozen copy held (janeba-time.pl, by his reply addressed to
+zamowienia@janeba-time.pl), the corrected law still mints it. One law for the live pass, the
+backfill and `--reobserve`. The design's wording is *"authenticated domain co-occurring on an
 owner-transacted case"*; co-occurrence alone was the first draft and the design review broke
 it: DMARC proves a sender owns ITS domain, and an order number is the kind of string that leaks,
 so an attacker passing DMARC from his own domain with the owner's real order number would have
@@ -1645,14 +1652,15 @@ no mailbox and calls no Reader. Mail already on a case, mail he moved (`case-act
 Tuta copies of his own sent mail are skipped, exactly as in the backfill. The Reader's recorded
 `kind` reaches the key rule (`recorded_kind`), so a one-time-code mail contributes no key.
 
-- **No new trust.** It runs `observe(admit=False)`: the mail is placed and its facts are recorded
-  under the trusted-facts law (only his own or authenticated mail writes a fact), and no sender is
-  admitted. On the frozen copy the admitting path would have admitted one domain, airbnb.com, on
-  a booking case, because his FORWARD of an Airbnb confirmation to his other address names the
-  Airbnb mail in its In-Reply-To, and `_admit_toward` counts a reply to a mail as aimed at its
-  sender. Whether a forward should count as that act is an open question for the owner; the
-  re-observation does not answer it.
-- **Idempotent.** A placed mail is never observed again, so a second run opens and joins nothing.
+- **No new trust.** It runs the one observation law: facts are recorded only from his own or
+  authenticated mail, and a sender is admitted only by his act addressed to its domain
+  (§Alias admission) — exactly what watching live would have admitted for the same history, so
+  the fold and the live pass cannot disagree about who is admitted. Each admission is printed
+  (`admitted`, as `case:domain`). On the frozen copy (2026-11-03) it admitted none.
+- **Idempotent.** A placed mail is never observed again, so a second run opens, joins and admits
+  nothing. Mail that lands on no case (no key) is folded again on every run and changes nothing:
+  `observed` counts those folds. That costs nothing worth caching: on the frozen copy the second
+  run folded 1,012 such mails in 0.61 s wall and wrote only its `runs-*.jsonl` line.
 - **One pass at a time**: it takes `pass_lock` (exit 3 when a pass holds it).
 - **Recorded**: a `mail_reobserve` line in `runs-YYYYMMDD.jsonl` and the summary printed as JSON —
   `observed`, `opened`, `joined`, `cases_before`/`cases_after`, and `new_multi_mail_cases` (each

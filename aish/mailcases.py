@@ -719,13 +719,9 @@ class CaseStore:
         authenticated: bool,
         index: mailindex.MailIndex | None = None,
         reader_kind: str = "",
-        *,
-        admit: bool = True,
     ) -> Observation:
         """Fold one mail into the case store. Deterministic; idempotent per
-        mail (a mail already on a case changes nothing). `admit=False` places
-        and records exactly as always but admits no sender: the re-observation
-        of the backlog grants no trust (`mailwatch.reobserve`)."""
+        mail (a mail already on a case changes nothing)."""
         position = header.position
         text = f"{header.subject}\n{body}"
         keys = mail_keys(header.subject, text, reader_kind)
@@ -782,8 +778,7 @@ class CaseStore:
                     # from this act of his, never earlier.
                     if "addressed" not in info or tuple(info["addressed"]) > position:
                         info["addressed"] = position
-                if admit:
-                    admitted += self._admit_toward(case, header, index)
+                admitted += self._admit_toward(case, header)
             else:
                 # An inbound sender is a party by joining, which is not trust:
                 # its provenance is kept, so nothing counts it as someone he
@@ -852,32 +847,26 @@ class CaseStore:
                 changed = True
         return changed
 
-    def admit_toward(
-        self, case: Case, header: mailindex.Header, index: mailindex.MailIndex | None
-    ) -> list[str]:
+    def admit_toward(self, case: Case, header: mailindex.Header) -> list[str]:
         """Re-ask, as of an owner act already on `case`, which senders it admits
         (`_admit_toward`) — after the case gained an authenticated sighting
         earlier than the act. Idempotent; saves when it admitted anything."""
         if header.direction != "out" or header.position not in case.mails:
             return []
-        admitted = self._admit_toward(case, header, index)
+        admitted = self._admit_toward(case, header)
         if admitted:
             self._save(case)
         return admitted
 
-    def _admit_toward(
-        self, case: Case, header: mailindex.Header, index: mailindex.MailIndex | None
-    ) -> list[str]:
+    def _admit_toward(self, case: Case, header: mailindex.Header) -> list[str]:
         """An owner act on a case admits the authenticated senders it was AIMED
-        at — the domains he wrote to, and the domain of the mail he replied to
-        — when they were already seen on the case. As of the act, never
-        earlier, and never a domain he did not address."""
+        at — the domains among its To/Cc recipients — when they were already
+        seen on the case. As of the act, never earlier, and never a domain he
+        did not address. Replying to or forwarding a sender's mail is not by
+        itself an act toward that sender: his forward of an Airbnb confirmation
+        to his own other address names the Airbnb mail in its In-Reply-To and
+        is addressed to nobody at Airbnb."""
         aimed = {mailindex.domain_of(a) for a in header.correspondents}
-        if index is not None:
-            for parent_id in header.in_reply_to:
-                parent = index.reply_parent(parent_id, header.position)
-                if parent is not None and parent.direction == "in":
-                    aimed.add(mailindex.domain_of(parent.from_addr))
         out = []
         for domain, seen in case.domains.items():
             if domain in aimed and domain not in case.admitted and seen < header.position:

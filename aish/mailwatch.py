@@ -851,8 +851,9 @@ def backfill(
     index = mailindex.MailIndex(state_dir)
     store = mailcases.CaseStore(state_dir)
     result.cases_before = len(store.cases)
-    result.observed, result.admitted, _joined = observe_unplaced(
+    result.observed, admitted, _joined = observe_unplaced(
         state_dir, index, store, floor=now() - days * 86400)
+    result.admitted = len(admitted)
     result.cases_after = len(store.cases)
     return result
 
@@ -863,11 +864,11 @@ def observe_unplaced(
     store: mailcases.CaseStore,
     *,
     floor: float | None = None,
-    admit: bool = True,
-) -> tuple[int, int, int]:
+) -> tuple[int, list[str], int]:
     """Fold every index mail that is on NO case through `CaseStore.observe`,
     oldest first — the one observation loop the backfill and the
-    re-observation share. (observed, admitted, joined an existing case).
+    re-observation share. (observed, the admissions minted as "case:domain",
+    mails that joined an existing case).
 
     Mail already on a case was observed, and mail he MOVED is where he put it:
     re-observing either would append it again to the case its key names —
@@ -880,16 +881,17 @@ def observe_unplaced(
                if a.get("verb") == mailcases.MOVE}
     placed |= set(mailitems.own_copies(index))
     verdicts = mailverdicts.VerdictStore(state_dir)
-    observed = admitted = joined = 0
+    observed = joined = 0
+    admitted: list[str] = []
     for header in sorted(index.by_digest.values(), key=lambda h: h.position):
         if (floor is not None and header.at < floor) or header.digest in placed:
             continue
         body = index.body(header.digest) or ""
         auth = mailgate.authenticate_header(header)
         observation = store.observe(header, body, auth.authenticated, index,
-                                    recorded_kind(verdicts, header.digest), admit=admit)
+                                    recorded_kind(verdicts, header.digest))
         observed += 1
-        admitted += len(observation.admitted)
+        admitted.extend(observation.admitted)
         if observation.cases and not observation.created:
             joined += 1
     return observed, admitted, joined
@@ -902,6 +904,10 @@ class Reobserve:
     observed: int = 0  # index mail on no case, folded through the case store
     joined: int = 0  # of those, mails that joined an EXISTING case
     opened: int = 0  # cases this run opened
+    # Senders admitted by HIS act addressed to them (`_admit_toward`) — the
+    # law the live path and the backfill run, so the fold grants exactly what
+    # watching live would have; each as "case:domain".
+    admitted: list[str] = field(default_factory=list)
     cases_before: int = 0
     cases_after: int = 0
     new_multi_mail_cases: list[dict[str, Any]] = field(default_factory=list)
@@ -914,7 +920,8 @@ def reobserve(state_dir: os.PathLike | str) -> Reobserve:
     """Re-observe the backlog under TODAY's laws (key stems, alternations, the
     one-time-code rule, trusted facts): every indexed mail on no case is folded
     through `observe_unplaced`, the backfill's own loop — no mailbox is read, no
-    Reader is called, and no sender is admitted (`observe(admit=False)`).
+    Reader is called, and a sender is admitted only by the live law (his act
+    addressed to its domain, `CaseStore._admit_toward`).
     Idempotent: a mail placed on a case is never observed again, so a second run
     joins and opens nothing. Reports the cases it opened that hold more than one
     mail."""
@@ -923,10 +930,7 @@ def reobserve(state_dir: os.PathLike | str) -> Reobserve:
     store = mailcases.CaseStore(state_dir)
     before = set(store.cases)
     result.cases_before = len(before)
-    # admit=False: folding the backlog places mail and records its trusted
-    # facts, and grants no sender trust — admission stays the live act's.
-    result.observed, _admitted, result.joined = observe_unplaced(
-        state_dir, index, store, admit=False)
+    result.observed, result.admitted, result.joined = observe_unplaced(state_dir, index, store)
     result.cases_after = len(store.cases)
     result.opened = result.cases_after - result.cases_before
     for case_id in sorted(set(store.cases) - before):
@@ -1156,7 +1160,7 @@ def _follow_authentication(
             if header.direction == "out":
                 for case in on:
                     if case.id in changed:
-                        result.admitted += len(store.admit_toward(case, header, index))
+                        result.admitted += len(store.admit_toward(case, header))
             continue
         if header.digest in moved or not run_keys:
             continue
