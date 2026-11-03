@@ -43,6 +43,7 @@ import html
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -172,6 +173,30 @@ def addressed_to(header: Header, address: str) -> bool:
 AIM_ADDRESS = "address"
 AIM_DOMAIN = "domain"
 AIM_SHARED_DOMAIN = "shared_domain"
+AIM_NO_INDEX = "no_index"  # a domain match with no index to count it: not aimed, not recorded
+
+#: How a party he reached ONLY by Bcc appears in any text a model reads.
+BCC_RECIPIENT = "a Bcc recipient"
+
+
+def shown_party(address: str, headers: Iterable[Header | None]) -> str:
+    """How `address` may appear in text a MODEL reads, relative to the mails
+    that text talks about (`headers`): the address when any of them names it
+    visibly (From, To or Cc), `BCC_RECIPIENT` when they name it only in his
+    Bcc. The one renderer of a party for model-visible text — the report, the
+    case tool, the item tool and the settlement judge all go through it.
+    Decisions never read it: they read `Header.addressed`, where a Bcc is
+    addressing. A Bcc is his secret from the visible recipients, and a model
+    that sees the address beside a reply it drafts can expose it."""
+    held = [h for h in headers if h is not None]
+    address = (address or "").lower()
+    if not address:
+        return address
+    if any(address == h.from_addr or address in h.to or address in h.cc for h in held):
+        return address
+    if any(address in h.bcc for h in held):
+        return BCC_RECIPIENT
+    return address
 
 
 def aim(header: Header, party: str, index: MailIndex | None) -> str:
@@ -185,7 +210,9 @@ def aim(header: Header, party: str, index: MailIndex | None) -> str:
     domain = domain_of(party) if "@" in party else party.lower()
     if not domain or not any(domain_of(a) == domain for a in header.addressed):
         return ""
-    if index is not None and index.names_one_party(domain):
+    if index is None:
+        return AIM_NO_INDEX
+    if index.names_one_party(domain):
         return AIM_DOMAIN
     return AIM_SHARED_DOMAIN
 

@@ -202,10 +202,14 @@ def show_text(state_dir: os.PathLike | str, store: mailcases.CaseStore, case_id:
     ]
     parties = sorted(case.parties.items(), key=lambda kv: (kv[1]["at"], kv[0]))
     if parties:
+        # A party he reached only by Bcc on this case's mail is never an
+        # address here (`mailindex.shown_party`, the one renderer).
+        case_mail = [mailindex.load_header(state_dir, p[1]) for p in case.mails]
+        shown = [(info, _safe(mailindex.shown_party(addr, case_mail), ADDRESS_CHARS))
+                 for addr, info in parties[:10]]
         lines.append("Parties: " + ", ".join(
-            (f"{_safe(info.get('name'), NAME_CHARS)} <{_safe(addr, ADDRESS_CHARS)}>"
-             if info.get("name") else _safe(addr, ADDRESS_CHARS))
-            for addr, info in parties[:10]))
+            f"{_safe(info.get('name'), NAME_CHARS)} <{who}>" if info.get("name") else who
+            for info, who in shown))
     if case.admitted:
         lines.append("Senders admitted on it (by your acts toward them): "
                      + ", ".join(_safe(d, 60) for d in sorted(case.admitted)))

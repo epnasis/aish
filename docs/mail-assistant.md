@@ -237,6 +237,22 @@ states, the 4 waiting-on rows, and every case file after `--reobserve`, apart fr
 `withheld` field). `TestWhomHeAddressedIncludesHisBcc` (`tests/test_mailitems.py`),
 `TestHisBccIsAddressingOnTheCase` (`tests/test_mailcases.py`).
 
+**The goal, plainly: a Bcc stays his secret in everything a model reads** (round-8 note 1). A
+party he reached only by Bcc counts for every DECISION — it is addressed, waited on, can settle
+by his act — and is never rendered as an address in any text a model can read. One renderer
+decides how a party appears there, `mailindex.shown_party(address, headers)`: relative to the
+mails the text talks about, the address when one of them names it visibly (From, To or Cc), and
+`BCC_RECIPIENT` ("a Bcc recipient") when they name it only in his Bcc. Every model-visible
+renderer of a party goes through it: the daily report's follow-up and probably-settled rows and
+its "you wrote to …" evidence line (`mailreport._party`, `Evidence.to`), the case tool's
+`Parties:` list (`mailcasetool.show_text`), the item tool's rows (`mailitemtool.item_words`), and
+the settlement judge's item words and input (`mailsettle.shown_counterparty`). Two renderers need
+no fence: the Reader's and the judge's message entries list an outbound mail's To only, never
+its Bcc; and `/mail` and the CSV are HIS surfaces, read by no model. **Not covered:** a plugin
+tool that reads his Sent folder itself (the `gws` mail tools) hands the model whatever the
+provider returns; that is outside aish's renderers.
+`TestABccdPartyIsNeverAnAddressAModelReads` (`tests/test_mailitems.py`).
+
 **Alias admission is deterministic corroboration, and the corroboration is HIS.** A sender
 domain is admitted on a case when it was seen there in authenticated mail AND he then acted on
 the case TOWARD it — a mail of his with an address at that domain among its To, Cc or Bcc
@@ -265,7 +281,9 @@ an aim is withheld it is recorded** where the decision already is: an admission 
 have minted is written to `case.withheld[domain]` (`at`, `by`: `shared_domain`, `act`) and admits
 nothing; a grade act it withheld is listed in the grade's `withheld` (recorded in every
 `mail_verdict`'s `gate.grade`, never counted). Membership is decided at read time and recorded
-nowhere, so its withholding has no record. On the frozen copy (round 7) both are empty.
+nowhere, so its withholding has no record. On the frozen copy (round 7) both are empty. With
+no index to count it, `aim` answers `AIM_NO_INDEX` — not aimed, and never recorded as shared
+(round-8 note 3).
 **His Bcc** is
 parsed from his outbound mail only (`Header.bcc`; inbound mail never carries one, and index files
 written before 2026-11-03 load with none — on the frozen copy 0 of 22 outbound headers hold one,

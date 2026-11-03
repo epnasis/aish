@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import mailitems, mailreport, mailvouch
+from . import mailindex, mailitems, mailreport, mailvouch
 from .mailcasetool import _q, _safe
 
 LOOK_ACTIONS = ("list",)
@@ -77,7 +77,9 @@ def _rows(ctx: mailitems.Context) -> list[Any]:
 def item_words(ctx: mailitems.Context, row: Any) -> str:
     """One item in code's words, every mail-borne string sanitised and quoted."""
     item = row.open_item
-    party = _safe(item.counterparty, ADDRESS_CHARS)
+    party = _safe(mailindex.shown_party(
+        item.counterparty, [getattr(row, n, None) for n in ("header", "his", "latest")]),
+        ADDRESS_CHARS)
     if item.kind == mailitems.NEEDS:
         wanted = _safe(str(row.reading.verdict.get("wanted") or "") or "an item", 12)
         why = (f"here because of your preference {row.important}" if row.important

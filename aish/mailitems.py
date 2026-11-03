@@ -139,7 +139,9 @@ class Evidence:
     cases: tuple[str, ...] = ()  # a closed case's ids
     amounts: tuple[tuple[str, int], ...] = ()  # STORED amounts on the evidence mail
     sender: str = ""  # the evidence mail's From address (his own, for his mail)
-    to: tuple[str, ...] = ()  # whom his evidence mail was addressed to
+    # Whom his evidence mail was addressed to, AS SHOWN to a model
+    # (`mailindex.shown_party`): a Bcc-only recipient is `BCC_RECIPIENT`.
+    to: tuple[str, ...] = ()
     when: float = 0.0  # the evidence mail's own time, for display (logic reads first_read)
 
     @classmethod
@@ -147,7 +149,8 @@ class Evidence:
         return cls(header.digest, tier,
                    amounts=tuple(sorted(ctx.stored_amounts(header.digest))),
                    sender=header.from_addr,
-                   to=header.addressed,
+                   to=tuple(dict.fromkeys(mailindex.shown_party(a, (header,))
+                                          for a in header.addressed)),
                    when=header.at or ctx.first_read(header.digest))
 
 

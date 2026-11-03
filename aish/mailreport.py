@@ -1085,13 +1085,23 @@ def _despite(despite: list[tuple[str, list[str]]]) -> str:
                    + "; ".join(reasons) + "**" for pref_id, reasons in despite)
 
 
+def _party(row: Item | FollowUp, clean: Clean) -> str:
+    """The row's counterparty as a model may read it — relative to the mails
+    the row names (`mailindex.shown_party`)."""
+    if isinstance(row, Item):
+        return safe(clean, mailindex.shown_party(row.header.from_addr if row.header else "",
+                                                 (row.header,)), ADDRESS_CHARS)
+    return safe(clean, mailindex.shown_party(row.counterparty, (row.his, row.latest)),
+                ADDRESS_CHARS)
+
+
 def _yours_line(f: FollowUp, now: float, clean: Clean, account: str) -> str:
     record = f.reading.record if f.reading else None
     wanted = safe(clean, f.reading.verdict.get("wanted") if record and f.reading
                   else "no reading recorded", WORD_CHARS)
     more = f"{f.asking} messages" if f.asking > 1 else "a message"
     return (f"- {_pinned(f.pinned)}{_cautions(record)}{_days(now - f.since)} day(s) waiting "
-            f"on you — {safe(clean, f.counterparty, ADDRESS_CHARS)} sent {more} after your "
+            f"on you — {_party(f, clean)} sent {more} after your "
             f"{_subject(f.his, clean)} (the Reader: {wanted}) — "
             f"{_where(f.latest, f.latest.at if f.latest else f.since, clean, account)}"
             f"{_ref(_anchor(f))}{_despite(f.despite)}{_unweighed(f.unweighed, clean)}")
@@ -1109,7 +1119,7 @@ def _anchor(row: Item | FollowUp) -> str:
 
 def _theirs_line(f: FollowUp, now: float, clean: Clean, account: str) -> str:
     return (f"- {_pinned(f.pinned)}{_days(now - f.since)} day(s) with no reply — you wrote to "
-            f"{safe(clean, f.counterparty, ADDRESS_CHARS)}: {_subject(f.his, clean)} — "
+            f"{_party(f, clean)}: {_subject(f.his, clean)} — "
             f"{_where(f.his, f.his.at, clean, account)}{_ref(f.his.digest)}"
             f"{_unweighed(f.unweighed, clean)}")
 
@@ -1160,10 +1170,10 @@ def _settled_line(row: Item | FollowUp, now: float, clean: Clean) -> str:
         what = (f"{_wanted_words(row, clean)} — {_who(row.header, clean)} — "
                 f"{_subject(row.header, clean)} ({_when(row.reading.when)})")
     elif row.turn == "yours":
-        what = (f"{safe(clean, row.counterparty, ADDRESS_CHARS)} waiting on you since "
+        what = (f"{_party(row, clean)} waiting on you since "
                 f"{_when(row.since)}, after your {_subject(row.his, clean)}")
     else:
-        what = (f"you wrote to {safe(clean, row.counterparty, ADDRESS_CHARS)}: "
+        what = (f"you wrote to {_party(row, clean)}: "
                 f"{_subject(row.his, clean)} ({_when(row.his.at)})")
     anchor = _anchor(row)
     return (f"- {what}{_ref(anchor)} — probably settled: {_evidence(row, clean)}"

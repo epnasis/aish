@@ -771,7 +771,9 @@ class TestWhomHeAddressedIncludesHisBcc:
         (item,) = [i for i in ctx(tmp_path).derive().items() if i.kind == mailitems.NEEDS]
         state = ctx(tmp_path).state_of(item)
         assert state.source == mailitems.RULE
-        assert "agent@broker.example" in state.evidence.to
+        # The decision read his Bcc; the evidence line a model reads does not
+        # name the Bcc'd address (round-8 note 1).
+        assert state.evidence.to == ("assistant@other.example", mailindex.BCC_RECIPIENT)
 
     def test_a_party_he_only_bccd_is_waited_on(self, tmp_path):
         his_sent(tmp_path, "o2", to="desk@else.example", bcc="carol@shop.example",
@@ -791,3 +793,48 @@ class TestWhomHeAddressedIncludesHisBcc:
         (item,) = [i for i in context.derive().items() if i.kind == mailitems.NEEDS]
         found = [c for c in context.candidates(item) if c.header.digest == paid.digest]
         assert found and found[0].tier == "same counterparty"
+
+
+class TestABccdPartyIsNeverAnAddressAModelReads:
+    """Round-8 note 1: the Bcc fence is per SURFACE. His Bcc'd lawyer is a
+    party for every decision, and never appears as an address in the report,
+    the case tool, the item tool or the settlement judge's words — one
+    renderer, `mailindex.shown_party`."""
+
+    def test_the_lawyer_he_bccd(self, tmp_path):
+        from test_mailreport import fresh_health, identity
+
+        from aish import mailcasetool, mailitemtool, mailsettle
+
+        fresh_health(tmp_path)
+        his = his_sent(tmp_path, "o1", to="agent@broker.example", bcc="lawyer@law.example",
+                       at=NOW - 9 * DAY, subject="Order LS-48213 offer")
+        index = mailindex.MailIndex(tmp_path)
+        store = mailcases.CaseStore(tmp_path)
+        store.observe(index.get(his.digest), "Our order LS-48213, as agreed.", True, index)
+        (case,) = mailcases.CaseStore(tmp_path).cases.values()
+        assert "lawyer@law.example" in case.parties  # a party for decisions
+
+        context = ctx(tmp_path)
+        waited = {t.open_item.counterparty for t in context.derive().theirs}
+        assert "lawyer@law.example" in waited  # waited on, by Header.addressed
+
+        report = mailreport.render(mailreport.build(tmp_path, now=NOW, clean=identity),
+                                   clean=identity)
+        items = mailitemtool.list_text(tmp_path, now=NOW)
+        shown = mailcasetool.show_text(tmp_path, mailcases.CaseStore(tmp_path), case.id)
+        (lawyer,) = [t.open_item for t in context.derive().theirs
+                     if t.open_item.counterparty == "lawyer@law.example"]
+        judged = mailsettle.matter_words(context, lawyer)
+        later = add_mail(tmp_path, "k1", frm="agent@broker.example", subject="Re: Order",
+                         at=NOW - DAY, body="Received.")
+        bundle = mailsettle.compose(context, lawyer, mailitems.Candidate(
+            header=later, ties=("entity",), tier="third party"))
+        for name, text in (("report", report), ("items", items), ("case", shown),
+                           ("judge", judged), ("judge input", bundle.text)):
+            assert "lawyer@law.example" not in text, name
+            assert "law.example" not in text, name
+        assert mailindex.BCC_RECIPIENT in report and mailindex.BCC_RECIPIENT in shown
+        assert mailindex.BCC_RECIPIENT in items and mailindex.BCC_RECIPIENT in judged
+        assert mailsettle.shown_counterparty(context, lawyer) == mailindex.BCC_RECIPIENT
+        assert "agent@broker.example" in report  # a visible recipient stays an address

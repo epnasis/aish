@@ -269,3 +269,15 @@ class TestBccAndTheSharedDomain:
         assert mailindex.aimed_at(header, "desk@shop.example", index)
         assert mailindex.aimed_at(header, "shop.example", index)
         assert not mailindex.aimed_at(header, "desk@shop.example", None)  # no index, no domain
+        # Round-8 note 3: with no index the reason is its own, never "shared".
+        assert mailindex.aim(header, "desk@shop.example", None) == mailindex.AIM_NO_INDEX
+
+    def test_shown_party_names_the_visible_and_hides_the_bccd(self):
+        sent = parsed(gmail("s", frm=OWNER, to="a@shop.example", bcc="b@other.example",
+                            labels=("SENT",))).header
+        assert mailindex.shown_party("a@shop.example", (sent,)) == "a@shop.example"
+        assert mailindex.shown_party("b@other.example", (sent,)) == mailindex.BCC_RECIPIENT
+        assert mailindex.shown_party("B@Other.example", (sent, None)) == mailindex.BCC_RECIPIENT
+        visible_too = parsed(gmail("t", frm=OWNER, to="b@other.example", at=T0 + 60,
+                                   labels=("SENT",))).header
+        assert mailindex.shown_party("b@other.example", (sent, visible_too)) == "b@other.example"
