@@ -475,6 +475,9 @@ class Report:
     trust_offers: list[TrustOffer] = field(default_factory=list)
     trust_drawn: int = -1
     trust_withheld_shared: int = 0
+    # Later mail the entity tie did not tie by domain, the domain being one
+    # many people use (`Context.entity_withheld_shared`).
+    entity_withheld_shared: int = 0
     since_acts_from: float = 0.0
 
     def counts(self) -> dict[str, int]:
@@ -961,6 +964,7 @@ def _candidates(ctx: Any, report: Report, digest: str, rows: list[Any]) -> None:
                                                            digest))
                 if judged is None or judged.get("ending") not in mailsettle.FINAL_ENDINGS:
                     report.unjudged += 1
+    report.entity_withheld_shared = len(ctx.entity_withheld_shared)
 
 
 def acts_since(state_dir: os.PathLike | str, since: float) -> dict[str, int]:
@@ -1340,6 +1344,9 @@ def _settlement_lines(report: Report, clean: Clean) -> list[str]:
                      "weighed")
     if report.judgements_unreadable:
         parts.append(f"{report.judgements_unreadable} judgement file(s) could not be read")
+    if report.entity_withheld_shared:
+        parts.append(f"{report.entity_withheld_shared} later mail(s) from the counterparty's "
+                     "domain not tied by it — a domain many people use names nobody")
     if parts:
         out.append("Settlement: " + "; ".join(parts) + ".")
     if report.own_copies:

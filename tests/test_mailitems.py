@@ -838,3 +838,39 @@ class TestABccdPartyIsNeverAnAddressAModelReads:
         assert mailindex.BCC_RECIPIENT in items and mailindex.BCC_RECIPIENT in judged
         assert mailsettle.shown_counterparty(context, lawyer) == mailindex.BCC_RECIPIENT
         assert "agent@broker.example" in report  # a visible recipient stays an address
+
+
+class TestTheEntityTieCountsWhatTheSharedDomainWithholds:
+    """Round-8 B4: `names_one_party` stays for the entity tie (it grants no
+    tier) and the trust offer gate — each use counted, never silent."""
+
+    def setup(self, state, domain: str, fillers: int):
+        for n in range(fillers):
+            add_mail(state, f"f{n}", frm=f"user{n}@{domain}", subject="hi",
+                     at=NOW - 40 * DAY + n)
+        his = his_sent(state, "o1", to=f"friend@{domain}", at=NOW - 10 * DAY, subject="Sofa")
+        later = add_mail(state, "k1", frm=f"other@{domain}", subject="About the sofa",
+                         at=NOW - DAY, body="Is the sofa still there?")
+        add_verdict(state, later, recorded_at=NOW - DAY)
+        context = ctx(state)
+        (item,) = [t.open_item for t in context.derive().theirs
+                   if t.open_item.counterparty == f"friend@{domain}"]
+        return his, later, context, item
+
+    def test_at_a_shared_provider_the_domain_ties_nothing_and_is_counted(self, tmp_path):
+        from test_mailreport import fresh_health, identity
+
+        _his, later, context, item = self.setup(tmp_path, "gmail.example",
+                                                mailindex.ENTITY_DOMAIN_MAX_SENDERS)
+        assert "entity" not in context.ties(item, later)
+        assert (item.key, later.digest) in context.entity_withheld_shared
+        fresh_health(tmp_path)
+        report = mailreport.build(tmp_path, now=NOW, clean=identity)
+        assert report.entity_withheld_shared >= 1
+        assert "a domain many people use names nobody" in mailreport.render(
+            report, clean=identity)
+
+    def test_at_a_one_party_domain_the_domain_ties_and_nothing_is_counted(self, tmp_path):
+        _his, later, context, item = self.setup(tmp_path, "shop.example", 0)
+        assert "entity" in context.ties(item, later)
+        assert context.entity_withheld_shared == set()

@@ -393,6 +393,9 @@ class Context:
         self._keys: dict[str, frozenset[str]] = {}
         self._text: dict[str, str | None] = {}
         self._entity: dict[str, frozenset[str]] = {}
+        # (item key, later mail) pairs whose same-domain tie the shared-provider
+        # count withheld (`MailIndex.names_one_party`) — counted, never silent.
+        self.entity_withheld_shared: set[tuple[str, str]] = set()
         self._cases_of: dict[str, list[mailcases.Case]] = {}
         self._trusted_cases: dict[str, list[mailcases.Case]] = {}
         for case in self.store.cases.values():
@@ -818,9 +821,11 @@ class Context:
             ties.append("amount")
         if "counterparty" not in ties:
             domain = mailindex.domain_of(item.counterparty)
-            same_domain = (header.direction == "in" and domain
-                           and mailindex.domain_of(header.from_addr) == domain
-                           and self.index.names_one_party(domain))
+            at_domain = (header.direction == "in" and bool(domain)
+                         and mailindex.domain_of(header.from_addr) == domain)
+            same_domain = at_domain and self.index.names_one_party(domain)
+            if at_domain and not same_domain:
+                self.entity_withheld_shared.add((item.key, header.digest))
             text = (self.text(header.digest) or header.subject).casefold()
             if same_domain or any(t in text for t in self.entity_tokens(item.counterparty)):
                 ties.append("entity")

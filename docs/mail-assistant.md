@@ -265,7 +265,12 @@ asked, so a transient state — a young index, a since-moved mail — can never 
 grant; moving his act off the case takes its admission away, and a legacy `admitted` field in a
 case file is ignored (`TestAdmissionsAreDerivedNeverStored`). This retires the round-7 residual:
 no standing decision reads the global address count any more (`MailIndex.names_one_party` stays
-only for the tier rule's `entity` tie, which grants no tier, and the trust chip's offer gate).
+only for the tier rule's `entity` tie, which grants no tier, and the trust chip's offer gate —
+both restrict-only, and each counted, never silent: the report's settlement footer counts later
+mail from an item counterparty's domain that the tie did NOT tie because the domain names no
+single party (`Context.entity_withheld_shared`,
+`TestTheEntityTieCountsWhatTheSharedDomainWithholds`), and its footer counts the trust offers the
+gate held back (§The trust chip)).
 **What reads it:** the sender-not-admitted flag is exact (`case_flags`: an inbound sender whose
 ADDRESS is not admitted, on a case with admitted addresses); the tier rule's "same counterparty"
 (an admitted address on the anchor's case), `Case.dealt_with_at` and the Reader's proposal
