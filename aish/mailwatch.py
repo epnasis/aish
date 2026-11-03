@@ -851,24 +851,89 @@ def backfill(
     index = mailindex.MailIndex(state_dir)
     store = mailcases.CaseStore(state_dir)
     result.cases_before = len(store.cases)
-    floor = now() - days * 86400
-    # Mail already on a case was observed, and mail he MOVED is where he put
-    # it: re-observing either would append it again to the case its key names
-    # — undoing his move, and adding its amounts and accounts twice.
+    result.observed, result.admitted, _joined = observe_unplaced(
+        state_dir, index, store, floor=now() - days * 86400)
+    result.cases_after = len(store.cases)
+    return result
+
+
+def observe_unplaced(
+    state_dir: os.PathLike | str,
+    index: mailindex.MailIndex,
+    store: mailcases.CaseStore,
+    *,
+    floor: float | None = None,
+    admit: bool = True,
+) -> tuple[int, int, int]:
+    """Fold every index mail that is on NO case through `CaseStore.observe`,
+    oldest first — the one observation loop the backfill and the
+    re-observation share. (observed, admitted, joined an existing case).
+
+    Mail already on a case was observed, and mail he MOVED is where he put it:
+    re-observing either would append it again to the case its key names —
+    undoing his move, and adding its amounts and accounts twice. A copy of his
+    own sent mail mints nothing. Every law of `observe` applies: only his own
+    or authenticated mail records a fact; admission only by his act toward a
+    sender."""
     placed = {p[1] for c in (*store.cases.values(), *store.merged.values()) for p in c.mails}
     placed |= {str(a.get("mail")) for a in mailcases.read_acts(state_dir)
                if a.get("verb") == mailcases.MOVE}
-    # A copy of his own sent mail in his other inbox mints nothing.
     placed |= set(mailitems.own_copies(index))
+    verdicts = mailverdicts.VerdictStore(state_dir)
+    observed = admitted = joined = 0
     for header in sorted(index.by_digest.values(), key=lambda h: h.position):
-        if header.at < floor or header.digest in placed:
+        if (floor is not None and header.at < floor) or header.digest in placed:
             continue
         body = index.body(header.digest) or ""
         auth = mailgate.authenticate_header(header)
-        observation = store.observe(header, body, auth.authenticated, index)
-        result.observed += 1
-        result.admitted += len(observation.admitted)
+        observation = store.observe(header, body, auth.authenticated, index,
+                                    recorded_kind(verdicts, header.digest), admit=admit)
+        observed += 1
+        admitted += len(observation.admitted)
+        if observation.cases and not observation.created:
+            joined += 1
+    return observed, admitted, joined
+
+
+@dataclass
+class Reobserve:
+    """What one `--reobserve` run did — counted and printed, never health."""
+
+    observed: int = 0  # index mail on no case, folded through the case store
+    joined: int = 0  # of those, mails that joined an EXISTING case
+    opened: int = 0  # cases this run opened
+    cases_before: int = 0
+    cases_after: int = 0
+    new_multi_mail_cases: list[dict[str, Any]] = field(default_factory=list)
+
+    def as_json(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
+def reobserve(state_dir: os.PathLike | str) -> Reobserve:
+    """Re-observe the backlog under TODAY's laws (key stems, alternations, the
+    one-time-code rule, trusted facts): every indexed mail on no case is folded
+    through `observe_unplaced`, the backfill's own loop — no mailbox is read, no
+    Reader is called, and no sender is admitted (`observe(admit=False)`).
+    Idempotent: a mail placed on a case is never observed again, so a second run
+    joins and opens nothing. Reports the cases it opened that hold more than one
+    mail."""
+    result = Reobserve()
+    index = mailindex.MailIndex(state_dir)
+    store = mailcases.CaseStore(state_dir)
+    before = set(store.cases)
+    result.cases_before = len(before)
+    # admit=False: folding the backlog places mail and records its trusted
+    # facts, and grants no sender trust — admission stays the live act's.
+    result.observed, _admitted, result.joined = observe_unplaced(
+        state_dir, index, store, admit=False)
     result.cases_after = len(store.cases)
+    result.opened = result.cases_after - result.cases_before
+    for case_id in sorted(set(store.cases) - before):
+        case = store.cases[case_id]
+        if len(case.mails) > 1:
+            result.new_multi_mail_cases.append(
+                {"case": case_id, "title": case.display_title(), "mails": len(case.mails)})
     return result
 
 
@@ -1286,6 +1351,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--since", default="",
                         help="with --settle: YYYY-MM-DD or <N>d — weigh the needs items the "
                         "report would show with the same --since (default: its own window)")
+    parser.add_argument("--reobserve", action="store_true",
+                        help="one-shot: fold every indexed mail on no case through the case "
+                        "store under today's laws (the backfill's observe loop); no mailbox, no "
+                        "Reader; idempotent")
     parser.add_argument("--reread-blind", action="store_true",
                         help="one-shot: re-read every reading made without its body although "
                         "the evidence store now holds it (oldest first, up to --max); no "
@@ -1316,6 +1385,16 @@ def main(argv: list[str] | None = None) -> int:
         return _main_settle(state_dir, args.model, args.since)
     if args.reread_blind:
         return _main_reread(state_dir, args.model, args.max)
+    if args.reobserve:
+        with pass_lock(state_dir) as held:
+            if not held:
+                log("another pass holds the lock — the re-observation does nothing")
+                return 3
+            started = time.time()
+            done = reobserve(state_dir)
+            flush_run(state_dir, "mail_reobserve", done.as_json(), started)
+        print(json.dumps(done.as_json(), sort_keys=True, ensure_ascii=False))
+        return 0
     if not args.once and args.backfill <= 0:
         parser.print_help()
         return 2

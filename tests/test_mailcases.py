@@ -389,3 +389,59 @@ class TestStemAlternationsAreARule:
     def test_the_bounded_ending_and_the_date_rule_still_hold(self):
         assert mailcases.extract_keys("Wybrany paczkomat: WAW45H") == {}
         assert mailcases.extract_keys("w przesyłce z dnia 2026-10-10") == {}
+
+
+class TestTheReobservation:
+    """Round-5 note 4: indexed mail is folded through the case store again
+    under today's laws, deliberately (`aish-mailwatch --reobserve`)."""
+
+    def index_only(self, state, gid: str, *, at: float, auth: str = "pass"):
+        parsed = mailindex.from_gmail(gmail(
+            gid, frm="pl.no.reply@dhl.example", subject="Powiadomienie o przesylce 29777837645",
+            body="Twoja przesyłka jest w drodze.", at=at, auth=auth), frozenset({OWNER}))
+        assert parsed is not None
+        mailindex.MailIndex(state).add(parsed.header, parsed.body)
+        return parsed.header
+
+    def test_opens_the_case_the_laws_now_find_and_is_idempotent(self, tmp_path):
+        from aish import mailwatch
+
+        first = self.index_only(tmp_path, "d1", at=T0)
+        second = self.index_only(tmp_path, "d2", at=T0 + DAY)
+        done = mailwatch.reobserve(tmp_path)
+        assert done.opened == 1 and done.joined == 1
+        (case,) = done.new_multi_mail_cases
+        assert case["mails"] == 2
+        stored = mailcases.CaseStore(tmp_path).cases[case["case"]]
+        assert {p[1] for p in stored.mails} == {first.digest, second.digest}
+        again = mailwatch.reobserve(tmp_path)
+        assert again.opened == 0 and again.joined == 0 and again.new_multi_mail_cases == []
+        assert mailcases.CaseStore(tmp_path).cases[case["case"]].mails == stored.mails
+
+    def test_an_unauthenticated_mail_opens_nothing(self, tmp_path):
+        from aish import mailwatch
+
+        self.index_only(tmp_path, "d1", at=T0, auth="fail")
+        done = mailwatch.reobserve(tmp_path)
+        assert done.opened == 0 and mailcases.CaseStore(tmp_path).cases == {}
+
+    def test_the_backlog_fold_admits_no_sender(self, tmp_path):
+        """No new trust: his reply on the backlog places and records, and the
+        sender it was aimed at stays unadmitted — while the live path admits."""
+        from aish import mailwatch
+
+        for raw in (store_order(),
+                    gmail("o", frm=OWNER, to="help@other.example", subject="Re: Order LS-48213",
+                          at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",))):
+            parsed = mailindex.from_gmail(raw, frozenset({OWNER}))
+            assert parsed is not None
+            mailindex.MailIndex(tmp_path).add(parsed.header, parsed.body)
+        done = mailwatch.reobserve(tmp_path)
+        assert done.opened == 1
+        (case,) = mailcases.CaseStore(tmp_path).cases.values()
+        assert len(case.mails) == 2 and case.admitted == {}
+        index, store = build(store_order(), gmail(
+            "o", frm=OWNER, to="help@other.example", subject="Re: Order LS-48213",
+            at=T0 + 60, in_reply_to="s1@lampshop.example", labels=("SENT",)))
+        (lived,) = store.cases.values()
+        assert "lampshop.example" in lived.admitted

@@ -719,9 +719,13 @@ class CaseStore:
         authenticated: bool,
         index: mailindex.MailIndex | None = None,
         reader_kind: str = "",
+        *,
+        admit: bool = True,
     ) -> Observation:
         """Fold one mail into the case store. Deterministic; idempotent per
-        mail (a mail already on a case changes nothing)."""
+        mail (a mail already on a case changes nothing). `admit=False` places
+        and records exactly as always but admits no sender: the re-observation
+        of the backlog grants no trust (`mailwatch.reobserve`)."""
         position = header.position
         text = f"{header.subject}\n{body}"
         keys = mail_keys(header.subject, text, reader_kind)
@@ -778,7 +782,8 @@ class CaseStore:
                     # from this act of his, never earlier.
                     if "addressed" not in info or tuple(info["addressed"]) > position:
                         info["addressed"] = position
-                admitted += self._admit_toward(case, header, index)
+                if admit:
+                    admitted += self._admit_toward(case, header, index)
             else:
                 # An inbound sender is a party by joining, which is not trust:
                 # its provenance is kept, so nothing counts it as someone he

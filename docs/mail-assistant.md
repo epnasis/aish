@@ -1630,6 +1630,38 @@ Follow-ups are computed from those two stores at read time, so nothing else is w
 
 `tests/test_mailwatch_backfill.py` — `TestTheBackfill`, `TestTheCommand`.
 
+## The backlog re-observation (2026-11-03) — `aish-mailwatch --reobserve`
+
+**Why.** Case observation runs once per mail, when the mail is indexed. Mail indexed before the
+key rule gained its stems, alternations and identity markers was folded under the OLD rule, and
+nothing folds it again, so a parcel's earlier notices stay off the case a later notice opens.
+Measured on a frozen copy of the live state (2026-11-03): 1,088 indexed mails on no case;
+re-observing them took the store from 39 to 75 cases (36 opened, 40 mails joined an existing
+case), among them a 5-mail InPost parcel and a 4-mail DHL parcel.
+
+**What it does** (`mailwatch.reobserve`): every indexed mail on no case, oldest first, through
+`observe_unplaced` — the same loop `--backfill` runs after fetching, with no date floor. It reads
+no mailbox and calls no Reader. Mail already on a case, mail he moved (`case-acts.jsonl`), and the
+Tuta copies of his own sent mail are skipped, exactly as in the backfill. The Reader's recorded
+`kind` reaches the key rule (`recorded_kind`), so a one-time-code mail contributes no key.
+
+- **No new trust.** It runs `observe(admit=False)`: the mail is placed and its facts are recorded
+  under the trusted-facts law (only his own or authenticated mail writes a fact), and no sender is
+  admitted. On the frozen copy the admitting path would have admitted one domain, airbnb.com, on
+  a booking case, because his FORWARD of an Airbnb confirmation to his other address names the
+  Airbnb mail in its In-Reply-To, and `_admit_toward` counts a reply to a mail as aimed at its
+  sender. Whether a forward should count as that act is an open question for the owner; the
+  re-observation does not answer it.
+- **Idempotent.** A placed mail is never observed again, so a second run opens and joins nothing.
+- **One pass at a time**: it takes `pass_lock` (exit 3 when a pass holds it).
+- **Recorded**: a `mail_reobserve` line in `runs-YYYYMMDD.jsonl` and the summary printed as JSON —
+  `observed`, `opened`, `joined`, `cases_before`/`cases_after`, and `new_multi_mail_cases` (each
+  case it opened that holds more than one mail: id, title, mail count).
+- **Stated limit.** Late observation has the backfill's limit: a case opened by a mail observed
+  first keeps that creation position.
+
+`tests/test_mailcases.py` — `TestTheReobservation`.
+
 ## The Tuta authentication recheck (2026-10-31) — `aish-mailwatch --recheck-tuta-auth`
 
 **Why.** Tuta mail indexed before the bridge-header slice (#461) carries no observation of
@@ -2007,6 +2039,12 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
    calls, one per such mail, oldest first — run with `--max N` to spread the cost):
    ```sh
    aish-mailwatch --reread-blind --model gemini:gemini-3.8-flash
+   ```
+   Then, once, the backlog's case observation under today's key rule (no mailbox, no Reader,
+   no sender admitted; idempotent; prints the cases it opened —
+   §The backlog re-observation):
+   ```sh
+   aish-mailwatch --reobserve
    ```
    Nothing else changes in the jobs: every `--once` pass now runs the settlement step when the
    charter loads (unadmitted: no call, the report counts the candidates as not yet judged). To run
