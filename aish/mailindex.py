@@ -165,6 +165,31 @@ def addressed_to(header: Header, address: str) -> bool:
     return header.direction == "out" and bool(address) and address.lower() in header.addressed
 
 
+#: Why `aim` answered as it did. `AIM_SHARED_DOMAIN` is the one NO that is
+#: recorded where the decision is (a withheld admission, a grade's `withheld`):
+#: he addressed someone at the party's domain, and only the domain's address
+#: count (`MailIndex.names_one_party`) withheld the aim.
+AIM_ADDRESS = "address"
+AIM_DOMAIN = "domain"
+AIM_SHARED_DOMAIN = "shared_domain"
+
+
+def aim(header: Header, party: str, index: MailIndex | None) -> str:
+    """`aimed_at`, with its reason: `AIM_ADDRESS` or `AIM_DOMAIN` when aimed,
+    `AIM_SHARED_DOMAIN` when only the domain's count withheld it, "" when he
+    addressed nobody at the party at all."""
+    if header.direction != "out" or not party:
+        return ""
+    if "@" in party and addressed_to(header, party):
+        return AIM_ADDRESS
+    domain = domain_of(party) if "@" in party else party.lower()
+    if not domain or not any(domain_of(a) == domain for a in header.addressed):
+        return ""
+    if index is not None and index.names_one_party(domain):
+        return AIM_DOMAIN
+    return AIM_SHARED_DOMAIN
+
+
 def aimed_at(header: Header, party: str, index: MailIndex | None) -> bool:
     """His act is aimed at `party` (an address, or a bare domain): `header` is
     his outbound mail addressed to the party — the address itself among its
@@ -178,13 +203,7 @@ def aimed_at(header: Header, party: str, index: MailIndex | None) -> bool:
     confirmation to his other address, or a reply sent to somebody else, is
     addressed to nobody at the original sender. And at a shared provider's
     domain, writing to friend@ is no act toward stranger@."""
-    if header.direction != "out" or not party:
-        return False
-    if "@" in party and addressed_to(header, party):
-        return True
-    domain = domain_of(party) if "@" in party else party.lower()
-    return (bool(domain) and index is not None and index.names_one_party(domain)
-            and any(domain_of(a) == domain for a in header.addressed))
+    return aim(header, party, index) in (AIM_ADDRESS, AIM_DOMAIN)
 
 
 @dataclass(frozen=True)
@@ -254,7 +273,10 @@ class Header:
     @property
     def addressed(self) -> tuple[str, ...]:
         """Everyone his outbound mail was addressed to — To, Cc and Bcc; ()
-        on inbound. What `aimed_at` reads; `correspondents` stays To/Cc."""
+        on inbound. The one answer to "whom he addressed" — a deliberate Bcc is
+        addressing — read by `aimed_at` and every reader of his addressing.
+        `correspondents` stays To/Cc for the two readers that mean the VISIBLE
+        recipients (docs/mail-assistant.md §Whom he addressed)."""
         if self.direction != "out":
             return ()
         return tuple(dict.fromkeys(self.to + self.cc + self.bcc))
@@ -764,8 +786,9 @@ class MailIndex:
         self.health = Health()
         self._cache: dict[tuple[float, str], _Union] = {}
         # Every distinct address seen at each domain, in any header of any
-        # message — what `names_one_party` counts. It only grows, so a domain
-        # can only stop naming one party, never start: restrict-only over time.
+        # message — what `names_one_party` counts. It only grows, so a domain's
+        # answer can only go from one party to shared; a grant made while it
+        # said one party is NOT retracted (docs/mail-assistant.md, the residual).
         self.domain_addresses: dict[str, set[str]] = {}
         if self.directory is not None and self.directory.is_dir():
             self._load()
@@ -874,6 +897,9 @@ class MailIndex:
         subject = normalize_subject(header.subject)
         if not subject:
             return None
+        # The VISIBLE recipients (To/Cc), never his Bcc: this links mail that
+        # carries no reply headers by a guess, and widening the guess to a
+        # hidden recipient adds links that no header of either mail claims.
         parties = set(header.correspondents)
         window = FALLBACK_WINDOW_DAYS * 86400
         best: Header | None = None

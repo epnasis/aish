@@ -219,6 +219,24 @@ only its domain, amounts and accounts. `TestTheRecheckRecordsKeysToo`.
 whole AUTHENTICATED history (`coordinates_before`) — a stranger passing DMARC on its OWN domain
 can seed it; N1 removes the unauthenticated half of that, not this one (§Residuals).
 
+### Whom he addressed
+
+**One answer, `Header.addressed`** — his outbound mail's To, Cc AND Bcc; () on inbound mail. A
+deliberate Bcc is addressing, so every reader that asks whom he addressed reads it (round-7
+note 5): the party provenance `observe` writes (`addressed`, `via: owner`), the legacy derivation
+`Case.addressed_at`, the settlement rule's "addressed to the counterparty", the tier rule's "an
+address he wrote to in the conversation", the waiting-on rows (`follow_ups`), the unanswered
+reminder (`mailreport._unanswered`), the "you wrote to …" evidence line, and `aimed_at` /
+`addressed_to`. Two readers mean the VISIBLE recipients and stay on `correspondents` (To/Cc):
+the case tool's "you → …" line, because the model reads it to compose replies and a hidden
+recipient listed there invites a reply that exposes it; and the index's subject fallback, because
+it links mail that carries no reply headers by a guess, and widening the guess to a hidden
+recipient adds links no header of either mail claims. Measured on the frozen copy: no outbound
+header holds a Bcc yet, and nothing changed (grades, membership, the 77 derived items and their
+states, the 4 waiting-on rows, and every case file after `--reobserve`, apart from the new empty
+`withheld` field). `TestWhomHeAddressedIncludesHisBcc` (`tests/test_mailitems.py`),
+`TestHisBccIsAddressingOnTheCase` (`tests/test_mailcases.py`).
+
 **Alias admission is deterministic corroboration, and the corroboration is HIS.** A sender
 domain is admitted on a case when it was seen there in authenticated mail AND he then acted on
 the case TOWARD it — a mail of his with an address at that domain among its To, Cc or Bcc
@@ -230,9 +248,25 @@ everyone there; his act names one address, so such a domain is admitted by nobod
 an inbound reply's case membership: the address itself among To/Cc/Bcc (`Header.addressed` —
 `correspondents` stays To/Cc), or any address at its domain when `MailIndex.names_one_party` says
 the domain names one party — fewer than `mailindex.ENTITY_DOMAIN_MAX_SENDERS` distinct addresses
-at it in any header, the same count the tier rule's `entity` reads. The count only grows as mail is
-indexed, so a domain can only stop naming one party: restrict-only over time
-(`TestBccAndTheSharedDomain` in `tests/test_mailindex.py`). **His Bcc** is
+at it in any header, the same count the tier rule's `entity` reads (`TestBccAndTheSharedDomain` in
+`tests/test_mailindex.py`). **The residual, stated (round-7 review):** `names_one_party` reads ONE
+global address count at the index's size TODAY. The count only grows, so the answer for a domain
+can only go from "one party" to "shared", never back — but a GRANT made while it said "one party"
+is not taken back. On a young index (a fresh install or a rebuild) a shared provider reads as one
+party: on the frozen copy, walking the index in mail-time order from its first mail (2026-09-01),
+gmail.com reached 5 distinct addresses only on 2026-09-09 and wenda.eu on 2026-09-04. An admission
+minted in that window is stored in `case.admitted` and never retracted — `--reobserve` only adds,
+and nothing re-derives admissions. A grade is computed per mail when it is assessed and recorded
+with that verdict, and membership at read time; neither is a grant later decisions read back. An
+admission is: every later decision on the case reads `case.admitted`. The count is also not as-of (a decision cannot be
+replayed with the count it saw), and an unauthenticated mail's To/Cc lists add addresses to it.
+The replacement is a design question, not built (round-7 Step B). **When the count is the reason
+an aim is withheld it is recorded** where the decision already is: an admission his act would
+have minted is written to `case.withheld[domain]` (`at`, `by`: `shared_domain`, `act`) and admits
+nothing; a grade act it withheld is listed in the grade's `withheld` (recorded in every
+`mail_verdict`'s `gate.grade`, never counted). Membership is decided at read time and recorded
+nowhere, so its withholding has no record. On the frozen copy (round 7) both are empty.
+**His Bcc** is
 parsed from his outbound mail only (`Header.bcc`; inbound mail never carries one, and index files
 written before 2026-11-03 load with none — on the frozen copy 0 of 22 outbound headers hold one,
 so it can act only on mail indexed from now on. Whether his Gmail Sent copy's `format full`

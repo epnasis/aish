@@ -138,6 +138,10 @@ class TestAliasAdmission:
         )
         (case,) = [c for c in store.cases.values() if "LS-48213" in c.keys]
         assert case.admitted == {}
+        # Note 2: the withholding is recorded where the admission would be.
+        assert case.withheld["gmail.example"]["by"] == mailindex.AIM_SHARED_DOMAIN
+        loaded = mailcases.Case.from_json(json.loads(json.dumps(case.as_json())))
+        assert loaded.withheld == case.withheld
 
     def test_a_reply_or_forward_addressed_elsewhere_admits_nobody(self):
         """An act toward a sender is addressed TO it: In-Reply-To naming the
@@ -493,3 +497,30 @@ class TestTheReobservation:
         (case,) = mailcases.CaseStore(reply).cases.values()
         assert done.admitted == [f"{case.id}:lampshop.example"]
         assert mailwatch.reobserve(reply).admitted == []
+
+
+class TestHisBccIsAddressingOnTheCase:
+    """Round-7 note 5: the party provenance reads `Header.addressed`."""
+
+    def test_a_party_he_bccd_is_one_he_addressed(self):
+        index, store = build(
+            store_order(),
+            gmail("o", frm=OWNER, to="bip@wenda.example", bcc="desk@lampshop.example",
+                  subject="Re: Order LS-48213", at=T0 + 60, labels=("SENT",)),
+        )
+        (case,) = store.cases.values()
+        his = header(index, gmail("o", frm=OWNER, to="bip@wenda.example",
+                                  bcc="desk@lampshop.example", subject="Re: Order LS-48213",
+                                  at=T0 + 60, labels=("SENT",)))
+        assert case.addressed_at("desk@lampshop.example", index) == his.position
+
+    def test_a_legacy_party_is_derived_from_his_bcc(self):
+        index, store = build(
+            store_order(),
+            gmail("o", frm=OWNER, to="bip@wenda.example", bcc="desk@lampshop.example",
+                  subject="Re: Order LS-48213", at=T0 + 60, labels=("SENT",)),
+        )
+        (case,) = store.cases.values()
+        legacy = mailcases.Case.from_json(case.as_json())
+        legacy.parties["desk@lampshop.example"] = {"at": case.created, "name": ""}
+        assert legacy.addressed_at("desk@lampshop.example", index) is not None

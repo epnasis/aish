@@ -158,6 +158,9 @@ def _mail_line(state_dir: os.PathLike | str, verdicts: mailverdicts.VerdictStore
     ref = f"mail {digest[:MAIL_REF_CHARS]}"
     if header is None:
         return f"  - {ref} {_day(position[0])} (not in the index)"
+    # The VISIBLE recipients (To/Cc), never his Bcc: the model reads this line
+    # to compose replies, and a hidden recipient listed here invites a reply
+    # that exposes it.
     who = ("you → " + _safe(", ".join(header.correspondents), ADDRESS_CHARS)
            if header.direction == "out" else _safe(header.from_addr, ADDRESS_CHARS))
     name = _safe(mailindex.display_name(header.from_value), NAME_CHARS)

@@ -147,7 +147,7 @@ class Evidence:
         return cls(header.digest, tier,
                    amounts=tuple(sorted(ctx.stored_amounts(header.digest))),
                    sender=header.from_addr,
-                   to=header.correspondents if header.direction == "out" else (),
+                   to=header.addressed,
                    when=header.at or ctx.first_read(header.digest))
 
 
@@ -739,7 +739,7 @@ class Context:
         return None
 
     def _aimed(self, item: OpenItem, header: mailindex.Header, own: set[str]) -> bool:
-        if item.counterparty in header.correspondents:
+        if item.counterparty in header.addressed:
             return True
         for mid in header.in_reply_to:
             parent = self.index.reply_parent(mid, header.position)
@@ -871,7 +871,7 @@ class Context:
         he_wrote_to = {
             c for d in item.conversation
             if (h := self.index.get(d)) is not None and h.direction == "out"
-            for c in h.correspondents}
+            for c in h.addressed}
         admitted = {d for c in self.cases_of(item.anchor) for d in c.admitted}
         if sender == item.counterparty or sender in he_wrote_to or domain in admitted:
             found.tier = "same counterparty"
@@ -1007,9 +1007,9 @@ def follow_ups(ctx: Context) -> tuple[list[mailreport.FollowUp], list[mailreport
             continue
         outs = [h for h in conversation if h.direction == "out"]
         members = frozenset(h.digest for h in conversation)
-        parties = sorted({c for h in outs for c in h.correspondents} - mine - listy - {""})
+        parties = sorted({c for h in outs for c in h.addressed} - mine - listy - {""})
         for party in parties:
-            his = [h for h in outs if party in h.correspondents][-1]
+            his = [h for h in outs if party in h.addressed][-1]
             answers = [h for h in conversation
                        if h.direction == "in" and h.from_addr == party
                        and h.digest not in ctx.copies

@@ -181,7 +181,10 @@ class TestLedger:
                       at=T0 + 60, in_reply_to="m@gmail.example", labels=("SENT",))
         later = gmail("l", frm="stranger@gmail.example", subject="Sofa?", at=T0 + DAY)
         index = index_of(*fillers, ask, reply, later)
-        assert self.grade(index, later).acts == 0
+        grade = self.grade(index, later)
+        assert grade.acts == 0
+        assert grade.withheld == ("replied",)  # note 2: recorded, never counted
+        assert grade.as_json()["withheld"] == ["replied"]
 
     def test_a_bcc_to_the_address_is_writing_to_it(self):
         """N2: a deliberate Bcc of his is addressing."""

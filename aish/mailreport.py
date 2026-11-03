@@ -691,7 +691,7 @@ class _Preferences:
     def _unanswered(self, index: mailindex.MailIndex, mine: frozenset[str], party: str,
                     days: int, now: float) -> bool:
         his = [h.at for h in index.by_digest.values()
-               if h.direction == "out" and party in h.correspondents]
+               if h.direction == "out" and party in h.addressed]
         if not his:
             return False
         last = max(his)

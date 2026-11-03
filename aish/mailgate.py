@@ -427,6 +427,9 @@ class Grade:
     inbound: int = 0  # RECORDED; no line below reads it
     authenticated: bool = False
     how: tuple[str, ...] = field(default=())  # which act kinds were seen
+    # Act kinds his mail WOULD have earned but for the domain naming no single
+    # party (`mailindex.AIM_SHARED_DOMAIN`) — observable, never counted.
+    withheld: tuple[str, ...] = field(default=())
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -437,6 +440,7 @@ class Grade:
             "inbound": self.inbound,
             "authenticated": self.authenticated,
             "how": list(self.how),
+            "withheld": list(self.withheld),
         }
 
 
@@ -445,6 +449,7 @@ def owner_acts(
     address: str,
     as_of: tuple[float, str],
     owner_case_parties: dict[str, list[float]] | None = None,
+    withheld: list[tuple[float, str]] | None = None,
 ) -> list[tuple[float, str]]:
     """Every owner act toward `address` at or before `as_of`, as (at, kind).
 
@@ -469,7 +474,11 @@ def owner_acts(
         # must not become acts toward it. And it must be ADDRESSED to the
         # sender's domain (`mailindex.aimed_at`): a forward of its mail to
         # someone else is not an act toward it.
-        if not mailindex.aimed_at(header, address, index):
+        why = mailindex.aim(header, address, index)
+        if why not in (mailindex.AIM_ADDRESS, mailindex.AIM_DOMAIN):
+            if why == mailindex.AIM_SHARED_DOMAIN and withheld is not None and _replies_to(
+                    index, header, address):
+                withheld.append((header.at, "replied"))
             continue
         for parent_id in header.in_reply_to:
             parent = index.reply_parent(parent_id, header.position)
@@ -487,6 +496,16 @@ def owner_acts(
     return sorted(acts)
 
 
+def _replies_to(index: mailindex.MailIndex, header: mailindex.Header, address: str) -> bool:
+    """His mail's OWN In-Reply-To names an earlier inbound mail from `address`."""
+    for parent_id in header.in_reply_to:
+        parent = index.reply_parent(parent_id, header.position)
+        if (parent is not None and parent.direction == "in" and parent.from_addr == address
+                and parent.position < header.position):
+            return True
+    return False
+
+
 def grade(
     index: mailindex.MailIndex,
     header: mailindex.Header,
@@ -499,7 +518,8 @@ def grade(
     inbound = sum(
         1 for h in index.before(as_of) if h.direction == "in" and h.from_addr == address
     )
-    acts = owner_acts(index, address, as_of, owner_case_parties)
+    withheld: list[tuple[float, str]] = []
+    acts = owner_acts(index, address, as_of, owner_case_parties, withheld)
     days = sorted({int(at // 86400) for at, _kind in acts})
     first = acts[0][0] if acts else None
     age = (header.at - first) / 86400 if first is not None else None
@@ -516,4 +536,5 @@ def grade(
         level = ESTABLISHED
     else:
         level = KNOWN
-    return Grade(level, len(days), first, age, inbound, auth.authenticated, how)
+    return Grade(level, len(days), first, age, inbound, auth.authenticated, how,
+                 tuple(sorted({kind for _at, kind in withheld})))

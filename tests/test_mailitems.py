@@ -57,10 +57,10 @@ def tuta_copy(state, original: mailindex.Header, *, gid: str = "copy", skew: flo
 
 
 def his_sent(state, gid: str, *, to: str, at: float, subject: str, cc: str = "",
-             in_reply_to: str = "", frm: str = OWNER) -> mailindex.Header:
+             in_reply_to: str = "", frm: str = OWNER, bcc: str = "") -> mailindex.Header:
     header = add_mail(state, gid, frm=frm, to=to + (f", {cc}" if cc else ""), at=at,
                       subject=subject, sent=True, mid=f"{gid}@owner.example",
-                      in_reply_to=in_reply_to)
+                      in_reply_to=in_reply_to, bcc=bcc)
     return header
 
 
@@ -755,3 +755,39 @@ class TestAOneTimeCodeMailContributesNoKeys:
         assert context.keys(code.digest) == frozenset()
         assert not context._trusted_fact({"kind": "order", "at": list(code.position)})
         assert context._trusted_fact({"kind": "order", "at": list(his.position)})
+
+
+class TestWhomHeAddressedIncludesHisBcc:
+    """Round-7 note 5: one answer to "whom he addressed" (`Header.addressed`,
+    To+Cc+Bcc) for every reader of his addressing. In each test the Bcc is the
+    ONLY route by which he addressed the party."""
+
+    def test_his_bcc_to_the_counterparty_settles_by_the_rule(self, tmp_path):
+        offer = add_mail(tmp_path, "n1", frm="agent@broker.example", subject="Offer",
+                         at=NOW - 3 * DAY, mid="offer@broker.example")
+        add_verdict(tmp_path, offer, wanted="decide", recorded_at=NOW - 3 * DAY)
+        his_sent(tmp_path, "o1", to="assistant@other.example", bcc="agent@broker.example",
+                 at=NOW - 2 * DAY, subject="Offer accepted")
+        (item,) = [i for i in ctx(tmp_path).derive().items() if i.kind == mailitems.NEEDS]
+        state = ctx(tmp_path).state_of(item)
+        assert state.source == mailitems.RULE
+        assert "agent@broker.example" in state.evidence.to
+
+    def test_a_party_he_only_bccd_is_waited_on(self, tmp_path):
+        his_sent(tmp_path, "o2", to="desk@else.example", bcc="carol@shop.example",
+                 at=NOW - 10 * DAY, subject="Return")
+        waited = {t.open_item.counterparty for t in ctx(tmp_path).derive().theirs}
+        assert "carol@shop.example" in waited
+
+    def test_an_address_he_bccd_in_the_conversation_is_tier_b(self, tmp_path):
+        pay_item(tmp_path)
+        his_sent(tmp_path, "o1", to="other@else.example", bcc="treasurer@bank.example",
+                 at=NOW - 2 * DAY - 3600, subject="Re: Pay", in_reply_to="n1@swim.example")
+        paid = add_mail(tmp_path, "k1", frm="treasurer@bank.example", subject="Re: Pay",
+                        at=NOW - 2 * DAY, references="<n1@swim.example>",
+                        body="Payment received, all settled.")
+        add_verdict(tmp_path, paid, recorded_at=NOW - 2 * DAY)
+        context = ctx(tmp_path)
+        (item,) = [i for i in context.derive().items() if i.kind == mailitems.NEEDS]
+        found = [c for c in context.candidates(item) if c.header.digest == paid.digest]
+        assert found and found[0].tier == "same counterparty"

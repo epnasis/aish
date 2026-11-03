@@ -395,6 +395,10 @@ class Case:
     amounts: list[dict[str, Any]] = field(default_factory=list)  # {currency, cents, at}
     coordinates: list[dict[str, Any]] = field(default_factory=list)  # {value, at}
     proposals: dict[str, int] = field(default_factory=dict)  # "domain" -> count
+    # domain -> {at, by, act}: an admission his act would have minted but for
+    # the domain naming no single party (`mailindex.AIM_SHARED_DOMAIN`).
+    # Recorded so the withholding is observable; it admits nothing.
+    withheld: dict[str, dict[str, Any]] = field(default_factory=dict)
     # What the OWNER said about the case (the case verbs, `CaseStore.act`).
     # Code never writes these from mail: a title from his rename, a closure
     # from his close, and so on. Files written before them read as an open,
@@ -424,6 +428,7 @@ class Case:
             "amounts": [{**a, "at": list(a["at"])} for a in self.amounts],
             "coordinates": [{**c, "at": list(c["at"])} for c in self.coordinates],
             "proposals": dict(self.proposals),
+            "withheld": {d: {**v, "at": list(v["at"])} for d, v in self.withheld.items()},
             "title": self.title,
             "status": self.status,
             "closed_at": self.closed_at,
@@ -455,6 +460,7 @@ class Case:
             amounts=[{**a, "at": _pos(a["at"])} for a in raw.get("amounts") or ()],
             coordinates=[{**c, "at": _pos(c["at"])} for c in raw.get("coordinates") or ()],
             proposals={str(k): int(v) for k, v in (raw.get("proposals") or {}).items()},
+            withheld=stamped("withheld"),
             title=str(raw.get("title") or ""),
             status=CLOSED if raw.get("status") == CLOSED else OPEN,
             closed_at=float(raw["closed_at"]) if raw.get("closed_at") is not None else None,
@@ -528,7 +534,7 @@ class Case:
             return None
         his = [p for p in self.mails
                if (h := index.get(p[1])) is not None and h.direction == "out"
-               and address in h.correspondents]
+               and address in h.addressed]
         return min(his) if his else None
 
     def last_before(self, as_of: Position) -> Position | None:
@@ -771,7 +777,7 @@ class CaseStore:
             if header.direction == "out":
                 if case.created != position:
                     case.owner_acts.append(position)
-                for addr in header.correspondents:
+                for addr in header.addressed:
                     info = case.parties.setdefault(
                         addr, {"at": position, "name": "", "via": OWNER_ADDRESSED})
                     # A party that joined inbound becomes one he ADDRESSED only
@@ -873,10 +879,15 @@ class CaseStore:
         the Airbnb mail in its In-Reply-To and is addressed to nobody at Airbnb."""
         out = []
         for domain, seen in case.domains.items():
-            if (mailindex.aimed_at(header, domain, index) and domain not in case.admitted
-                    and seen < header.position):
+            if domain in case.admitted or not seen < header.position:
+                continue
+            why = mailindex.aim(header, domain, index)
+            if why in (mailindex.AIM_ADDRESS, mailindex.AIM_DOMAIN):
                 case.admitted[domain] = {"at": header.position, "by": "owner_act_toward_sender"}
                 out.append(f"{case.id}:{domain}")
+            elif why == mailindex.AIM_SHARED_DOMAIN and domain not in case.withheld:
+                case.withheld[domain] = {"at": header.position, "by": why,
+                                         "act": header.digest}
         return out
 
     def propose(self, case_id: str, domain: str) -> None:
