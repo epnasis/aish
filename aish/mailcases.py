@@ -718,12 +718,13 @@ class CaseStore:
         body: str,
         authenticated: bool,
         index: mailindex.MailIndex | None = None,
+        reader_kind: str = "",
     ) -> Observation:
         """Fold one mail into the case store. Deterministic; idempotent per
         mail (a mail already on a case changes nothing)."""
         position = header.position
         text = f"{header.subject}\n{body}"
-        keys = mail_keys(header.subject, text)
+        keys = mail_keys(header.subject, text, reader_kind)
         touched: dict[str, Case] = {}
         for key in keys:
             for case in self.by_key(key):
@@ -790,7 +791,8 @@ class CaseStore:
             self._save(case)
         return Observation(keys, tuple(sorted(touched)), created, tuple(admitted))
 
-    def record_authenticated(self, case: Case, header: mailindex.Header, body: str) -> bool:
+    def record_authenticated(self, case: Case, header: mailindex.Header, body: str,
+                             reader_kind: str = "") -> bool:
         """The facts observation records only from TRUSTED mail — for a mail
         already on `case` that was observed unauthenticated and is
         authenticated now (the Tuta recheck): exactly `_record_facts`, keys
@@ -799,7 +801,8 @@ class CaseStore:
         if header.direction != "in" or header.position not in case.mails:
             return False
         text = f"{header.subject}\n{body}"
-        changed = self._record_facts(case, header, text, True, mail_keys(header.subject, text))
+        changed = self._record_facts(case, header, text, True,
+                                     mail_keys(header.subject, text, reader_kind))
         if changed:
             self._save(case)
         return changed

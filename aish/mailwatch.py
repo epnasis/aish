@@ -302,7 +302,9 @@ def assess(
         )
     verdict = reading.verdict
     code_coordinates = mailcases.extract_coordinates(f"{header.subject}\n{body}")
-    keys = set(mailcases.mail_keys(header.subject, f"{header.subject}\n{body}"))
+    # The verdict is in hand here: the one-time-code rule reads its kind too.
+    keys = set(mailcases.mail_keys(header.subject, f"{header.subject}\n{body}",
+                                   verdict.kind if verdict is not None else ""))
     linked = _case_ids_by_key(store, header, keys)
     if verdict is not None and reading.bundle is not None:
         mailverdicts.count_verdict(verdict)
@@ -1003,6 +1005,15 @@ def recheck_tuta_auth(
     return result
 
 
+def recorded_kind(verdicts: mailverdicts.VerdictStore, digest: str) -> str:
+    """The Reader's `kind` on the newest recorded verdict of this mail, or ""."""
+    held = (verdicts.read(digest) or {}).get("by_model") or {}
+    records = [r for r in held.values()
+               if isinstance(r, dict) and isinstance(r.get("verdict"), dict)]
+    newest = max(records, key=lambda r: float(r.get("recorded_at") or 0), default=None)
+    return str((newest or {}).get("verdict", {}).get("kind") or "")
+
+
 def _follow_authentication(
     index: mailindex.MailIndex,
     store: mailcases.CaseStore,
@@ -1015,6 +1026,11 @@ def _follow_authentication(
     `CaseStore.observe` matches keys against the whole store, so an older mail
     can join a case a later mail opened (the backfill's stated limit); every
     other step here asks only about positions before the mail."""
+    verdicts = mailverdicts.VerdictStore(state_dir)
+
+    def kind_of(digest: str) -> str:
+        return recorded_kind(verdicts, digest)
+
     authenticated: dict[str, mailindex.Header] = {}
     for digest, parsed in found.items():
         held = index.get(digest)
@@ -1051,7 +1067,8 @@ def _follow_authentication(
             header = authenticated[header.digest]
             body = found[header.digest].body
             if not on and header.digest not in moved:
-                observation = store.observe(header, body, True, index)
+                observation = store.observe(header, body, True, index,
+                                            kind_of(header.digest))
                 result.observed += 1
                 result.admitted += len(observation.admitted)
                 changed.update(observation.cases)
@@ -1060,14 +1077,15 @@ def _follow_authentication(
             # a target stays a target until its header is recorded (last), so a
             # run interrupted after its case writes rebuilds both on the redo.
             for case in on:
-                if store.record_authenticated(case, header, body):
+                if store.record_authenticated(case, header, body, kind_of(header.digest)):
                     result.gained_facts += 1
                 changed.add(case.id)
             if on:
                 # Later mail on no case carrying one of its keys would have
                 # joined, had this mail arrived authenticated.
                 run_keys.update(mailcases.mail_keys(header.subject,
-                                                    f"{header.subject}\n{body}"))
+                                                    f"{header.subject}\n{body}",
+                                                    kind_of(header.digest)))
             continue
         if on:
             if header.direction == "out":
@@ -1078,12 +1096,14 @@ def _follow_authentication(
         if header.digest in moved or not run_keys:
             continue
         body = index.body(header.digest) or ""
-        keys = mailcases.mail_keys(header.subject, f"{header.subject}\n{body}")
+        keys = mailcases.mail_keys(header.subject, f"{header.subject}\n{body}",
+                                   kind_of(header.digest))
         # Every `run_keys` entry was put there by a mail EARLIER in this
         # position-ordered loop, so a key in it is a key on a case before this mail.
         if any(k in run_keys for k in keys):
             auth = mailgate.authenticate_header(header)
-            observation = store.observe(header, body, auth.authenticated, index)
+            observation = store.observe(header, body, auth.authenticated, index,
+                                        kind_of(header.digest))
             result.observed += 1
             result.admitted += len(observation.admitted)
             changed.update(observation.cases)

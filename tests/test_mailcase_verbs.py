@@ -514,3 +514,27 @@ class TestTheThreeSurfacesAgree:
         view, csv_text, report = self.surfaces(tmp_path)
         assert "RELEASED" in view and "released: you closed its case" in csv_text
         assert all(i.reading.digest != record["mail"] for i in report.interest)
+
+
+class TestTheVerdictsKindReachesTheKeys:
+    """Round-5 note 3: assessment and the recheck had the verdict in hand but
+    called the key rule without the Reader's kind, so a code mail with a
+    neutral subject still contributed keys."""
+
+    def test_assessment_reads_the_kind_it_just_got(self, tmp_path):
+        charter = reader_charter()
+        admit(tmp_path, charter, MODEL)
+        mails = [gmail("i1", frm="verify@broker.example", subject="Let's confirm your email",
+                       body="Confirmation 5-17927992435000278-753139", at=T0)]
+        reader = ScriptedReader(lambda b: verdict_json(
+            disposition="archive", kind="verification code", citations=[b["mail"]]))
+        mailwatch.run_once(mailboxes=[FakeMailbox(mails)], state_dir=tmp_path,
+                           owner_addresses=frozenset({OWNER}), model_spec=MODEL,
+                           charter=charter, chat=reader, now=lambda: T0 + DAY)
+        (record,) = list(mailverdicts.iter_store(tmp_path))
+        assert record["verdict"]["kind"] == "verification code"
+        assert not record.get("keeper_clamped")  # no case_key signal from a code's key
+        # The recheck reads the same kind back from the store.
+        assert mailwatch.recorded_kind(mailverdicts.VerdictStore(tmp_path),
+                                       record["mail"]) == "verification code"
+

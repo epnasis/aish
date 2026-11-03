@@ -665,6 +665,9 @@ mail each (`10021306947-01`, `10021579307-01`, `10021925290-01`/`-02`, `26150944
 correlator, assessment and the items' key reader; and `Context._trusted_fact` refuses a key such a
 mail recorded). Restrict-only. Measured: lost exactly two keys, both Interactive Brokers sign-in
 confirmations (`5-17927992435000278-753139`, `5-17935414849320950-789728`); gained none.
-**Residual, stated:** at ingest there is no reading yet, so only the subject half applies there; and
+Assessment passes the verdict it just received, and the Tuta recheck the newest recorded one
+(`mailwatch.recorded_kind`), so the Reader's half applies wherever a verdict is in hand (round-5
+note 3, `TestTheVerdictsKindReachesTheKeys`). **Residual, stated:** at INGEST there is no reading
+yet, so only the subject half applies there; and
 a phone number directly after an introducing word in an ordinary mail still keys (none on the
 frozen copy). `TestAOneTimeCodeMailContributesNoKeys`.
