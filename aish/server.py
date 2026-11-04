@@ -43,7 +43,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -1931,6 +1931,11 @@ class Client:
         self.ws = ws
         self.outbox: asyncio.Queue = asyncio.Queue()
         self.viewing: Session | None = None
+        # The (chat, provider, name) this connection last switched to; ＋ starts
+        # there. Unset, a new chat starts on the saved default — inheriting from
+        # whatever chat happened to be on screen (an old one, or the landing chat
+        # a fresh phone opens on) is what kept a saved default from being used.
+        self.chosen_model: tuple | None = None
         self.sender: asyncio.Task | None = None
         # The chat whose browse tab this connection is WATCHING (#289 slice 2),
         # "" when it is not. Per-client and not per-session: a watcher exists
@@ -2085,6 +2090,10 @@ class WebServer:
         self.shares_path = state_dir / "shares.json"
         self.shares: list[dict] = self._load_shares()
         self.config_path = config_path
+        # Set by create_app: how a saved default reaches the next new chat, and
+        # what (if anything) pins the model at launch over config.toml.
+        self.set_new_chat_backend = None
+        self.model_pinned_by = ""
         # The token is UNCONDITIONAL (#178 P1-2): with none configured, a
         # random per-run token is generated here and printed in the launch URL
         # by main(). There is no token-less mode — the `!` path is ungated by
@@ -5031,17 +5040,15 @@ class WebServer:
     async def _new_session(self, client: Client) -> None:
         self._evict_idle()
         session, _ = await asyncio.to_thread(self.open_session, None)
-        # A new chat inherits the model this client is currently using (like
-        # ChatGPT/Claude apps); the saved default applies only at server start.
-        source = client.viewing.agent if client.viewing is not None else None
+        # A model this client switched to stays for its next new chat (like
+        # the ChatGPT/Claude apps); otherwise open_session's saved default.
         if (
-            source is not None
-            and getattr(source, "provider", "ollama") != "claude-max"
+            client.chosen_model is not None
             and getattr(session.agent, "provider", "ollama") != "claude-max"
         ):
-            session.agent.chat = source.chat
-            session.agent.model = source.model
-            session.agent.provider = getattr(source, "provider", "ollama")
+            session.agent.chat, session.agent.provider, session.agent.model = (
+                client.chosen_model
+            )
             session.logref.model(model_spec(session.agent))
         self.add_session(session, default=False)
         await self._show(client, session)
@@ -5425,6 +5432,7 @@ class WebServer:
         session.agent.model = name
         session.agent.provider = provider
         session.logref.model(model_spec(session.agent))
+        client.chosen_model = (chat, provider, name)
         saved = False
         if message.get("save"):
             if self.config_path is None:
@@ -5435,10 +5443,18 @@ class WebServer:
                     await self._refuse(client, error)
                 else:
                     saved = True
+                    if self.set_new_chat_backend is not None:
+                        self.set_new_chat_backend((chat, provider, name))
+        changed: dict = {
+            "type": "model_changed", "model": model_spec(session.agent), "saved": saved
+        }
+        if saved and self.model_pinned_by:
+            # The save reached config.toml and this running server, but the
+            # launch pins its own model and that pin wins at the next start —
+            # saying only "saved as default" would be a promise the restart breaks.
+            changed["pinned_by"] = self.model_pinned_by
         session.bridge.emit({"type": "echo", "text": f"model switched to {spec}"})
-        await client.ws.send_json(
-            {"type": "model_changed", "model": model_spec(session.agent), "saved": saved}
-        )
+        await client.ws.send_json(changed)
 
     async def _cd(self, client: Client, path: str) -> None:
         session = client.viewing
@@ -7268,6 +7284,17 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         return JSONResponse(payload, headers={"ETag": etag, "Cache-Control": "no-store"})
 
 
+def startup_model(flag: str | None, env: Mapping[str, str], config: dict) -> tuple[str, str]:
+    """(spec, what pins it). A `--model` flag or $AISH_MODEL wins over
+    config.toml's saved default at every start, so it is named back to whoever
+    saves a default; "" means the saved default is what decided."""
+    if flag:
+        return flag, f"--model {flag}"
+    if env.get("AISH_MODEL"):
+        return env["AISH_MODEL"], f"AISH_MODEL={env['AISH_MODEL']}"
+    return str(config.get("model") or "qwen3.6:35b-a3b"), ""
+
+
 def create_app(
     model: str,
     *,
@@ -7289,6 +7316,7 @@ def create_app(
     trigger_rate_capacity: float = TRIGGER_RATE_CAPACITY,
     trigger_rate_refill_s: float = TRIGGER_RATE_REFILL_S,
     max_concurrent_triggered: int = MAX_CONCURRENT_TRIGGERED,
+    model_pinned_by: str = "",
 ) -> Starlette:
     """The Starlette app; client_chat injects a scripted backend (tests).
 
@@ -7324,6 +7352,17 @@ def create_app(
         chat, provider, model_name = None, "claude-max", model.partition(":")[2]
     else:
         chat, provider, model_name = backends.make_chat(model)
+    # What a chat with no model of its own starts on. Mutable because saving a
+    # model as the default must reach the NEXT new chat, not only the next
+    # server start — the saved default used to apply only at restart, so a
+    # save looked like it had been ignored.
+    # One tuple under one key: the save writes it on the event loop while
+    # open_session reads it on a worker thread, and three separate keys could
+    # be read half-old, half-new — a chat logged as one model, served by another.
+    new_chat_backend = {"backend": (chat, provider, model_name)}
+
+    def set_new_chat_backend(built: tuple) -> None:
+        new_chat_backend["backend"] = built
 
     context = "\n\n".join(
         part
@@ -7366,6 +7405,7 @@ def create_app(
         BackendError before the session log exists, because silently falling
         back to the (possibly cloud) default is exactly the leak the
         override exists to prevent."""
+        chat, provider, model_name = new_chat_backend["backend"]
         history: list[dict] = []
         recorded_spec = ""
         custom_title: str | None = None
@@ -7638,7 +7678,7 @@ def create_app(
             # differently (exact here, suffix there).
             agent.restore_egress_vouches(SessionLog.egress_vouches(path))
             # Resume with the model this session last used (the drawer shows
-            # it); fall back to the startup model when it can't be built.
+            # it); fall back to the new-chat default when it can't be built.
             if (
                 recorded_spec
                 and recorded_spec != model_spec(agent)
@@ -7718,6 +7758,10 @@ def create_app(
     server = WebServer(
         open_session, state_dir, config_path, token, dir_ignore_patterns, console_command
     )
+    server.set_new_chat_backend = (
+        None if provider == "claude-max" else set_new_chat_backend
+    )
+    server.model_pinned_by = model_pinned_by
     server.public_url = public_url  # notification deep-link base (#163)
     server.base_cwd = cwd  # baseline for the session rows' directory label
     # /trigger guards (#178 P1-10), injectable so tests exercise the limits
@@ -7799,8 +7843,9 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8787, help="port (default: 8787)")
     parser.add_argument(
         "--model",
-        default=os.environ.get("AISH_MODEL") or config.get("model") or "qwen3.6:35b-a3b",
-        help="model spec, same forms as aish --model",
+        default=None,
+        help="model spec, same forms as aish --model; pins the model over config.toml's "
+        "saved default (default: $AISH_MODEL, else config.toml, else qwen3.6:35b-a3b)",
     )
     parser.add_argument(
         "--num-ctx", type=int, default=int(config.get("num_ctx", 32768)),
@@ -7817,12 +7862,14 @@ def main() -> int:
         help="prompt for every command, including read-only ones",
     )
     args = parser.parse_args()
+    args.model, model_pinned_by = startup_model(args.model, os.environ, config)
 
     token = os.environ.get("AISH_WEB_TOKEN") or None
     try:
         app = create_app(
             args.model,
             config_path=config_path,
+            model_pinned_by=model_pinned_by,
             num_ctx=args.num_ctx,
             max_steps=args.max_steps,
             think=args.think,

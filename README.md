@@ -1115,7 +1115,12 @@ older `/session` still works), `/help`, `/quit`.
 **Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
 `vi_mode`, and an `[aliases]` table (aish-level aliases, since commands run
 through a non-interactive shell that never sources your `~/.zshrc`). CLI flags
-override config; `$AISH_MODEL` overrides the model. Paths override via
+override config; `$AISH_MODEL` overrides the model. Saving a model as the
+default (`/model --save`, or **make startup default** in the web model list)
+writes `model` here. A save made in the web UI also applies to aish-web's next
+new chat at once; a terminal `/model --save` reaches a running aish-web only
+when it restarts. A launch `--model`/`$AISH_MODEL` wins at every restart — the
+web toast says so. Paths override via
 `$AISH_CONFIG`, `$AISH_STATE_DIR`, `$AISH_ALLOWLIST`, `$AISH_DENYLIST`.
 
 **Step budget** is *progress-gated*: a task making progress runs past the base

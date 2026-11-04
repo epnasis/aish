@@ -8,6 +8,11 @@
 #   AISH_WEB_TOKEN=$(openssl rand -hex 16) GEMINI_API_KEY=... \
 #       scripts/install-web-service.sh <ssh-host> [model] [bind-address]
 #
+# With no model, the service starts on config.toml's `model` (what "make
+# startup default" in the web UI writes). Passing one PINS it: it then wins
+# over the saved default at every restart. Pass "" to skip it and still give
+# a bind-address.
+#
 # bind-address defaults to 0.0.0.0 (all interfaces); pass the machine's IP
 # on one network (e.g. 192.168.1.20) to serve only that subnet. Pass any
 # provider key your chosen model needs (GEMINI_API_KEY / OPENAI_API_KEY /
@@ -15,11 +20,16 @@
 set -euo pipefail
 
 HOST="${1:?usage: install-web-service.sh <ssh-host> [model] [bind-address]}"
-MODEL="${2:-gemini:gemini-3.5-flash}"
+MODEL="${2:-}"
 BIND="${3:-0.0.0.0}"
 : "${AISH_WEB_TOKEN:?set AISH_WEB_TOKEN (e.g. \$(openssl rand -hex 16))}"
 
 LABEL="com.aish.web"
+MODEL_ARGS=""
+if [ -n "$MODEL" ]; then
+    MODEL_ARGS="        <string>--model</string><string>${MODEL}</string>
+"
+fi
 ENV_LINES=""
 for var in GEMINI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY; do
     value="${!var:-}"
@@ -42,8 +52,7 @@ ssh "$HOST" "mkdir -p ~/Library/LaunchAgents ~/Library/Logs && cat > '$PLIST_PAT
     <array>
         <string>${REMOTE_HOME}/.local/bin/aish-web</string>
         <string>--host</string><string>${BIND}</string>
-        <string>--model</string><string>${MODEL}</string>
-    </array>
+${MODEL_ARGS}    </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>AISH_WEB_TOKEN</key><string>${AISH_WEB_TOKEN}</string>

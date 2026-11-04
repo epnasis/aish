@@ -19519,7 +19519,11 @@ function onModelChanged(event) {
   showModelName(event.model);
   setCtxFill(null); // the last figure was against the previous model's window
   closeSheets();
-  showToast(event.saved ? `model: ${event.model} (saved as default)` : `model: ${event.model}`);
+  if (!event.saved) showToast(`model: ${event.model}`);
+  else if (event.pinned_by) {
+    showToast(`model: ${event.model} (saved as default — but this server starts with ` +
+      `${event.pinned_by}, which wins after a restart)`);
+  } else showToast(`model: ${event.model} (saved as default)`);
 }
 
 // workspace

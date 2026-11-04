@@ -5581,6 +5581,94 @@ class TestModels:
             hello = recv_until(ws, "hello")
             assert hello["model"] == "gemini:gemini-3-pro"  # sticky, not reset
 
+    def test_saved_default_reaches_a_new_chat_without_a_restart(self, app_env, monkeypatch):
+        """The reported bug: "make startup default" was written to config.toml
+        but a new chat opened later (a fresh connection, e.g. the phone) still
+        started on the model the server was launched with."""
+        new_chat = FakeChat([])
+        monkeypatch.setattr(
+            server_module.backends,
+            "make_chat",
+            lambda spec: (new_chat, "gemini", "gemini-3-pro"),
+        )
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, _, _):
+                ws.send_json(
+                    {"type": "set_model", "spec": "gemini:gemini-3-pro", "save": True}
+                )
+                assert recv_until(ws, "model_changed")["saved"] is True
+            with connected(client) as (ws, _, _):
+                ws.send_json({"type": "new"})
+                assert recv_until(ws, "hello")["model"] == "gemini:gemini-3-pro"
+            server = client.app.state.server
+            session, _ = server.open_session(None)  # automations open chats here too
+            assert session.agent.chat is new_chat
+
+    def test_a_switch_without_save_does_not_change_other_connections(
+        self, app_env, monkeypatch
+    ):
+        monkeypatch.setattr(
+            server_module.backends,
+            "make_chat",
+            lambda spec: (FakeChat([]), "gemini", "gemini-3-pro"),
+        )
+        client, _ = make_client(app_env, [])
+        with client:
+            with connected(client) as (ws, _, _):
+                ws.send_json({"type": "set_model", "spec": "gemini:gemini-3-pro"})
+                recv_until(ws, "model_changed")
+            with connected(client) as (ws, _, _):
+                ws.send_json({"type": "new"})
+                assert recv_until(ws, "hello")["model"] == "fake"
+
+    def test_new_chat_starts_on_the_default_not_the_viewed_chat(
+        self, app_env, monkeypatch
+    ):
+        """Looking at an old chat on another model and pressing ＋ used to copy
+        that chat's model, so the saved default never got a say."""
+        monkeypatch.setattr(
+            server_module.backends,
+            "make_chat",
+            lambda spec: (FakeChat([]), "gemini", "gemini-old"),
+        )
+        old = SessionLog.new(Path(app_env["state_dir"]))
+        old.model("gemini:gemini-old")
+        old.message({"role": "user", "content": "hi"})
+        client, _ = make_client(app_env, [])
+        with client, connected(client, f"/ws?session={old.path.name}") as (ws, hello, _):
+            assert hello["model"] == "gemini:gemini-old"
+            ws.send_json({"type": "new"})
+            assert recv_until(ws, "hello")["model"] == "fake"
+
+    def test_saving_under_a_launch_pin_says_the_pin_wins_at_restart(
+        self, app_env, monkeypatch
+    ):
+        monkeypatch.setattr(
+            server_module.backends,
+            "make_chat",
+            lambda spec: (FakeChat([]), "gemini", "gemini-3-pro"),
+        )
+        client, _ = make_client(app_env, [], model_pinned_by="--model gemini:gemini-old")
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "set_model", "spec": "gemini:gemini-3-pro", "save": True})
+            changed = recv_until(ws, "model_changed")
+            assert changed["saved"] is True
+            assert changed["pinned_by"] == "--model gemini:gemini-old"
+            ws.send_json({"type": "set_model", "spec": "gemini:gemini-3-pro"})
+            assert "pinned_by" not in recv_until(ws, "model_changed")  # not a save
+
+    def test_startup_model_names_what_pins_it(self):
+        config = {"model": "gemini:saved"}
+        assert server_module.startup_model(None, {}, config) == ("gemini:saved", "")
+        assert server_module.startup_model("gemini:flag", {"AISH_MODEL": "e"}, config) == (
+            "gemini:flag", "--model gemini:flag"
+        )
+        assert server_module.startup_model(None, {"AISH_MODEL": "gemini:env"}, config) == (
+            "gemini:env", "AISH_MODEL=gemini:env"
+        )
+        assert server_module.startup_model(None, {}, {}) == ("qwen3.6:35b-a3b", "")
+
     def test_toggle_model_switches_to_the_last_cloud_model(self, app_env, monkeypatch):
         """Cmd+M from a local model: the server reads which cloud model a chat
         used last and switches to it through the ordinary set_model path."""
