@@ -165,6 +165,7 @@ from .session import (
     to_record_form,
     trash_session,
 )
+from .termmodes import TerminalModes
 
 if TYPE_CHECKING:
     from .claude_max import ClaudeMaxAgent
@@ -2141,6 +2142,10 @@ class WebServer:
         self.console: PtySession | None = None
         self.console_viewers: set[Client] = set()  # clients with the overlay open
         self.console_tmux = False  # True once spawned tmux-backed (restart-surviving)
+        # What the outer terminal has been told (mouse reporting, alternate screen,
+        # ...): replayed to every emulator that joins the running console, because
+        # tmux re-asserts it only on a resize — see termmodes.py.
+        self.console_modes = TerminalModes()
         # Injectable spawn command (tests pass a trivial echo loop so no tmux/shell
         # is needed); None → auto-detect tmux-or-$SHELL at first open.
         self.console_command = console_command
@@ -4375,6 +4380,7 @@ class WebServer:
         marshals via call_soon_threadsafe), so touching the outboxes is safe.
         Pushed straight to outboxes, never through a bridge — console I/O is
         global and NEVER recorded into any session's transcript (issue #148)."""
+        self.console_modes.feed(text)
         for client in self.console_viewers:
             client.outbox.put_nowait({"type": "console_out", "data": text})
 
@@ -4408,6 +4414,7 @@ class WebServer:
             await client.ws.send_json(
                 {"type": "console_started", "command": self._console_label(), "cwd": cwd}
             )
+            self.console_modes = TerminalModes()  # a new client starts from defaults
             self.console = PtySession(
                 command, cwd, self._console_out, self._console_exit, loop
             )
@@ -4420,6 +4427,20 @@ class WebServer:
                     "cwd": self._console_cwd(),
                 }
             )
+            # The newcomer's emulator is brand new, but the tmux CLIENT is not:
+            # tmux told the first emulator which modes to run in (mouse
+            # reporting, alternate screen, bracketed paste) and re-asserts them
+            # only on a resize. A same-size reopen would repaint the content into
+            # an emulator in its defaults — a wheel over Claude's TUI then scrolls
+            # xterm's own empty scrollback and the program never hears of it.
+            # Replay the observed state to THIS viewer before the repaint: through
+            # its outbox, so it is serialised with every other console_out and
+            # lands after the console_started the client resets its screen on,
+            # and enqueued BEFORE the refresh is poked, so the repaint can never
+            # reach the emulator ahead of the alternate-screen switch.
+            replay = self.console_modes.replay()
+            if replay:
+                client.outbox.put_nowait({"type": "console_out", "data": replay})
             self._console_refresh()
 
     def _console_label(self) -> str:

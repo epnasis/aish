@@ -8208,6 +8208,86 @@ class TestGlobalConsole:
             assert client.app.state.server.console is first
             ws.send_json({"type": "console_kill"})
 
+    # The child asks the outer terminal for any-event mouse reporting and the
+    # alternate screen, then echoes — what a pane running a TUI looks like.
+    _MODES_CHILD = (
+        "import sys\n"
+        "sys.stdout.write('\\x1b[?1049h\\x1b[?1003h\\x1b[?1006h ready\\n')\n"
+        "sys.stdout.flush()\n"
+        "for line in sys.stdin:\n"
+        "    sys.stdout.write('GOT:' + line)\n"
+        "    sys.stdout.flush()\n"
+    )
+
+    def _modes_cmd(self):
+        import sys as _sys
+
+        return f"{shlex.quote(_sys.executable)} -c {shlex.quote(self._MODES_CHILD)}"
+
+    def test_a_viewer_joining_a_running_console_is_told_its_terminal_modes(self, app_env):
+        """Every overlay open builds a NEW xterm against the SAME long-attached PTY.
+        tmux re-asserts the outer terminal's modes only on a resize, so a same-size
+        reopen used to leave the fresh emulator in its defaults: a wheel over a
+        program that owns the mouse scrolled xterm's own empty scrollback. The
+        server carried the bytes that set those modes, so it replays them to the
+        newcomer before the repaint (termmodes.py)."""
+        client, _ = self._client(app_env, command=self._modes_cmd())
+        with client:
+            with connected(client) as (ws1, _, _), connected(client) as (ws2, _, _):
+                ws1.send_json({"type": "console_open"})
+                recv_until(ws1, "console_started")
+                self._drain_out(ws1, "ready")  # the modes have been emitted and seen
+                # The second viewer gets the replay FIRST, right after console_started,
+                # ahead of any live output — a fresh emulator must be in the right
+                # modes before the repaint lands in it.
+                ws2.send_json({"type": "console_open"})
+                recv_until(ws2, "console_started")
+                first_out = recv_until(ws2, "console_out")["data"]
+                assert first_out == "\x1b[?1003h\x1b[?1006h\x1b[?1049h"
+                # A mode the program turned back off is replayed off, not on.
+                ws1.send_json({"type": "console_in", "data": "x\n"})
+                self._drain_out(ws1, "GOT:x")
+                client.app.state.server._console_out("\x1b[?1003l")
+                ws2.send_json({"type": "console_close"})
+                ws2.send_json({"type": "console_open"})
+                recv_until(ws2, "console_started")
+                assert recv_until(ws2, "console_out")["data"] == "\x1b[?1003l\x1b[?1006h\x1b[?1049h"
+                ws1.send_json({"type": "console_kill"})
+
+    def test_hiding_and_reopening_the_console_replays_its_modes(self, app_env):
+        """The owner's case: one device, Close then reopen at the same size. The
+        frontend builds a new xterm for the reopen; it must be told the modes."""
+        client, _ = self._client(app_env, command=self._modes_cmd())
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
+            self._drain_out(ws, "ready")
+            ws.send_json({"type": "console_close"})
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
+            assert recv_until(ws, "console_out")["data"] == "\x1b[?1003h\x1b[?1006h\x1b[?1049h"
+            ws.send_json({"type": "console_kill"})
+
+    def test_a_respawned_console_starts_its_mode_record_afresh(self, app_env):
+        """After the console exits, the next open spawns a NEW client that tmux
+        (or a shell) initialises from scratch — stale modes from the dead one
+        must not be replayed over it."""
+        client, _ = self._client(app_env, command=self._modes_cmd())
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
+            self._drain_out(ws, "ready")
+            assert client.app.state.server.console_modes.replay() != ""
+            ws.send_json({"type": "console_in", "data": "\x04"})
+            recv_until(ws, "console_exit")
+            ws.send_json({"type": "console_open"})
+            recv_until(ws, "console_started")
+            # Spawned fresh: the record restarts empty and fills from the new child.
+            self._drain_out(ws, "ready")
+            observed = client.app.state.server.console_modes.observed()
+            assert observed == {1049: True, 1003: True, 1006: True}
+            ws.send_json({"type": "console_kill"})
+
     def test_console_kill_terminates_and_reports_exit(self, app_env):
         client, _ = self._client(app_env, command="cat")
         with client, connected(client) as (ws, _, _):

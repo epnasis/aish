@@ -10750,6 +10750,17 @@ async function openConsole() {
     // mouse mode), so a swipe scrolls the app's panes; otherwise the touch
     // scrolls xterm's own scrollback.
     theme: CATPPUCCIN_MOCHA,
+    // [CONSOLE-FORCED-SELECTION-START] While a program owns the mouse (Claude Code's
+    // fullscreen TUI, tmux, vim) a plain drag is ITS selection; the terminal's own
+    // selection needs a modifier, as in every native terminal. xterm.js's Mac
+    // branch is Option+drag and is OFF by default (Shift+drag elsewhere is always
+    // on), so on a Mac there was no way to select text at all once Claude took
+    // the mouse. The cost is Option-drag column selection, which nobody asked for.
+    macOptionClickForcesSelection: true,
+    // Without this an Option+CLICK (a forced selection that never moved) makes
+    // xterm "move the cursor" by sending arrow keys to the program.
+    altClickMovesCursor: false,
+    // [CONSOLE-FORCED-SELECTION-END]
   });
   consoleFit = new FitAddon.FitAddon();
   consoleTerm.loadAddon(consoleFit);
@@ -10854,6 +10865,62 @@ async function openConsole() {
     if (padDraft()) openConsolePad(false);
   }
 }
+
+// [CONSOLE-SELECTION-GUARD-START]
+// A forced (Option+drag) selection under mouse reporting dies the instant the
+// button comes up: xterm clears any selection on USER INPUT, and with the
+// program owning the mouse the release — and, in any-event mode, every pointer
+// motion after it — is forwarded to the program as input. Measured: the
+// selection model fills during the drag and is null after mouseup. Two
+// capture-phase listeners on the screen keep it alive with public API only:
+// the release is let through (an unpaired release is harmless to the program)
+// and the selection is put back from a snapshot taken just before; a motion
+// with no button down while text is selected is stopped before xterm forwards
+// it (the program loses hover while a selection stands — a plain click, which is
+// forwarded, clears it as in any terminal).
+
+// xterm's selection as a select(column, row, length) call: start to end in
+// reading order across `cols`-wide rows. Null when there is nothing to restore.
+function consoleSelectionSpan(position, cols) {
+  if (!position || !position.start || !position.end) return null;
+  const { start, end } = position;
+  const length = (end.y - start.y) * cols + (end.x - start.x);
+  if (length <= 0) return null;
+  return { column: start.x, row: start.y, length };
+}
+
+// Should a pointer motion be kept from the program? Only one that is not part
+// of a drag (no button down) while a selection stands — forwarding it would be
+// the user input that clears the selection.
+function consoleMotionStaysLocal(buttons, hasSelection) {
+  return hasSelection && buttons === 0;
+}
+// [CONSOLE-SELECTION-GUARD-END]
+
+// Wired ONCE on the persistent #pty-screen and the document, against whichever
+// Terminal is current (like the touch handlers below): a per-Terminal wiring
+// would need an unwire at dispose, and xterm's public Terminal has no onDispose.
+(() => {
+  document.addEventListener("mouseup", () => {
+    const term = consoleTerm;
+    if (!consoleOpen || !term || !term.hasSelection()) return;
+    // The drag may end anywhere — over the key row, the header, past the overlay —
+    // and xterm itself listens on the document, so the snapshot must too. The
+    // span is computed here, in the same tick, so a resize cannot skew it.
+    const span = consoleSelectionSpan(term.getSelectionPosition(), term.cols);
+    if (!span) return;
+    // Dispatch is synchronous: every xterm listener (including its document-level
+    // one that forwards the release and clears) has run by the time this fires.
+    // A synchronous restore here would be cleared again by them.
+    setTimeout(() => {
+      if (consoleTerm === term && !term.hasSelection()) term.select(span.column, span.row, span.length);
+    }, 0);
+  }, true);
+  $("pty-screen").addEventListener("mousemove", (e) => {
+    const term = consoleTerm;
+    if (term && consoleMotionStaysLocal(e.buttons, term.hasSelection())) e.stopPropagation();
+  }, true);
+})();
 
 // Hide/detach the overlay — the console keeps running server-side (reopening
 // shows current state). Tells the server to stop fanning output at us.

@@ -769,6 +769,11 @@ this UI. Highlights:
   aish's remote browser, where you can see the page and sign in to it. The
   choice sticks as that device's default for a plain tap, and the menu's own
   row changes it back.
+  Programs that take the mouse (Claude Code, tmux, vim) get the trackpad wheel
+  and a plain drag — Claude highlights its own selection and copies it to your
+  clipboard; to select with the terminal itself, hold Option while dragging
+  (Shift on a non-Mac), then ⌘C (Ctrl+Shift+C on a non-Mac, never Ctrl+C) or
+  **Copy**.
 - **Voice.** Mic dictation into the composer and hands-free read-aloud of
   replies — device-native speech, no cloud audio API, English/Polish. In the
   console, double-tap the arrows key for a dictation scratchpad: speech is
