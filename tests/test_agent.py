@@ -9112,13 +9112,16 @@ then:
             [
                 model_says(tool_calls=[tool_call("read_docs", command="ls")]),
                 model_says("Here is what I found."),
+                # The rescue (TestSpeakFirstRescue) asks once about the
+                # abandoned call; standing by the answer is a complete ending.
+                model_says("I am not going to read the docs."),
             ],
             rule_texts=(self.RULE,),
         )
         result = agent.run_task("what does ls do?")
         refusal = tool_messages(agent.messages)[0]["content"]
         assert "BEFORE running anything" in refusal
-        assert "Here is what I found" in result
+        assert "I am not going to read the docs" in result
 
     def test_the_refused_call_is_logged_red_not_green(self, tmp_path):
         """Returned as a bare string, the refusal was sniffed by prefix, matched
@@ -9128,7 +9131,8 @@ then:
         agent, _ = rules_agent(
             tmp_path,
             [model_says(tool_calls=[tool_call("read_docs", command="ls")]),
-             model_says("Here is what I found.")],
+             model_says("Here is what I found."),
+             model_says("I am not going to read the docs.")],
             rule_texts=(self.RULE,), step_log=steps.append,
         )
         agent.run_task("what does ls do?")
@@ -17628,3 +17632,158 @@ class TestTheHoldCheck:
         assert "held and not run, and no later call to it was made" in stamped
         assert self.COMMENT in stamped
         assert [g["verdict"] for g in self._hold_gates(steps)] == ["advised"]
+
+
+RULE_ANSWER_FIRST = """---
+name: answer-me-first
+description: Answer me before you go running anything.
+when: always
+then:
+  must_first: answer
+---
+"""
+
+
+class TestSpeakFirstRescue:
+    """session-20261108-143917 (qwen3:8b): the speak-first gate refused the
+    task's only tool call, the model answered the refusal with text alone —
+    a hallucinated composition plus a dangling "I will now fetch" — and that
+    text-only reply, being the loop's terminator, ended the task with the
+    refused work silently abandoned. SPEAK_FIRST_REFUSAL's words warn about
+    exactly this and cannot prevent it; the abandoning answer is now a
+    PROPOSAL, asked about once with the refused calls named. Asking is safe
+    because the answer itself satisfied the rule."""
+
+    def _agent(self, tmp_path, responses, **kwargs):
+        return rules_agent(
+            tmp_path, responses, rule_texts=(RULE_ANSWER_FIRST,), **kwargs
+        )
+
+    @staticmethod
+    def _rescue_gates(logged):
+        return [
+            r for r in records(logged, "gate")
+            if r.get("gate") == "speak_first.verify"
+        ]
+
+    def test_the_abandoned_call_is_asked_about_and_then_runs(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(agent_module.web, "read_url", fake_read_url())
+        logged = []
+        streamed: list[str] = []
+        agent, chat = self._agent(tmp_path, [
+            model_says(tool_calls=[tool_call("read_url", url="https://x.test/a")]),
+            model_says("It holds mostly European equities."),  # the abandonment
+            model_says(
+                "Checking the source now.",
+                tool_calls=[tool_call("read_url", url="https://x.test/a")],
+            ),
+            model_says("the page says tar -xzf"),
+        ], step_log=logged.append, on_token=streamed.append)
+        result = agent.run_task("what is in the fund?")
+        assert result == "the page says tar -xzf"
+        # The abandoning draft was a PROPOSAL the owner never saw: the buffer
+        # arms while a refused call is outstanding (must_first: answer does
+        # not decide at verify, so nothing else would hold it).
+        assert "European equities" not in "".join(streamed)
+        assert len(chat.calls) == 4
+        asks = [
+            m for m in agent.messages
+            if m.get("role") == "user" and "have NOT run" in str(m.get("content"))
+        ]
+        assert len(asks) == 1
+        assert "read_url" in asks[0]["content"]
+        assert "x.test/a" in asks[0]["content"]
+        assert [g["verdict"] for g in self._rescue_gates(logged)] == ["refused"]
+
+    def test_bounded_once_and_the_second_answer_ships_with_the_note(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(agent_module.web, "read_url", fake_read_url())
+        logged = []
+        agent, chat = self._agent(tmp_path, [
+            model_says(tool_calls=[tool_call("read_url", url="https://x.test/a")]),
+            model_says("It holds mostly European equities."),
+            model_says("I am not going to open that page."),
+        ], step_log=logged.append)
+        result = agent.run_task("what is in the fund?")
+        assert len(chat.calls) == 3
+        assert result.startswith("I am not going to open that page.")
+        # The harness's own line: the refused call never ran, said on the
+        # delivered answer rather than silently dropped.
+        assert "did not run" in result
+        assert "read_url" in result
+        assert [g["verdict"] for g in self._rescue_gates(logged)] == [
+            "refused", "advised",
+        ]
+
+    def test_a_later_call_stands_the_rescue_down(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(agent_module.web, "read_url", fake_read_url())
+        logged = []
+        agent, chat = self._agent(tmp_path, [
+            model_says(tool_calls=[tool_call("read_url", url="https://x.test/a")]),
+            model_says(
+                "Let me look somewhere else instead.",
+                tool_calls=[tool_call("read_url", url="https://x.test/b")],
+            ),
+            model_says("answered from the other page"),
+        ], step_log=logged.append)
+        result = agent.run_task("what is in the fund?")
+        assert result == "answered from the other page"
+        assert len(chat.calls) == 3
+        assert not self._rescue_gates(logged)
+        assert not any(
+            "have NOT run" in str(m.get("content"))
+            for m in agent.messages if m.get("role") == "user"
+        )
+
+    def test_a_padding_call_to_another_tool_stands_nothing_down(
+        self, tmp_path, monkeypatch
+    ):
+        """Refused call A, then motion elsewhere (tool B runs), then a
+        text-only answer: A is still abandoned and the rescue still asks —
+        clearing on any call would re-open the scar via padding."""
+        monkeypatch.setattr(agent_module.web, "read_url", fake_read_url())
+        monkeypatch.setattr(
+            agent_module.tools, "read_docs", lambda *a, **k: "docs text"
+        )
+        logged = []
+        agent, chat = self._agent(tmp_path, [
+            model_says(tool_calls=[tool_call("read_docs", command="ls")]),
+            model_says(
+                "Looking at a page instead.",
+                tool_calls=[tool_call("read_url", url="https://x.test/b")],
+            ),
+            model_says("answered from the page"),
+            model_says("I am not going to read the docs."),
+        ], step_log=logged.append)
+        result = agent.run_task("what does ls do?")
+        assert len(chat.calls) == 4
+        asks = [
+            m for m in agent.messages
+            if m.get("role") == "user" and "have NOT run" in str(m.get("content"))
+        ]
+        assert len(asks) == 1 and "read_docs" in asks[0]["content"]
+        assert result.startswith("I am not going to read the docs.")
+
+    def test_no_ask_while_nothing_was_said(self, tmp_path):
+        """The ask's own sentence ("your text has now satisfied that rule")
+        rests on _said_something; without it the gate would refuse the
+        re-proposal again and the one ask is burned on a false sentence."""
+        agent, _ = self._agent(tmp_path, [model_says("unused")])
+        agent._speak_first_refused = ['- read_url({"url": "https://x.test/a"})']
+        agent._said_something = False
+        assert agent._check_speak_first(may_ask=True) is None
+        assert agent._speak_first_advice is not None
+
+    def test_a_denial_stop_gate_outranks_the_rescue(self, tmp_path):
+        """may_ask=False (deny means stop): no ask — the answer ships carrying
+        the note, because goading a tool call would defy the owner's stop."""
+        agent, _ = self._agent(tmp_path, [model_says("unused")])
+        agent._speak_first_refused = ['- read_url({"url": "https://x.test/a"})']
+        agent._said_something = True
+        assert agent._check_speak_first(may_ask=False) is None
+        assert agent._speak_first_advice == [
+            '- read_url({"url": "https://x.test/a"})'
+        ]

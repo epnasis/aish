@@ -694,6 +694,33 @@ HOLD_UNANSWERED_NOTE = (
 )
 
 
+# The speak-first rescue (answer check, `_check_speak_first`). The gate's
+# refusal orders a re-proposal in the SAME turn, but a small model answers the
+# refusal with text alone — and a text-only reply is the loop's terminator, so
+# the task ends with the refused work silently abandoned. Observed 2026-11-08
+# (qwen3:8b, session-20261108-143917): market_snapshot refused once, then a
+# hallucinated composition answer and a dangling "I will now fetch the latest
+# data". SPEAK_FIRST_REFUSAL's words were already sharpened once for exactly
+# this (see its comment in rules.py); this is the structural half — the
+# abandoning answer is a proposal, asked about ONCE. Asking is safe because
+# that answer itself satisfied the rule, so the re-proposed call cannot be
+# refused by it again.
+SPEAK_FIRST_MAX_ASKS = 1  # per task: the second text-only answer ships
+SPEAK_FIRST_ABANDONED_ASK = (
+    "A rule refused these calls because nothing had been said to the user "
+    "yet, and they were never proposed again, so they have NOT run:\n{items}\n"
+    "Your text has now satisfied that rule, so the same calls will not be "
+    "refused by it again. You MUST either propose the calls again now, or "
+    "tell the user plainly that you are not going to run them, and why. Do "
+    "NOT answer from memory what a call was meant to look up."
+)
+SPEAK_FIRST_ITEM = "- {tool}({args})"
+SPEAK_FIRST_UNDONE_NOTE = (
+    "[aish] Refused because nothing had been said to you yet, and never "
+    "proposed again, so it did not run: {items}"
+)
+
+
 # What the card the owner answered said about why it was raised (its recorded
 # `preview`), handed back VERBATIM with his comment. Without it the model had
 # his comment and nothing else: asked "Why do I need to approve it?" about an
@@ -4285,6 +4312,14 @@ class Agent:
         # Has the model said anything to the user yet this task? The only input
         # `must_first: answer` needs.
         self._said_something = False
+        # Calls the speak-first gate refused that the model never proposed
+        # again — the rescue's working set; see _check_speak_first. Cleared
+        # when a call passes the speak-first gate itself (spoken-for, or
+        # rounds exhausted and proceeding in silence): either way nothing is
+        # abandoned. Guidance reads pass by exemption and do not clear it.
+        self._speak_first_refused: list[str] = []
+        self._speak_first_asks = 0
+        self._speak_first_advice: list[str] | None = None
         # Everything the owner was TOLD this turn, in order (#212): the prose
         # emitted alongside each step's tool calls, as delivered. Verify grades
         # the whole of it — see _deliverable.
@@ -5286,6 +5321,9 @@ class Agent:
         self._menu = None
         self._catalog_schema = None
         self._said_something = False
+        self._speak_first_refused = []
+        self._speak_first_asks = 0
+        self._speak_first_advice = None
         self._stall_nudged = False
         self._delivered = []
         self._intent = ""
@@ -6088,18 +6126,25 @@ class Agent:
                 # The hold check: an action the owner approved with a comment
                 # is outstanding, and this answer would end the task over it.
                 hold_ask = self._check_holds(may_ask=may_ask)
+                # The speak-first rescue: a call refused for ordering was
+                # never proposed again, and this answer would end the task
+                # over it (the qwen3:8b abandonment, 2026-11-08).
+                rescue_ask = self._check_speak_first(may_ask=may_ask)
                 asks = [
                     image_ask,
                     hold_ask,
+                    rescue_ask,
                     self._verify_answer(
                         checked, ask=may_ask,
-                        delivering=image_ask is None and hold_ask is None,
+                        delivering=image_ask is None and hold_ask is None
+                        and rescue_ask is None,
                     ),
                 ]
                 unmet = "\n\n".join(a for a in asks if a) or None
                 if unmet is not None:
                     self._image_removal = None  # this draft is not delivered
                     self._hold_advice = None
+                    self._speak_first_advice = None
                     # Not delivered. The model is told what is missing and the
                     # turn goes on — the ask provokes the work, the work lands
                     # in the trace, and the trace is what the next check reads.
@@ -6125,7 +6170,13 @@ class Agent:
                     )
                     # Marked as aish's own words (#171), or replay renders the
                     # harness's question as a blue bubble the owner never typed.
-                    withheld_line = HOLD_WITHHELD if hold_ask else ANSWER_WITHHELD
+                    withheld_line = (
+                        # HOLD_WITHHELD states the one checked fact; the
+                        # rescue ask, like the hold ask, orders calls or a
+                        # plain refusal, not an edited rewrite.
+                        HOLD_WITHHELD if hold_ask or rescue_ask
+                        else ANSWER_WITHHELD
+                    )
                     ask = (
                         unmet + ("\n" + withheld_line if withheld else "")
                         + "\n" + ANSWER_CHECK_UNSAID
@@ -6137,6 +6188,7 @@ class Agent:
                 self._commit_image_removal()
                 self._link_unlinked_reports(result)
                 self._commit_hold_advice()
+                self._commit_speak_first_advice()
                 was_held = self._held_answer is not None
                 # A released hold streams itself, notes included; an unbound
                 # silent turn streams its placeholder here, BEFORE the release
@@ -13681,14 +13733,21 @@ class Agent:
         )
 
     def _arm_hold_buffer(self) -> None:
-        """Hold this model call's answer back while a held action is
-        outstanding, so the hold check can still send it back unseen.
+        """Hold this model call's answer back while a held action — or a call
+        the speak-first gate refused — is outstanding, so the answer checks
+        can still send it back unseen.
 
         The answer check can only rework an answer the owner has not read, and
         an unbound turn streams its answer token by token. A turn a verify rule
         binds is held already; this arms the same buffer for the rest, and
-        disarms it once no hold is outstanding."""
-        if self._open_holds():
+        disarms it once nothing is outstanding. The speak-first arm exists
+        because `must_first: answer` deliberately does NOT decide at verify
+        (`rules.decides_at_verify`), so in the motivating session the
+        hallucinated answer would otherwise stream to the owner BEFORE
+        `_check_speak_first` could ask about it — and an empty reply to the
+        ask would then re-deliver, as "held back", an answer he had already
+        read (review finding 1, 2026-11-08)."""
+        if self._open_holds() or self._speak_first_refused:
             if self._held_answer is None:
                 self._held_answer = []
                 self._hold_buffered = True
@@ -13775,6 +13834,73 @@ class Agent:
             rule=None, tool="", action={}, verdict=verdict, tier=0,
             evidence={"held_call": held_call, "tool": tool},
             round=int(held_call in self._holds_asked), max_rounds=HOLD_MAX_ASKS,
+            escalated=False,
+            **({"message": message[: rules.GATE_MESSAGE_CHARS]} if message else {}),
+        )
+
+    def _check_speak_first(self, *, may_ask: bool) -> str | None:
+        """The speak-first rescue: the ask, or None. Armed only while a call
+        the speak-first gate refused was never proposed again and a text-only
+        answer would end the task over it — the model complied with the
+        refusal's words ("say something") and abandoned the work, which
+        SPEAK_FIRST_REFUSAL warns about but cannot prevent, because a
+        text-only reply is the loop's terminator. Asking is safe: the answer
+        itself satisfied the rule, so a re-proposed call cannot be refused by
+        it again (and `_speak_first_gate` clears the working set the moment
+        any call passes it).
+
+        Bounded: SPEAK_FIRST_MAX_ASKS per task. Past that, or where asking is
+        not allowed (a denial's stop gate outranks this — the owner said
+        stop, and goading a tool call would defy that), the answer ships and
+        the delivering pass says what never ran. An answer that says it will
+        not do it is a complete ending: nothing here grades the answer's
+        words.
+        """
+        self._speak_first_advice = None
+        if not self._speak_first_refused:
+            return None
+        items = list(self._speak_first_refused)
+        # `_said_something` is the fact the ask's own sentence rests on
+        # ("your text has now satisfied that rule"): an empty-reply placeholder
+        # reaches here with it still False, and asking then would burn the one
+        # ask on a re-proposal the gate immediately refuses again — the
+        # harness's sentence disproven by its own next verdict (review
+        # finding 3).
+        if may_ask and self._said_something \
+                and self._speak_first_asks < SPEAK_FIRST_MAX_ASKS:
+            self._speak_first_asks += 1
+            ask = SPEAK_FIRST_ABANDONED_ASK.format(items="\n".join(items))
+            self._record_speak_first_verify("refused", items, message=ask)
+            self._note("⚖ answer-me-first: refused call never re-proposed — asking")
+            return ask
+        self._speak_first_advice = items
+        return None
+
+    def _commit_speak_first_advice(self) -> None:
+        """The delivering pass: say which refused calls never ran, and record
+        it. Pending until here, like the hold advice: a rule may still send
+        the draft back, and a line about a draft never delivered would stream
+        with nothing to attach to."""
+        if self._speak_first_advice is None:
+            return
+        items, self._speak_first_advice = self._speak_first_advice, None
+        self._record_speak_first_verify("advised", items)
+        self._not_followed.append(
+            SPEAK_FIRST_UNDONE_NOTE.format(items="; ".join(items))
+        )
+
+    def _record_speak_first_verify(
+        self, verdict: str, items: list[str], *, message: str = ""
+    ) -> None:
+        """One `gate` record at the verify point, logged only when ARMED —
+        refused calls are outstanding at a text-only answer (trace contract,
+        `speak_first.verify`). `round` is the asks spent this task, read
+        against `max_rounds` the way every bounded gate's is."""
+        self._emit_record(
+            kind="gate", call=0, at="verify", gate="speak_first.verify",
+            binding=None, rule=None, tool="", action={}, verdict=verdict,
+            tier=0, evidence={"abandoned": items},
+            round=self._speak_first_asks, max_rounds=SPEAK_FIRST_MAX_ASKS,
             escalated=False,
             **({"message": message[: rules.GATE_MESSAGE_CHARS]} if message else {}),
         )
@@ -13916,6 +14042,12 @@ class Agent:
         # asked about — it is said.
         self._check_holds(may_ask=False)
         self._commit_hold_advice()
+        # Same for a speak-first-refused call never proposed again: the gate
+        # runs on this path too (claude_max → _dispatch → _rule_gate), so the
+        # abandonment is reachable here and, without this pair, ended with no
+        # note and no record (review finding 2).
+        self._check_speak_first(may_ask=False)
+        self._commit_speak_first_advice()
         if self._bindings:
             self._verify_answer(answer, ask=False)
         self._link_unlinked_reports(answer)
@@ -14501,7 +14633,7 @@ class Agent:
         """
         return secrets.contains(command)
 
-    def _speak_first_gate(self, name: str) -> str | None:
+    def _speak_first_gate(self, name: str, args: dict) -> str | None:
         """`must_first: answer` — say something before running anything.
 
         Pure ordering over the turn's own record: has any assistant text been
@@ -14537,6 +14669,17 @@ class Agent:
             if binding.rounds >= binding.max_rounds:
                 continue  # bounded: it has had its say, let the turn proceed
             binding.rounds += 1
+            # The rescue's working set (`_check_speak_first`): what was
+            # refused here, so a text-only answer that abandons it can be
+            # asked about instead of silently ending the task over it.
+            # The item is both the dedup key and what the ask/note/evidence
+            # show, so the args stay whole up to a cap that long URLs rarely
+            # reach — a tighter cut collapsed distinct calls into one entry.
+            item = SPEAK_FIRST_ITEM.format(
+                tool=name, args=json.dumps(args, ensure_ascii=False)[:300]
+            )
+            if item not in self._speak_first_refused:
+                self._speak_first_refused.append(item)
             message = rules.SPEAK_FIRST_REFUSAL.format(
                 rule=binding.name, description=binding.rule.description
             )
@@ -14549,6 +14692,22 @@ class Agent:
             self._record_gate(verdict, name, {}, "refused")
             self._note(f"⚖ {binding.name}: answer first, then act")
             return message
+        if self._speak_first_refused and name not in rules.GUIDANCE_READS:
+            # This call passes the gate — the model has spoken, the rounds are
+            # exhausted (the call proceeds in silence), or no binding demands
+            # text — so THIS TOOL's refused entries are no longer abandoned
+            # and drop from the rescue's working set. Only this tool's: a
+            # padding call to some other tool must not stand the rescue down
+            # for work that never ran (review finding 4) — a wrongly-surviving
+            # entry costs one bounded ask that "state plainly you will not run
+            # it" absorbs, while a wrongly-cleared one re-opens the scar. A
+            # guidance read does not count at all: it passes before the first
+            # word by exemption, not as the re-proposal the refusal asked for.
+            passing = SPEAK_FIRST_ITEM.format(tool=name, args="")[:-1]
+            self._speak_first_refused = [
+                item for item in self._speak_first_refused
+                if not item.startswith(passing)
+            ]
         return None
 
     def _rule_gate(self, name: str, args: dict) -> str | None:
@@ -14565,7 +14724,7 @@ class Agent:
         """
         if not self._bindings:
             return None
-        if speak_first := self._speak_first_gate(name):
+        if speak_first := self._speak_first_gate(name, args):
             # An envelope like every other rule refusal: returned as a bare
             # string it was sniffed by prefix, matched none, and the refused
             # call logged ok:true — green — with no text (delivery review).

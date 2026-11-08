@@ -218,6 +218,8 @@ class TestGuidanceReadsBeforeTheFirstWord:
                 model_says(tool_calls=[read_skill_call("trippy_search")]),
                 model_says(tool_calls=[tool_call("read_docs", command="ls")]),
                 model_says("done"),
+                # The rescue asks once about the refused read_docs.
+                model_says("not reading the docs, then"),
             ],
             rule_texts=(ANSWER_FIRST,),
         )
@@ -255,6 +257,9 @@ class TestGuidanceReadsBeforeTheFirstWord:
             [
                 model_says(tool_calls=[tool_call("read_url", url="https://example.com/")]),
                 model_says("done"),
+                # The rescue asks once about the refused read_url; standing
+                # by the refusal keeps the page unfetched.
+                model_says("not opening it, then"),
             ],
             rule_texts=(ANSWER_FIRST,),
         )
