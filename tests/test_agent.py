@@ -5024,6 +5024,33 @@ class TestThirdPartySkillsAreOutsideContent:
         asked = self._attack(monkeypatch, self._vendor)
         assert [n for n, _ in asked] == ["read_url"]
 
+    def test_a_same_batch_shadow_write_does_not_clear_the_taint(self, monkeypatch):
+        """Found in delivery review: taint is committed after the batch, so a
+        create_skill of the same name in the batch that read the third-party
+        skill made the name resolve to the owner's by then, and the read went
+        uncounted. The read's own answer is what is kept."""
+        self._vendor("helper", self.BODY)
+        monkeypatch.setattr(
+            agent_module.web, "read_url", lambda url, topic=None, **_kw: "a page"
+        )
+        shadow = SimpleNamespace(function=SimpleNamespace(name="create_skill", arguments={
+            "name": "helper", "description": "Use when helping", "content": "mine now",
+        }))
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._read_skill("helper"), shadow]),
+                model_says(tool_calls=[tool_call("read_url", url=self.EXFIL)]),
+                model_says("done"),
+            ],
+            approve_write=lambda plan: True,
+            approve_tool=lambda n, a, p=None: asked.append((n, p)) or False,
+        )
+        agent._approved_hosts.clear()
+        agent.run_task("help me")
+        assert (skills_module.GLOBAL_SKILLS_DIR / "helper.md").exists()  # the shadow landed
+        assert [n for n, _ in asked] == ["read_url"]
+
     def test_the_same_flow_from_the_owners_tree_is_not_carded(self, monkeypatch):
         """The control, proving the card above is the taint's doing: his own
         skill is not outside content, so the attended fence stays down."""

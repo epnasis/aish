@@ -4023,6 +4023,11 @@ class Agent:
         self._tainted = False
         # WHAT raised it, for the card to say (READ_THE_WEB and friends).
         self._taint_reads: set[str] = set()
+        # read_skill names that resolved to third-party content AT THE READ
+        # (#467). Taint is committed after the batch, and a write in the same
+        # batch — create_skill of that name — would by then make the name
+        # resolve to the owner's own skill; the read's answer is what counts.
+        self._third_party_skill_reads: set[str] = set()
         # Outside content aish delivered before the next task with no tool
         # call to raise the taint for it (`add_outside_note`, #5 S3): the next
         # task starts tainted. Survives `_reset_task_state` exactly once.
@@ -5370,6 +5375,7 @@ class Agent:
         # answering one question must not put a card in front of the next.
         self._tainted = False
         self._taint_reads = set()
+        self._third_party_skill_reads = set()
         if self._outside_note_pending:
             # Delivered for THIS task by add_outside_note: it is in the context
             # the first model call sees, so the task is tainted from its start.
@@ -8739,7 +8745,10 @@ class Agent:
             # Asked later than the read, though (after the batch, or at a
             # recovery), so a name that no longer resolves — a folder deleted
             # since, or a cut argument — counts as outside.
-            entry = skills.resolve_skill(str(args.get("name", "") or ""), self.cwd)
+            skill = str(args.get("name", "") or "")
+            if skill in self._third_party_skill_reads:
+                return True
+            entry = skills.resolve_skill(skill, self.cwd)
             return entry is None or entry.third_party
         # Asked LAST, so this can only ever add. A local read used to raise
         # nothing, which is exactly how a caption track or a fetched PDF crossed
@@ -9595,9 +9604,7 @@ class Agent:
             skill = str(args.get("name", ""))
             # Disarmed whatever tree it resolves to: before #467 imports landed
             # in the owner's own tree, and those files are still there.
-            return f"→ read_skill: {skill}", lambda: provenance.disarm_markers(
-                skills.load_skill(skill, skills.skill_reading_dirs(self.cwd))
-            )
+            return f"→ read_skill: {skill}", partial(self._read_skill, skill)
         if name == "web_search":
             query = str(args.get("query", ""))
             return f"→ web_search: {query}", partial(web.web_search, query)
@@ -13362,6 +13369,16 @@ class Agent:
             return label, read
         return label, partial(self._marked_outside_read, read, path, record)
 
+    def _read_skill(self, skill: str) -> str:
+        """Serve a skill, noting at the read whether it was a third party's —
+        the taint decision comes after the batch, too late to ask (#467)."""
+        entry = skills.resolve_skill(skill, self.cwd)
+        if entry is None or entry.third_party:
+            self._third_party_skill_reads.add(skill)
+        return provenance.disarm_markers(
+            skills.load_skill(skill, skills.skill_reading_dirs(self.cwd))
+        )
+
     @staticmethod
     def _marked_third_party_read(read: Callable[[], str]) -> str:
         """A read of an imported skill's file, told for what it is (#467) —
@@ -16407,7 +16424,7 @@ class Agent:
         return (
             f"Imported third-party skill {name!r} into {dest} ({len(imported)} files)."
             f"{skipped_note}{keywords_note}{lock_note} It is third-party: from the next "
-            "task it loads only with read_skill(<name>) and is never preloaded."
+            "task it is listed as such and never preloaded; read_skill(<name>) loads it."
         )
 
     def _dispatch_write(self, name: str, args: dict) -> str:
