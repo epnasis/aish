@@ -33,7 +33,7 @@ REAL_CORPUS_DIRS = tuple(
     for root in _CORPUS_ROOTS
     for directory in (
         root,  # the root too: allow.txt, config.toml, and any dir a test invents
-        *(root / name for name in ("memory", "skills", "rules", "tools")),
+        *(root / name for name in ("memory", "skills", "vendor-skills", "rules", "tools")),
     )
 )
 
@@ -127,11 +127,14 @@ def no_inherited_aish_env(monkeypatch):
 def isolated_global_dirs(tmp_path_factory, monkeypatch, no_inherited_aish_env):
     home = tmp_path_factory.mktemp("config-home")
     # The knob itself (#254), for whatever resolves the config home LATER —
-    # config.toml, or a subprocess that imports aish. The four constants below
+    # config.toml, or a subprocess that imports aish. The constants below
     # are bound at import, so they are rebound directly rather than left to it.
     monkeypatch.setenv("AISH_CONFIG_HOME", str(home))
     for module, attr, name in (
         (skills_module, "GLOBAL_SKILLS_DIR", "skills"),
+        # The third-party tree (#467): every import installs here, and the
+        # index reads it on every task.
+        (skills_module, "VENDOR_SKILLS_DIR", "vendor-skills"),
         (skills_module, "GLOBAL_MEMORY_DIR", "memory"),
         (tool_plugins_module, "GLOBAL_TOOLS_DIR", "tools"),
         # Rules (#191) are evaluated at the top of EVERY task, so the

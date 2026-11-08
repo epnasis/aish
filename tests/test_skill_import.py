@@ -1,8 +1,11 @@
 """Skill-import staging tests. Uses local-path sources so no git/network."""
 
+import json
+
 import pytest
 
 from aish import skill_import
+from aish import skills as skills_module
 
 
 def make_repo(root):
@@ -95,9 +98,9 @@ class TestQuarantine:
         assert (dest / "SKILL.md").exists()
         assert (dest / "scripts" / "run.sh").exists()
         assert skill_import.pending(qroot) == ["myskill"]
-        # install moves it into the skills dir and clears the quarantine
-        skills_dir = tmp_path / "skills"
-        installed, dropped = skill_import.install("myskill", skills_dir, root=qroot)
+        # install moves it into the third-party tree and clears the quarantine
+        installed, dropped, _ = skill_import.install("myskill", root=qroot)
+        assert installed == skills_module.VENDOR_SKILLS_DIR / "myskill"
         assert (installed / "SKILL.md").exists()
         assert dropped == []
         assert skill_import.pending(qroot) == []
@@ -141,7 +144,7 @@ class TestQuarantine:
         (dest / "SKILL.md").write_text(
             "---\nname: myskill\ndescription: d\nkeywords: zażółć\n---\nbody\n"
         )
-        installed, dropped = skill_import.install("myskill", tmp_path / "skills", root=qroot)
+        installed, dropped, _ = skill_import.install("myskill", root=qroot)
         assert dropped == ["zażółć"]
         assert (installed / "SKILL.md").read_text() == (
             "---\nname: myskill\ndescription: d\n---\nbody\n"
@@ -153,7 +156,7 @@ class TestQuarantine:
 
     def test_install_missing_errors(self, tmp_path):
         with pytest.raises(skill_import.SkillImportError, match="no staged skill"):
-            skill_import.install("nope", tmp_path / "skills", root=tmp_path / "q")
+            skill_import.install("nope", root=tmp_path / "q")
 
 
 class TestNoSymlinkIsFollowed:
@@ -202,8 +205,8 @@ class TestNoSymlinkIsFollowed:
         _, dest, _ = skill_import.stage_to_disk(str(tmp_path / "src"), "myskill", root=qroot)
         (dest / "notes.md").symlink_to(self._outside(tmp_path))
         with pytest.raises(skill_import.SkillImportError, match="symlinks"):
-            skill_import.install("myskill", tmp_path / "skills", root=qroot)
-        assert not (tmp_path / "skills" / "myskill").exists()
+            skill_import.install("myskill", root=qroot)
+        assert not (skills_module.VENDOR_SKILLS_DIR / "myskill").exists()
 
 
 class TestImportNeverReplacesASkill:
@@ -218,35 +221,107 @@ class TestImportNeverReplacesASkill:
 
     def test_an_existing_folder_skill_is_kept(self, tmp_path):
         qroot = self._staged(tmp_path)
-        own = tmp_path / "skills" / "myskill"
+        own = skills_module.GLOBAL_SKILLS_DIR / "myskill"
         own.mkdir(parents=True)
         (own / "SKILL.md").write_text("---\nname: myskill\ndescription: mine\n---\nmine\n")
         with pytest.raises(skill_import.SkillImportError, match="already exists"):
-            skill_import.install("myskill", tmp_path / "skills", root=qroot)
+            skill_import.install("myskill", root=qroot)
         assert (own / "SKILL.md").read_text().endswith("mine\n")
         assert skill_import.pending(qroot) == ["myskill"]  # still there to discard
 
     def test_an_existing_flat_skill_is_kept(self, tmp_path):
         qroot = self._staged(tmp_path)
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
+        skills_dir = skills_module.GLOBAL_SKILLS_DIR
         (skills_dir / "myskill.md").write_text("---\ndescription: mine\n---\nmine\n")
         with pytest.raises(skill_import.SkillImportError, match="myskill.md"):
-            skill_import.install("myskill", skills_dir, root=qroot)
-        assert not (skills_dir / "myskill").exists()
+            skill_import.install("myskill", root=qroot)
+        assert not (skills_module.VENDOR_SKILLS_DIR / "myskill").exists()
 
     def test_a_frontmatter_name_collision_is_refused(self, tmp_path):
         qroot = self._staged(tmp_path)
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
+        skills_dir = skills_module.GLOBAL_SKILLS_DIR
         (skills_dir / "other-file.md").write_text("---\nname: myskill\ndescription: mine\n---\n")
         with pytest.raises(skill_import.SkillImportError, match="other-file.md"):
-            skill_import.install("myskill", skills_dir, root=qroot)
+            skill_import.install("myskill", root=qroot)
+
+    def test_an_earlier_import_of_the_name_is_kept(self, tmp_path):
+        """#467: the clash check covers the third-party tree as well, so one
+        import can no more replace another than replace the owner's."""
+        qroot = self._staged(tmp_path)
+        earlier = skills_module.VENDOR_SKILLS_DIR / "myskill"
+        earlier.mkdir(parents=True)
+        (earlier / "SKILL.md").write_text("---\nname: myskill\ndescription: d\n---\nfirst\n")
+        with pytest.raises(skill_import.SkillImportError, match="already exists"):
+            skill_import.install("myskill", root=qroot)
+        assert (earlier / "SKILL.md").read_text().endswith("first\n")
 
     def test_no_collision_installs(self, tmp_path):
         qroot = self._staged(tmp_path)
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
+        skills_dir = skills_module.GLOBAL_SKILLS_DIR
         (skills_dir / "unrelated.md").write_text("---\ndescription: other\n---\n")
-        installed, _ = skill_import.install("myskill", skills_dir, root=qroot)
+        installed, _, _ = skill_import.install("myskill", root=qroot)
         assert (installed / "SKILL.md").exists()
+
+
+class TestImportsAreThirdParty:
+    """#467: an import used to land in the owner's own skills/, with nothing
+    recording that it came from outside. Every import — a local path included,
+    since where the files were says nothing about who wrote them — now lands in
+    the third-party tree, and the lock beside its folders says where from."""
+
+    def test_the_cli_path_installs_into_the_tree_and_records_the_source(self, tmp_path):
+        make_repo(tmp_path / "src")
+        qroot = tmp_path / "q"
+        skill_import.stage_to_disk(str(tmp_path / "src"), "myskill", root=qroot)
+        installed, _, note = skill_import.install("myskill", root=qroot)
+        assert note == ""
+        assert installed.parent == skills_module.VENDOR_SKILLS_DIR
+        assert not (skills_module.GLOBAL_SKILLS_DIR / "myskill").exists()
+        lock = json.loads((skills_module.VENDOR_SKILLS_DIR / "skills.lock").read_text())
+        assert lock["version"] == skill_import.LOCK_VERSION
+        entry = lock["skills"]["myskill"]
+        assert entry["source"] == f"local:{(tmp_path / 'src').resolve()}"
+        assert entry["path"] == "myskill"
+        assert entry["commit"] is None  # a local source has no clone to ask
+        assert entry["imported_at"]
+        # Beside the folder, never in it: not a bundled file, on no card.
+        assert not (installed / "skills.lock").exists()
+        assert not list(qroot.glob("*.origin.json"))  # the staging note is gone
+
+    def test_a_second_import_keeps_the_first_entry(self):
+        tree = skills_module.VENDOR_SKILLS_DIR
+        skill_import.record_import(tree, "one", "local:/a", "", None)
+        skill_import.record_import(tree, "two", "https://x.example/r", "s", "abc")
+        lock = json.loads((tree / "skills.lock").read_text())
+        assert set(lock["skills"]) == {"one", "two"}
+
+    def test_the_tree_not_the_lock_decides(self):
+        """A folder with no lock entry is third-party all the same."""
+        folder = skills_module.VENDOR_SKILLS_DIR / "unlocked"
+        folder.mkdir()
+        (folder / "SKILL.md").write_text("---\nname: unlocked\ndescription: d\n---\nb\n")
+        [entry] = skills_module._dir_entries(skills_module.VENDOR_SKILLS_DIR, "skill")
+        assert entry.third_party is True
+
+    def test_a_url_source_is_recorded_without_its_credentials(self):
+        assert skill_import.source_label("https://user:tok@github.com/o/r") == (
+            "https://github.com/o/r"
+        )
+        assert skill_import.source_label("https://github.com/o/r") == "https://github.com/o/r"
+
+    def test_a_name_that_would_leave_the_tree_is_refused(self, tmp_path):
+        with pytest.raises(skill_import.SkillImportError, match="invalid skill name"):
+            skill_import.install("../skills/x", root=tmp_path / "q")
+
+    def test_an_unwritable_lock_is_said_and_the_skill_still_installs(self, tmp_path, monkeypatch):
+        make_repo(tmp_path / "src")
+        qroot = tmp_path / "q"
+        skill_import.stage_to_disk(str(tmp_path / "src"), "myskill", root=qroot)
+
+        def refuse(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(skill_import, "publish", refuse)
+        installed, _, note = skill_import.install("myskill", root=qroot)
+        assert (installed / "SKILL.md").exists()
+        assert "NOT recorded" in note and "disk full" in note

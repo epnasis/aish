@@ -7,6 +7,10 @@ safety model is therefore: nothing an import fetches is installed until the USER
 approves EACH file through the normal write-diff gate — enforced in code
 (`agent._import_skill`), not by asking the model nicely.
 
+Every import, from a URL or a local path, installs into the third-party tree
+(`skills.VENDOR_SKILLS_DIR`, #467) — a local path is no evidence of who wrote
+the skill — and `record_import` notes where it came from in that tree's lock.
+
 This module only STAGES: fetch (a shallow, read-only `git clone` that never
 executes the skill's code) + validate (must be a real SKILL.md) + collect the
 text files. Binary assets are skipped (they cannot go through the text diff
@@ -15,13 +19,17 @@ gate and are not part of the instruction/execution surface).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
+from .atomic_write import publish
 from .files import contains
 from .paths import state_home
 
@@ -162,20 +170,26 @@ def symlinks_in(directory: Path) -> list[str]:
     return sorted(found)
 
 
-def existing_skill(names: list[str], skills_dir: Path) -> Path | None:
-    """Where a skill answering to any of `names` already lives in `skills_dir`,
-    or None. An import must never replace one (#466): the folder by that name,
-    the flat `<name>.md`, and any entry whose frontmatter `name:` matches (the
-    frontmatter wins over the path, so a different folder can still collide)."""
+def existing_skill(names: list[str]) -> Path | None:
+    """Where a skill answering to any of `names` already lives — in the
+    owner's tree or the third-party one — or None. An import must never
+    replace one (#466), and must never land beside an owner's skill of the
+    same name either (#467): his would win every read, so the import would sit
+    there unreachable. Checked: the folder by that name, the flat `<name>.md`,
+    and any entry whose frontmatter `name:` matches (the frontmatter wins over
+    the path, so a different folder can still collide)."""
     from . import skills as sk
 
-    for name in names:
-        for candidate in (skills_dir / name, skills_dir / f"{name}.md"):
-            if candidate.exists() or candidate.is_symlink():
-                return candidate
-    for entry in sk._dir_entries(skills_dir, "skill"):
-        if entry.name in names and entry.path is not None:
-            return entry.path
+    trees = [sk.GLOBAL_SKILLS_DIR, sk.VENDOR_SKILLS_DIR]
+    for skills_dir in trees:
+        for name in names:
+            for candidate in (skills_dir / name, skills_dir / f"{name}.md"):
+                if candidate.exists() or candidate.is_symlink():
+                    return candidate
+    for skills_dir in trees:
+        for entry in sk._dir_entries(skills_dir, "skill"):
+            if entry.name in names and entry.path is not None:
+                return entry.path
     return None
 
 
@@ -185,6 +199,77 @@ def already_exists_error(path: Path) -> str:
         "a skill, so nothing was installed. Delete the existing one first if it "
         "should be replaced."
     )
+
+
+# Where each third-party skill came from (#467), beside the skill folders and
+# never inside one, so it is not a bundled file and is on no card. A record,
+# not a decision: membership in the tree is what makes a skill third-party,
+# with or without an entry here. `version` leaves room for what a later slice
+# adds per skill (file hashes, an audit verdict).
+LOCK_NAME = "skills.lock"
+LOCK_VERSION = 1
+
+
+def reserved_name_error(names: list[str]) -> str | None:
+    """The lock's own name is not a skill name: a folder by that name would
+    stand where the lock is written and every later record would fail."""
+    if LOCK_NAME in names:
+        return f"{LOCK_NAME!r} is the name of the third-party tree's lock, not a skill name"
+    return None
+
+
+def source_label(repo: str) -> str:
+    """The lock's `source`: a URL without any credentials in it (the lock is
+    in the config backup), or `local:<absolute path>`."""
+    if looks_like_url(repo):
+        parts = urlsplit(repo.strip())
+        if parts.username or parts.password:
+            host = parts.hostname or ""
+            netloc = f"{host}:{parts.port}" if parts.port else host
+            return urlunsplit(parts._replace(netloc=netloc))
+        return repo.strip()
+    return f"local:{Path(os.path.expanduser(repo)).resolve()}"
+
+
+def clone_commit(tmp: str) -> str | None:
+    """HEAD of a staged clone; None for a local source or when git cannot say."""
+    if not tmp:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", tmp, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = proc.stdout.strip()
+    return commit if proc.returncode == 0 and commit else None
+
+
+def record_import(
+    tree: Path, name: str, source: str | None, sub_path: str, commit: str | None
+) -> None:
+    """Add `name` to the tree's lock. The ONE writer, called by both install
+    paths after the files are in place. Atomic against a torn write only: two
+    processes importing at once can each read the old lock, and the later
+    write drops the earlier entry — accepted, because the lock decides nothing.
+    Raises OSError; an unreadable lock is replaced rather than trusted."""
+    lock = tree / LOCK_NAME
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8"))
+        entries = data.get("skills") if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        entries = None
+    if not isinstance(entries, dict):
+        entries = {}
+    entries[name] = {
+        "source": source,
+        "path": sub_path,
+        "commit": commit,
+        "imported_at": date.today().isoformat(),
+    }
+    text = json.dumps({"version": LOCK_VERSION, "skills": entries}, indent=2, sort_keys=True)
+    publish(lock, text + "\n", encoding="utf-8")
 
 
 def stage(
@@ -274,6 +359,12 @@ def quarantine_root() -> Path:
     return state_home() / "skill-imports"
 
 
+def _origin_path(root: Path, name: str) -> Path:
+    """Beside the quarantined folder, not in it, so it never installs as a
+    bundled file: where the staged skill came from, for the lock at approve."""
+    return root / f"{name}.origin.json"
+
+
 def stage_to_disk(
     repo: str, path: str = "", root: Path | None = None
 ) -> tuple[str, Path, list[str]]:
@@ -293,6 +384,8 @@ def stage_to_disk(
             target.write_text(text, encoding="utf-8")
             if is_exec:
                 target.chmod(0o755)
+        origin = {"source": source_label(repo), "path": path, "commit": clone_commit(tmp)}
+        publish(_origin_path(root, name), json.dumps(origin) + "\n", encoding="utf-8")
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -307,12 +400,17 @@ def pending(root: Path | None = None) -> list[str]:
         return []
 
 
-def install(
-    name: str, dest_skills_dir: Path, root: Path | None = None
-) -> tuple[Path, list[str]]:
-    """Move a quarantined skill into the skills dir. Returns (install path,
-    keywords dropped as not English). The quarantine is hand-editable between
-    stage and approve, so the manifest is cleaned again here, at the write."""
+def install(name: str, root: Path | None = None) -> tuple[Path, list[str], str]:
+    """Move a quarantined skill into the third-party tree — always that tree,
+    decided here rather than by the caller (#467). Returns (install path,
+    keywords dropped as not English, a note when the lock could not be
+    written). The quarantine is hand-editable between stage and approve, so
+    the manifest is cleaned again here, at the write."""
+    from . import skills as sk
+
+    # The name becomes a path under the tree, so it must not be able to leave it.
+    if not sk.NAME_RE.match(name or ""):
+        raise SkillImportError(f"invalid skill name {name!r}")
     root = root or quarantine_root()
     src = root / name
     if not (src / MANIFEST).is_file():
@@ -323,20 +421,48 @@ def install(
         raise SkillImportError(
             f"the staged skill contains symlinks ({', '.join(links)}) — nothing was installed"
         )
-    from . import skills as sk
-
     declared = sk._parse(src / MANIFEST, "skill").name
-    clash = existing_skill(sorted({name, declared}), dest_skills_dir)
+    reserved = reserved_name_error([name, declared])
+    if reserved is not None:
+        raise SkillImportError(reserved)
+    clash = existing_skill(sorted({name, declared}))
     if clash is not None:
         raise SkillImportError(already_exists_error(clash))
-    dest = dest_skills_dir / name
+    tree = sk.VENDOR_SKILLS_DIR
+    dest = tree / name
     shutil.copytree(src, dest)
     shutil.rmtree(src, ignore_errors=True)
     manifest = dest / MANIFEST
     text, dropped = english_keywords(manifest.read_text(encoding="utf-8"))
     if dropped:
         manifest.write_text(text, encoding="utf-8")
-    return dest, dropped
+    origin_file = _origin_path(root, name)
+    try:
+        origin = json.loads(origin_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        origin = {}
+    if not isinstance(origin, dict):
+        origin = {}
+    origin_file.unlink(missing_ok=True)
+    return dest, dropped, lock_failure_note(
+        tree, name, origin.get("source"), str(origin.get("path") or ""), origin.get("commit")
+    )
+
+
+def lock_failure_note(
+    tree: Path, name: str, source: str | None, sub_path: str, commit: str | None
+) -> str:
+    """`record_import`, with a failure turned into the sentence both install
+    paths say: the skill is installed and still third-party, only the record
+    of where it came from is missing."""
+    try:
+        record_import(tree, name, source, sub_path, commit)
+    except OSError as exc:
+        return (
+            f"where it came from was NOT recorded in {tree / LOCK_NAME} ({exc}); "
+            "it is installed, and third-party all the same"
+        )
+    return ""
 
 
 def discard(name: str, root: Path | None = None) -> bool:
@@ -345,4 +471,5 @@ def discard(name: str, root: Path | None = None) -> bool:
     if not src.is_dir():
         return False
     shutil.rmtree(src, ignore_errors=True)
+    _origin_path(root, name).unlink(missing_ok=True)
     return True

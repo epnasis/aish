@@ -510,7 +510,15 @@ thousands of entries without bloating the context.
   a new name too similar to an existing skill, and every change is shown as a
   diff for approval before anything is written. **Import skills from the ecosystem** with `import_skill`
   (e.g. `anthropics/skills`): a read-only clone, then one consolidated review of
-  every file plus deterministic risk flags before anything installs.
+  every file plus deterministic risk flags before anything installs. An import —
+  from a URL or a local path alike — goes to `~/.config/aish/vendor-skills/`,
+  never into your own `skills/`, with where it came from recorded in
+  `vendor-skills/skills.lock`. Imported skills are **third-party**: listed in a
+  separate index section, never preloaded, and loaded only when the model asks
+  for one by name; reading one (or a file bundled with it) with `read_skill` or `read_file` marks the task as
+  having read content from outside this machine, so the outbound gates treat
+  what follows accordingly. A skill you wrote yourself and want trusted goes into
+  `skills/` by hand, not through import.
 - **Plugin tools** — where a skill *teaches*, a tool *does*. A droppable
   `<name>/TOOL.md` the model calls exactly like a built-in tool, choosing from a
   schema instead of improvising a shell command. Reserve one for an operation

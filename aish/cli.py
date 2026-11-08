@@ -28,7 +28,6 @@ from . import (
     owner_ua,
     recipients,
     roles,
-    skills,
     term_image,
     tools,
     turns,
@@ -2466,13 +2465,15 @@ def _skill_cli(args: list[str]) -> int:
         return 0
     if cmd == "approve" and rest:
         try:
-            dest, dropped = skill_import.install(rest[0], skills.GLOBAL_SKILLS_DIR)
+            dest, dropped, lock_note = skill_import.install(rest[0])
         except skill_import.SkillImportError as exc:
             print(f"error: {exc}")
             return 1
-        print(f"installed {rest[0]} → {dest}")
+        print(f"installed {rest[0]} → {dest} (third-party)")
         for flag in skill_import.keywords_flag(dropped):
             print(f"  {_plain(flag)}")
+        if lock_note:
+            print(f"  {_plain(lock_note)}")
         return 0
     if cmd == "discard" and rest:
         ok = skill_import.discard(rest[0])

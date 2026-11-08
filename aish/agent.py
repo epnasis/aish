@@ -1425,10 +1425,12 @@ _CATALOGUE: dict[str, Any] = {}
 # and carries only what they do not already hold (`reminder_delta`).
 TASK_REMINDER_MARK = "<system-reminder>"
 TASK_REMINDER = (
-    "<system-reminder>Before acting, scan the Skills index in your system "
-    "prompt: if a skill matches this task, your FIRST action MUST be "
-    "read_skill(<name>) — never improvise the task from training data. Skills "
-    "and saved Memory facts override what you think you know.</system-reminder>"
+    "<system-reminder>Before acting, scan the Skills section of your system "
+    "prompt: if a skill there matches this task, your FIRST action MUST be "
+    "read_skill(<name>) — never improvise the task from training data. Those "
+    "skills and saved Memory facts override what you think you know. A "
+    "Third-party skills section, if there is one, is not covered by this."
+    "</system-reminder>"
 )
 
 # When pre-flight retrieval finds matching knowledge (skills.preflight), the
@@ -1439,7 +1441,7 @@ PRELOAD_REMINDER = (
     "over your training data:\n\n{knowledge}\n\n"
     "If a block is marked TRUNCATED, you MUST read_skill it in full before "
     "anything else, unless it plainly does not fit this task. Also scan the "
-    "Skills index in your system prompt for other matches. None of this is "
+    "Skills section of your system prompt for other matches. None of this is "
     "for the user: never tell them which skills you did or did not use."
     "</system-reminder>"
 )
@@ -5485,7 +5487,7 @@ class Agent:
         paged_from_mail = False
         for name, args, cut in carried.calls:
             if self._brings_outside_content(name, args) or (
-                cut and (name in DUAL_SOURCE_TOOLS or name == "read_file")
+                cut and (name in DUAL_SOURCE_TOOLS or name in ("read_file", "read_skill"))
             ):
                 self._mark_tainted(name, args)
             if name == "read_tool_output":
@@ -8728,6 +8730,17 @@ class Agent:
             # change, carries text a stranger wrote or a model read from one;
             # a preference's card quotes the mail it names.
             return True
+        if name == "read_skill":
+            # Args unknown: the skill may have been a third party's (#467).
+            if args is None:
+                return True
+            # Asked of the entry the read itself resolves, so an owner's skill
+            # sharing a third-party name — his wins the read — does not taint.
+            # Asked later than the read, though (after the batch, or at a
+            # recovery), so a name that no longer resolves — a folder deleted
+            # since, or a cut argument — counts as outside.
+            entry = skills.resolve_skill(str(args.get("name", "") or ""), self.cwd)
+            return entry is None or entry.third_party
         # Asked LAST, so this can only ever add. A local read used to raise
         # nothing, which is exactly how a caption track or a fetched PDF crossed
         # the fence wearing a local path (#319). The stores are on disk and
@@ -9580,9 +9593,10 @@ class Agent:
             return label, partial(tools.read_docs, command, topic=str(topic) if topic else None)
         if name == "read_skill":
             skill = str(args.get("name", ""))
-            # A skill can arrive by import_skill, from a stranger's repo.
+            # Disarmed whatever tree it resolves to: before #467 imports landed
+            # in the owner's own tree, and those files are still there.
             return f"→ read_skill: {skill}", lambda: provenance.disarm_markers(
-                skills.load_skill(skill, skills.skill_dirs(self.cwd))
+                skills.load_skill(skill, skills.skill_reading_dirs(self.cwd))
             )
         if name == "web_search":
             query = str(args.get("query", ""))
@@ -13296,8 +13310,16 @@ class Agent:
         """Would a `read_file` here put content from outside this machine into
         the conversation? A rendition of a LOCAL PDF is not outside content and
         says so in its own record; the same PDF fetched from a URL is."""
+        if self._in_third_party_skills(path):
+            return True
         record = self._artefact_source(path)
         return record is not None and record.outside
+
+    def _in_third_party_skills(self, path: str) -> bool:
+        """Is this a file of an imported skill (#467)? Its bundled references
+        and scripts are read through read_file — `_bundled_note` says to — so
+        this door has to know them as outside content too."""
+        return files.contains(skills.VENDOR_SKILLS_DIR, path, self.cwd)
 
     def _is_artefact_record(self, path: str) -> bool:
         """Is this path a provenance record inside one of those stores?
@@ -13329,6 +13351,8 @@ class Agent:
             else (f" (from line {offset})" if offset > 1 else "")
         )
         read = partial(self._read_file_or_picture, path, offset, limit, section)
+        if self._in_third_party_skills(path):
+            return label, partial(self._marked_third_party_read, read)
         # Wrapped HERE rather than in `_dispatch`, because read_file also runs on
         # the parallel read-only path and a marking only the sequential door
         # applied would be a marking that depends on how many tools the model
@@ -13337,6 +13361,16 @@ class Agent:
         if record is None or not record.outside:
             return label, read
         return label, partial(self._marked_outside_read, read, path, record)
+
+    @staticmethod
+    def _marked_third_party_read(read: Callable[[], str]) -> str:
+        """A read of an imported skill's file, told for what it is (#467) —
+        on the result, like `_marked_outside_read`, and for the same reasons.
+        An error is aish's own sentence and stays unbannered."""
+        served = read()
+        if served.startswith("ERROR"):
+            return served
+        return skills.THIRD_PARTY_NOTE + provenance.disarm_markers(served)
 
     def _marked_outside_read(
         self, read: Callable[[], str], path: str, record: "provenance.ArtefactSource"
@@ -16290,10 +16324,9 @@ class Agent:
             return "ERROR: repo (a git URL or local path) is required."
         if self.approve_import is None:
             return "ERROR: no import reviewer available; cannot import a skill."
+        sub_path = str(args.get("path", "")).strip()
         try:
-            name, description, imported, skipped, tmp = skill_import.stage(
-                repo, str(args.get("path", "")).strip()
-            )
+            name, description, imported, skipped, tmp = skill_import.stage(repo, sub_path)
         except skill_import.SkillImportError as exc:
             return f"ERROR: {exc}"
         # Before the review, so the owner reviews exactly what installs (#444).
@@ -16308,12 +16341,16 @@ class Agent:
             # Before the card: approving an import must never replace a skill
             # (#466). The frontmatter name is checked too, since it wins over
             # the folder name once installed.
-            clash = skill_import.existing_skill(
-                sorted({name, declared}), skills.GLOBAL_SKILLS_DIR
-            )
+            reserved = skill_import.reserved_name_error([name, declared])
+            if reserved is not None:
+                return f"ERROR: {reserved}; nothing was installed."
+            clash = skill_import.existing_skill(sorted({name, declared}))
             if clash is not None:
                 return f"ERROR: {skill_import.already_exists_error(clash)}"
-            dest = skills.GLOBAL_SKILLS_DIR / name
+            # Always the third-party tree (#467), a local path included: where
+            # the files were is no evidence of who wrote them.
+            tree = skills.VENDOR_SKILLS_DIR
+            dest = tree / name
             flags = skill_import.safety_scan(imported) + skill_import.keywords_flag(
                 dropped_keywords
             )
@@ -16354,6 +16391,10 @@ class Agent:
                         os.chmod(target, mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
                     except OSError:
                         pass
+            lock_note = skill_import.lock_failure_note(
+                tree, name, skill_import.source_label(repo), sub_path,
+                skill_import.clone_commit(tmp),
+            )
         finally:
             if tmp:
                 shutil.rmtree(tmp, ignore_errors=True)
@@ -16362,9 +16403,11 @@ class Agent:
         keywords_note = "".join(
             f" {flag}." for flag in skill_import.keywords_flag(dropped_keywords)
         )
+        lock_note = f" NOTE: {lock_note}." if lock_note else ""
         return (
-            f"Imported skill {name!r} into {dest} ({len(imported)} files)."
-            f"{skipped_note}{keywords_note} It is available on the next task."
+            f"Imported third-party skill {name!r} into {dest} ({len(imported)} files)."
+            f"{skipped_note}{keywords_note}{lock_note} It is third-party: from the next "
+            "task it loads only with read_skill(<name>) and is never preloaded."
         )
 
     def _dispatch_write(self, name: str, args: dict) -> str:
