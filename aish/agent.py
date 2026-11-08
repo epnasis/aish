@@ -16140,11 +16140,20 @@ class Agent:
         # Before the review, so the owner reviews exactly what installs (#444).
         imported, dropped_keywords = skill_import.english_manifest(imported)
         try:
+            declared = name
             override = str(args.get("name", "")).strip()
             if override:
                 if not skills.NAME_RE.match(override):
                     return f"ERROR: invalid skill name {override!r}."
                 name = override
+            # Before the card: approving an import must never replace a skill
+            # (#466). The frontmatter name is checked too, since it wins over
+            # the folder name once installed.
+            clash = skill_import.existing_skill(
+                sorted({name, declared}), skills.GLOBAL_SKILLS_DIR
+            )
+            if clash is not None:
+                return f"ERROR: {skill_import.already_exists_error(clash)}"
             dest = skills.GLOBAL_SKILLS_DIR / name
             flags = skill_import.safety_scan(imported) + skill_import.keywords_flag(
                 dropped_keywords

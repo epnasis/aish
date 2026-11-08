@@ -154,3 +154,99 @@ class TestQuarantine:
     def test_install_missing_errors(self, tmp_path):
         with pytest.raises(skill_import.SkillImportError, match="no staged skill"):
             skill_import.install("nope", tmp_path / "skills", root=tmp_path / "q")
+
+
+class TestNoSymlinkIsFollowed:
+    """#466: a link inside an imported skill was followed, so a file outside the
+    skill (an ssh key) became a skill file on the card and in the corpus."""
+
+    def _outside(self, tmp_path):
+        target = tmp_path / "outside" / "canary.txt"
+        target.parent.mkdir()
+        target.write_text("SECRET-CANARY\n")
+        return target
+
+    def test_a_file_symlink_refuses_the_import(self, tmp_path):
+        make_repo(tmp_path / "src")
+        (tmp_path / "src" / "myskill" / "notes.md").symlink_to(self._outside(tmp_path))
+        with pytest.raises(skill_import.SkillImportError, match="symlinks \\(notes.md\\)"):
+            skill_import.stage(str(tmp_path / "src"), "myskill")
+
+    def test_a_directory_symlink_refuses_the_import(self, tmp_path):
+        make_repo(tmp_path / "src")
+        outside = self._outside(tmp_path).parent
+        (tmp_path / "src" / "myskill" / "references").symlink_to(outside)
+        with pytest.raises(skill_import.SkillImportError, match="references"):
+            skill_import.stage(str(tmp_path / "src"), "myskill")
+
+    def test_a_symlinked_manifest_refuses_the_import(self, tmp_path):
+        skill = tmp_path / "src" / "linked"
+        skill.mkdir(parents=True)
+        real = tmp_path / "outside.md"
+        real.write_text("---\nname: linked\ndescription: d\n---\nbody\n")
+        (skill / "SKILL.md").symlink_to(real)
+        with pytest.raises(skill_import.SkillImportError, match="SKILL.md"):
+            skill_import.stage(str(tmp_path / "src"), "linked")
+
+    def test_the_canary_never_reaches_the_quarantine(self, tmp_path):
+        make_repo(tmp_path / "src")
+        (tmp_path / "src" / "myskill" / "notes.md").symlink_to(self._outside(tmp_path))
+        qroot = tmp_path / "q"
+        with pytest.raises(skill_import.SkillImportError):
+            skill_import.stage_to_disk(str(tmp_path / "src"), "myskill", root=qroot)
+        assert not any("SECRET-CANARY" in p.read_text() for p in qroot.rglob("*") if p.is_file())
+
+    def test_a_symlink_added_to_the_quarantine_refuses_install(self, tmp_path):
+        make_repo(tmp_path / "src")
+        qroot = tmp_path / "q"
+        _, dest, _ = skill_import.stage_to_disk(str(tmp_path / "src"), "myskill", root=qroot)
+        (dest / "notes.md").symlink_to(self._outside(tmp_path))
+        with pytest.raises(skill_import.SkillImportError, match="symlinks"):
+            skill_import.install("myskill", tmp_path / "skills", root=qroot)
+        assert not (tmp_path / "skills" / "myskill").exists()
+
+
+class TestImportNeverReplacesASkill:
+    """#466: install rmtree'd the destination, so one approval on a colliding
+    name replaced the owner's own skill."""
+
+    def _staged(self, tmp_path):
+        make_repo(tmp_path / "src")
+        qroot = tmp_path / "q"
+        skill_import.stage_to_disk(str(tmp_path / "src"), "myskill", root=qroot)
+        return qroot
+
+    def test_an_existing_folder_skill_is_kept(self, tmp_path):
+        qroot = self._staged(tmp_path)
+        own = tmp_path / "skills" / "myskill"
+        own.mkdir(parents=True)
+        (own / "SKILL.md").write_text("---\nname: myskill\ndescription: mine\n---\nmine\n")
+        with pytest.raises(skill_import.SkillImportError, match="already exists"):
+            skill_import.install("myskill", tmp_path / "skills", root=qroot)
+        assert (own / "SKILL.md").read_text().endswith("mine\n")
+        assert skill_import.pending(qroot) == ["myskill"]  # still there to discard
+
+    def test_an_existing_flat_skill_is_kept(self, tmp_path):
+        qroot = self._staged(tmp_path)
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "myskill.md").write_text("---\ndescription: mine\n---\nmine\n")
+        with pytest.raises(skill_import.SkillImportError, match="myskill.md"):
+            skill_import.install("myskill", skills_dir, root=qroot)
+        assert not (skills_dir / "myskill").exists()
+
+    def test_a_frontmatter_name_collision_is_refused(self, tmp_path):
+        qroot = self._staged(tmp_path)
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "other-file.md").write_text("---\nname: myskill\ndescription: mine\n---\n")
+        with pytest.raises(skill_import.SkillImportError, match="other-file.md"):
+            skill_import.install("myskill", skills_dir, root=qroot)
+
+    def test_no_collision_installs(self, tmp_path):
+        qroot = self._staged(tmp_path)
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "unrelated.md").write_text("---\ndescription: other\n---\n")
+        installed, _ = skill_import.install("myskill", skills_dir, root=qroot)
+        assert (installed / "SKILL.md").exists()

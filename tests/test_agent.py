@@ -4761,6 +4761,36 @@ class TestSkillImport:
         assert any(f["path"] == "scripts/run.sh" and f["content"] for f in captured["files"])
         assert any("pipe-to-shell" in flag for flag in captured["flags"])
 
+    def test_import_never_replaces_an_existing_skill(self, tmp_path, monkeypatch):
+        """#466: the card path wrote over an existing skill of the same name.
+        Refused before any card, so there is no approval to give by mistake."""
+        import aish.skills as skills_mod
+
+        dest_root = tmp_path / "global-skills"
+        own = dest_root / "myskill"
+        own.mkdir(parents=True)
+        (own / "SKILL.md").write_text("---\nname: myskill\ndescription: mine\n---\nmine\n")
+        monkeypatch.setattr(skills_mod, "GLOBAL_SKILLS_DIR", dest_root)
+        repo = self._make_repo(tmp_path / "repo")
+        cards = []
+        agent, _ = make_agent(
+            [
+                # The rename is what the frontmatter check exists for: the
+                # folder would be new, but `name: myskill` still collides.
+                model_says(tool_calls=[SimpleNamespace(function=SimpleNamespace(
+                    name="import_skill",
+                    arguments={"repo": str(repo), "path": "myskill", "name": "renamed"},
+                ))]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_import=lambda **k: cards.append(k) or True,
+        )
+        agent.run_task("go")
+        assert cards == []
+        assert (own / "SKILL.md").read_text().endswith("mine\n")
+        assert not (dest_root / "renamed").exists()
+        assert any("already exists" in m["content"] for m in tool_messages(agent.messages))
+
     def test_import_missing_skill_md_errors(self, tmp_path, monkeypatch):
         import aish.skills as skills_mod
 

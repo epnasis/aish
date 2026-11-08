@@ -146,6 +146,47 @@ def _decodes(data: bytes) -> str | None:
         return None
 
 
+def symlinks_in(directory: Path) -> list[str]:
+    """Every symlink under `directory` (files and directories), relative to it.
+    os.walk with followlinks=False lists a linked directory without entering it,
+    on every supported Python — `rglob`'s treatment of linked dirs changed in 3.13."""
+    found: list[str] = []
+    for current, dirnames, filenames in os.walk(directory, followlinks=False):
+        if ".git" in Path(current).relative_to(directory).parts:
+            continue
+        for item in dirnames + filenames:
+            if item == ".git":
+                continue
+            if (Path(current) / item).is_symlink():
+                found.append(str((Path(current) / item).relative_to(directory)))
+    return sorted(found)
+
+
+def existing_skill(names: list[str], skills_dir: Path) -> Path | None:
+    """Where a skill answering to any of `names` already lives in `skills_dir`,
+    or None. An import must never replace one (#466): the folder by that name,
+    the flat `<name>.md`, and any entry whose frontmatter `name:` matches (the
+    frontmatter wins over the path, so a different folder can still collide)."""
+    from . import skills as sk
+
+    for name in names:
+        for candidate in (skills_dir / name, skills_dir / f"{name}.md"):
+            if candidate.exists() or candidate.is_symlink():
+                return candidate
+    for entry in sk._dir_entries(skills_dir, "skill"):
+        if entry.name in names and entry.path is not None:
+            return entry.path
+    return None
+
+
+def already_exists_error(path: Path) -> str:
+    return (
+        f"a skill with this name already exists at {path} — an import never replaces "
+        "a skill, so nothing was installed. Delete the existing one first if it "
+        "should be replaced."
+    )
+
+
 def stage(
     repo: str, path: str = ""
 ) -> tuple[str, str, list[tuple[str, str, bool]], list[str], str]:
@@ -183,6 +224,19 @@ def stage(
             f"no SKILL.md found at {path or '<repo root>'} — point `path` at the skill folder"
         )
 
+    # Before anything is read: a link would be followed out of the skill, and
+    # its target (an ssh key, a credentials file) shown on the card and
+    # installed as if it were part of the skill (#466). Refused outright rather
+    # than skipped, so nothing about the skill silently differs from its source.
+    links = symlinks_in(skill_dir)
+    if links:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise SkillImportError(
+            f"the skill contains symlinks ({', '.join(links)}) — aish never follows a "
+            "link out of an imported skill, so nothing was imported"
+        )
+
     from . import skills as sk
 
     entry = sk._parse(manifest, "skill")
@@ -195,6 +249,12 @@ def stage(
     files: list[tuple[str, str, bool]] = []
     skipped: list[str] = []
     for p in sorted(skill_dir.rglob("*")):
+        if p.is_symlink():  # appeared after the check above
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+            raise SkillImportError(
+                f"{p.relative_to(skill_dir)} is a symlink — nothing was imported"
+            )
         if not p.is_file() or ".git" in p.parts:
             continue
         rel = str(p.relative_to(skill_dir))
@@ -257,8 +317,19 @@ def install(
     src = root / name
     if not (src / MANIFEST).is_file():
         raise SkillImportError(f"no staged skill named {name!r} (see `aish skill list`)")
+    # The quarantine is hand-editable, so both checks run again here, at the write.
+    links = symlinks_in(src)
+    if links:
+        raise SkillImportError(
+            f"the staged skill contains symlinks ({', '.join(links)}) — nothing was installed"
+        )
+    from . import skills as sk
+
+    declared = sk._parse(src / MANIFEST, "skill").name
+    clash = existing_skill(sorted({name, declared}), dest_skills_dir)
+    if clash is not None:
+        raise SkillImportError(already_exists_error(clash))
     dest = dest_skills_dir / name
-    shutil.rmtree(dest, ignore_errors=True)
     shutil.copytree(src, dest)
     shutil.rmtree(src, ignore_errors=True)
     manifest = dest / MANIFEST
