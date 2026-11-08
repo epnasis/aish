@@ -5504,6 +5504,29 @@ class TestALiveChromesLockIsNeverCleared:
         assert browser._clear_stale_lock(error) is True
         assert not os.path.lexists(tmp_path / "SingletonLock")
 
+    def test_playwrights_wording_of_the_lock_failure_matches(
+        self, monkeypatch, tmp_path
+    ):
+        """The exact launch error observed 2026-10-15 (session-20261015-204130):
+        Playwright's wrap says "profile is already in use", not Chrome's own
+        "profile appears to be in use", and the recovery never ran — the miss
+        the ship warning surfaced (browser._LOCK_MARKERS, 1 asked / 0
+        matched)."""
+        import subprocess
+        import sys
+
+        monkeypatch.setattr(browser, "profile_dir", lambda: tmp_path)
+        error = RuntimeError(
+            "BrowserType.launch_persistent_context: Opening in existing "
+            "browser session. This usually means that the profile is already "
+            "in use by another instance of Chromium."
+        )
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        os.symlink(f"mm-{dead.pid}", tmp_path / "SingletonLock")
+        assert browser._clear_stale_lock(error) is True
+        assert not os.path.lexists(tmp_path / "SingletonLock")
+
 class TestTheViewsProbesRunWhereThePageCannotSeeThem:
     """booksy.com challenged every sign-in made through the view and none made
     by hand in another tab of the same Chrome. The watcher put a global and

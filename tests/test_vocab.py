@@ -112,6 +112,18 @@ class TestTheCountingChangedNoMatching:
         # read_url and nothing through browse: the model's choice of tool was
         # deciding a permission.
         "aish/agent.py:EGRESS_TOOLS": {"added": ["browse"], "removed": []},
+        # A ship warning (1 asked / 0 matched over 30 days) traced to
+        # session-20261015-204130: a moj.eon.pl launch failed with Playwright's
+        # wrap of the singleton condition — "profile is already in use" — and
+        # Chrome's own "profile appears to be in use" matched nothing. The two
+        # observed phrases joined so the recovery's gate sees Playwright's
+        # wording too; the liveness check still decides whether anything is
+        # cleared.
+        "aish/browser.py:_LOCK_MARKERS": {
+            "added": ["profile is already in use",
+                      "opening in existing browser session"],
+            "removed": [],
+        },
         # #342: the commit verbs became refusals rather than cards, and the
         # words STAYED here so the three fences that read `Control.mutating`
         # keep working. `zamawiam` is the one entry that had to be ADDED: it

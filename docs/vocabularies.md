@@ -103,7 +103,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `browser._CONSENT_SELECTORS` | PL + EN + vendor ids | breaks | yes | `_COVERED_JS` / `browse.Cover` — asks the page what sits at the control's centre point AND what can be pressed on it | 6 |
 | `browser._CHALLENGE_MARKERS` | PL + EN | permits | yes | `BLOCK_STATUS` + `CHALLENGE_MAX_CHARS` — **the epic's worked example** | 13 |
 | `browser._REPUTATION_COOKIES` | vendor cookie names | breaks | yes | — | 8 |
-| `browser._LOCK_MARKERS` | EN (Chrome's own text) | breaks | yes | — | 3 |
+| `browser._LOCK_MARKERS` | EN (Chrome's own text + Playwright's wrap) | breaks | yes | `lock_holder_alive` — a match only licenses the liveness check; a live holder is never cleared | 5 |
 | `signin._CAPTCHA_TOKENS` | vendor brand names | friction | yes | — | 11 |
 | `provenance._SIGN_IN_PHRASES` | PL + EN | permits | yes | none, and one is hard to get — see below | 37 |
 | `web._AVAILABILITY` | schema.org enum | breaks | yes | — | 9 |

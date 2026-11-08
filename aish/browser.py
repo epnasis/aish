@@ -189,11 +189,29 @@ _LOCK_MARKERS = vocab.declare(
     "browser._LOCK_MARKERS",
     demanded=True,  # `_clear_stale_lock` is reached only after Chrome failed to
     # start: an ask is a launch that is already broken
-    languages="English — Chrome's own error text",
+    languages="English — Chrome's own error text, and Playwright's wrap of it",
     on_miss=vocab.BREAKS,
     note="A miss leaves a dead Chrome's lock in place, so every later launch "
     "fails. Loud at the next launch, not silent.",
-    entries=("singletonlock", "processsingleton", "profile appears to be in use"),
+    entries=(
+        "singletonlock",
+        "processsingleton",
+        "profile appears to be in use",
+        # Playwright's wrap of the same condition, observed verbatim
+        # 2026-10-15 (session-20261015-204130, moj.eon.pl): the launch failed
+        # with "Opening in existing browser session. This usually means that
+        # the profile is already in use by another instance of Chromium." —
+        # none of the three entries above matched, so the recovery never ran
+        # (1 asked / 0 matched in `aish vocab`, surfaced by the ship warning).
+        # In THAT event the holder was alive (Chrome prints this after
+        # successfully notifying a live instance), so the right outcome was
+        # match-then-refuse, which is what the liveness check gives; what
+        # these entries buy is the dead-holder variant of this wording
+        # recovering, and the demanded counter no longer crying a standing
+        # miss. Their usual cause is a LIVE holder, unlike the three above.
+        "profile is already in use",
+        "opening in existing browser session",
+    ),
 )
 
 # What a DEAD PLAYWRIGHT DRIVER looks like in a launch failure. The driver is a
