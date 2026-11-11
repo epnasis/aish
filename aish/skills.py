@@ -36,6 +36,7 @@ discoverable — for skills it states the trigger, for memory it IS the fact.
 """
 
 import difflib
+import os
 import re
 import warnings
 from dataclasses import dataclass, field
@@ -58,6 +59,10 @@ GLOBAL_MEMORY_DIR = config_home() / "memory"
 # name: the index's third-party section and read_skill (`skill_reading_dirs`).
 # It stays out of `load_entries`, so preflight, recall and curate never see it.
 VENDOR_SKILLS_DIR = config_home() / "vendor-skills"
+# The owner's list of the publishers an import may come from (#467 P1), read
+# by `skill_import.check_source` before anything is fetched. Outside the tree,
+# so the write fence names it separately (`third_party_write_refusal`).
+SKILL_SOURCES_FILE = config_home() / "skill-sources"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # The inline index is capped so the prompt stays small no matter how many
@@ -235,8 +240,10 @@ class Entry:
     @property
     def third_party(self) -> bool:
         """From the path alone, resolved at call time: a stranger's file can
-        say anything about itself, but not where it is."""
-        return self.path is not None and files.contains(VENDOR_SKILLS_DIR, self.path)
+        say anything about itself, but not where it is. The path as LISTED
+        counts too: a folder in the tree that is a link to elsewhere resolves
+        outside it, and was served as the owner's."""
+        return self.path is not None and in_third_party_tree(self.path)
 
 
 # SECURITY (#178 P0-1, interim): project-scope discovery is OFF by default.
@@ -260,6 +267,49 @@ def skill_reading_dirs(cwd: str) -> list[Path]:
     name clash, then the third-party tree. For READERS only — see
     VENDOR_SKILLS_DIR for why it is never in `skill_dirs`."""
     return [*skill_dirs(cwd), VENDOR_SKILLS_DIR]
+
+
+def _casefold_under(root: Path | None, target: Path | None) -> bool:
+    if root is None or target is None:
+        return False
+    head = [part.casefold() for part in root.parts]
+    return [part.casefold() for part in target.parts[: len(head)]] == head
+
+
+def in_third_party_tree(path: os.PathLike | str, cwd: str | None = None) -> bool:
+    """Does `path` land in VENDOR_SKILLS_DIR? `files.contains`, and also two
+    readings it does not make. Case-insensitively: the owner's disk is
+    case-insensitive, where `Vendor-Skills/x` IS the tree's folder and a plain
+    containment test calls it outside. And as WRITTEN, before links are
+    followed: a folder in the tree that links elsewhere resolves outside it,
+    and its skill was served as the owner's. Every caller uses the answer to
+    restrict (fence a write, taint and check a read), so the wider answer is
+    the safe one."""
+    if files.contains(VENDOR_SKILLS_DIR, path, cwd):
+        return True
+    written = Path(os.path.abspath(files.resolve(os.fspath(path), cwd or os.getcwd())))
+    return any(
+        _casefold_under(tree, target)
+        for tree in (VENDOR_SKILLS_DIR, files.resolved(VENDOR_SKILLS_DIR))
+        for target in (written, files.resolved(path, cwd))
+    )
+
+
+def third_party_write_refusal(path: os.PathLike | str, cwd: str | None = None) -> str:
+    """What `path` is, when aish's own writers may not write it (#467 P3):
+    the third-party tree — the lock included — or the approved-sources file,
+    each compared case-insensitively as `in_third_party_tree` says why.
+    "" otherwise. Asked by each writer itself, never by `files.plan_write`,
+    which the import's own install goes through."""
+    if in_third_party_tree(path, cwd):
+        return "inside the third-party skills tree"
+    target = files.resolved(path, cwd)
+    sources = files.resolved(SKILL_SOURCES_FILE)
+    if target is not None and sources is not None and (
+        str(target).casefold() == str(sources).casefold()
+    ):
+        return "the owner's approved skill sources file"
+    return ""
 
 
 def resolve_skill(name: str, cwd: str) -> "Entry | None":
@@ -432,7 +482,12 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
     """Entry from a markdown file — name defaults to the filename (or, for a
     folder skill's SKILL.md, its directory name), description to the first
     non-empty body line."""
-    text = path.read_text(encoding="utf-8")
+    return _parse_text(path.read_text(encoding="utf-8"), path, kind)
+
+
+def _parse_text(text: str, path: Path, kind: str = "skill") -> Entry:
+    """`_parse` of text already read — for a caller that must serve exactly
+    the bytes it checked (`_verified_third_party`)."""
     default_name = path.parent.name if path.name == "SKILL.md" else path.stem
     name, description, keywords = default_name, "", []
     status, expires, pinned = "", None, False
@@ -464,7 +519,7 @@ def _parse(path: Path, kind: str = "skill") -> Entry:
         warnings.warn(
             f"{path}: frontmatter declares {duplicate!r} more than once; "
             "the last declaration is the one that was read",
-            stacklevel=2,
+            stacklevel=3,
         )
     if not description:
         for line in body.strip().splitlines():
@@ -895,11 +950,60 @@ THIRD_PARTY_NOTE = (
 )
 
 
+# Above a third-party skill or file the lock holds no hashes for (#467): the
+# twelve skills migrated before hashes existed, a skill placed in the tree by
+# hand, a lock that could not be written. Said, never silent, because the
+# read was not checked.
+NO_REVIEW_HASHES_NOTE = (
+    "[the third-party lock records no review hashes for this, so aish did not "
+    "check whether it changed since it was imported.]\n"
+)
+
+
+def _verified_third_party(entry: Entry) -> "tuple[Entry, str] | str":
+    """A third-party entry re-read from ONE read of its SKILL.md and checked,
+    with every bundled file, against the hashes recorded at install: (the
+    entry parsed from exactly those bytes, the note to serve above it), or
+    the refusal to return instead. The cached entry is never served — a file
+    rewritten with its mtime put back would still match the cache."""
+    from . import skill_import
+
+    assert entry.path is not None
+    try:
+        data = entry.path.read_bytes()
+        text = data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return f"ERROR: cannot read third-party skill {entry.name!r}: {exc}"
+    folder = entry.path.parent if entry.path.name == "SKILL.md" else None
+    recorded = (
+        skill_import.recorded_hashes(folder.parent, folder.name)
+        if folder is not None
+        else None
+    )
+    if recorded is None:
+        return _parse_text(text, entry.path, "skill"), NO_REVIEW_HASHES_NOTE
+    assert folder is not None
+    if folder.is_symlink():
+        return "ERROR: " + skill_import.modified_refusal(
+            entry.name, folder, ["the skill folder is a symlink"]
+        )
+    found = skill_import.check_folder(folder, recorded, {"SKILL.md": data})
+    if found:
+        return "ERROR: " + skill_import.modified_refusal(entry.name, folder, found)
+    return _parse_text(text, entry.path, "skill"), ""
+
+
 def load_skill(name: str, dirs: list[Path]) -> str:
     if not NAME_RE.match(name or ""):
         return f"ERROR: invalid skill name {name!r}"
     for entry in _merged(dirs, "skill"):
         if entry.name == name:
+            unchecked = ""
+            if entry.third_party:
+                verified = _verified_third_party(entry)
+                if isinstance(verified, str):
+                    return verified
+                entry, unchecked = verified
             if not entry_active(entry):
                 reason = (
                     "status: disabled"
@@ -919,7 +1023,7 @@ def load_skill(name: str, dirs: list[Path]) -> str:
                     "to re-enable it."
                 )
             served = f"{_block_header(entry)}\n{entry.body}{_bundled_note(entry)}"
-            return THIRD_PARTY_NOTE + served if entry.third_party else served
+            return THIRD_PARTY_NOTE + unchecked + served if entry.third_party else served
     available = ", ".join(n for n, _ in list_skills(dirs)) or "none"
     return f"ERROR: no skill named {name!r}. Available skills: {available}"
 
@@ -1552,6 +1656,8 @@ def save_memory(fact: str, memory_dir, name: str = "", keywords: str = "", cwd: 
     kept_existing = False
     directory = Path(memory_dir)
     path = directory / f"{slug}.md"
+    if fenced := third_party_write_refusal(path):
+        return f"ERROR: NOT saved — {path} is {fenced}, which remember never writes."
     if not force and not path.is_file():
         identity = f"{slug}: {text}"
         if keyword_list:

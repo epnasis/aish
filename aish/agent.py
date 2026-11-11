@@ -1266,6 +1266,18 @@ AUTOMATION_NOT_WRITABLE = (
     "the user what the automation will do. There is nothing to approve here."
 )
 
+# The third-party tree and the approved-sources file (#467 P3): aish's own
+# writers never edit a stranger's skill, and never widen which publishers an
+# import may come from — that list is the owner's, and a card that edits it
+# would be a model-proposed widening. Unapprovable, like the stores above.
+THIRD_PARTY_NOT_WRITABLE = (
+    "NOT EXECUTED: {path} is {what}. aish's file and skill tools never write "
+    "there. Changing a third-party skill (retiring it, or deleting it and "
+    "importing it again) and changing the approved sources are the owner's own "
+    "edits. There is nothing to approve here — if something there should "
+    "change, tell the user what and why."
+)
+
 AUTOMATION_COMMAND_REFUSED = (
     "NOT EXECUTED: this command names aish's automations folder ({where}) — the "
     "files that start unattended runs. A command touching it is refused whether "
@@ -13325,8 +13337,10 @@ class Agent:
     def _in_third_party_skills(self, path: str) -> bool:
         """Is this a file of an imported skill (#467)? Its bundled references
         and scripts are read through read_file — `_bundled_note` says to — so
-        this door has to know them as outside content too."""
-        return files.contains(skills.VENDOR_SKILLS_DIR, path, self.cwd)
+        this door has to know them as outside content too. Case-insensitive
+        (`skills.in_third_party_tree`), or a case-varied spelling of the tree
+        would read a stranger's file unchecked, unbannered and untainted."""
+        return skills.in_third_party_tree(path, self.cwd)
 
     def _is_artefact_record(self, path: str) -> bool:
         """Is this path a provenance record inside one of those stores?
@@ -13359,7 +13373,8 @@ class Agent:
         )
         read = partial(self._read_file_or_picture, path, offset, limit, section)
         if self._in_third_party_skills(path):
-            return label, partial(self._marked_third_party_read, read)
+            verified = partial(self._verified_third_party_read, path, offset, limit, section)
+            return label, partial(self._marked_third_party_read, verified)
         # Wrapped HERE rather than in `_dispatch`, because read_file also runs on
         # the parallel read-only path and a marking only the sequential door
         # applied would be a marking that depends on how many tools the model
@@ -13377,6 +13392,32 @@ class Agent:
             self._third_party_skill_reads.add(skill)
         return provenance.disarm_markers(
             skills.load_skill(skill, skills.skill_reading_dirs(self.cwd))
+        )
+
+    def _verified_third_party_read(
+        self, path: str, offset: int, limit: int, section: str
+    ) -> str:
+        """A file of an imported skill, served only if it is the file that was
+        installed (#467 P4): checked against the hash in the lock and served
+        from that same read. A file the lock holds no hashes for is read as
+        before, under a line saying it was not checked."""
+        target = files.resolved(path, self.cwd)
+        if target is None or not target.is_file():
+            return self._read_file_or_picture(path, offset, limit, section)
+        try:
+            data = skill_import.verified_file(skills.VENDOR_SKILLS_DIR, target)
+        except skill_import.SkillImportError as exc:
+            return f"ERROR: {exc}"
+        except (OSError, ValueError) as exc:
+            return f"ERROR: cannot read {target}: {exc}"
+        if data is None:
+            served = self._read_file_or_picture(path, offset, limit, section)
+            return served if served.startswith("ERROR") else (
+                skills.NO_REVIEW_HASHES_NOTE + served
+            )
+        return files.read_file(
+            path, self.cwd, offset=offset, limit=limit, section=section,
+            text=data.decode("utf-8", errors="replace"),
         )
 
     @staticmethod
@@ -15950,6 +15991,14 @@ class Agent:
     def _commit_tool_file(self, target: Path, content: str, executable: bool) -> str | None:
         """Write one tool file through the diff-approval gate. Returns None on
         success, or a stop/deny result string the model should surface."""
+        # create_skill and create_tool both write through here. Neither can
+        # name the tree today (slug-validated, `skill_dirs` leaves it out);
+        # this is the writer's own refusal, so that stays true by code.
+        if fenced := skills.third_party_write_refusal(target, self.cwd):
+            return _gate_outcome(
+                THIRD_PARTY_NOT_WRITABLE.format(path=str(target), what=fenced),
+                decision="blocked",
+            )
         plan = files.plan_write(str(target), content, self.cwd)
         if plan.error:
             return f"ERROR: {plan.error}"
@@ -16335,10 +16384,12 @@ class Agent:
         """Import a skill (#139). Untrusted content — the whole skill is shown in
         ONE consolidated review (every file's contents, syntax-highlighted, plus
         deterministic risk flags), and installs only on a single approval. Only a
-        shallow read-only clone happens; the code is never executed on import."""
+        shallow read-only clone happens; the code is never executed on import.
+        `stage` refuses every source the owner has not approved before it
+        fetches anything (#467), since nothing here is carded until after it."""
         repo = str(args.get("repo", "")).strip()
         if not repo:
-            return "ERROR: repo (a git URL or local path) is required."
+            return "ERROR: repo (https://github.com/<owner>/<repo>) is required."
         if self.approve_import is None:
             return "ERROR: no import reviewer available; cannot import a skill."
         sub_path = str(args.get("path", "")).strip()
@@ -16364,8 +16415,7 @@ class Agent:
             clash = skill_import.existing_skill(sorted({name, declared}))
             if clash is not None:
                 return f"ERROR: {skill_import.already_exists_error(clash)}"
-            # Always the third-party tree (#467), a local path included: where
-            # the files were is no evidence of who wrote them.
+            # Always the third-party tree (#467), decided here, not by the caller.
             tree = skills.VENDOR_SKILLS_DIR
             dest = tree / name
             flags = skill_import.safety_scan(imported) + skill_import.keywords_flag(
@@ -16409,8 +16459,8 @@ class Agent:
                     except OSError:
                         pass
             lock_note = skill_import.lock_failure_note(
-                tree, name, skill_import.source_label(repo), sub_path,
-                skill_import.clone_commit(tmp),
+                tree, name, skill_import.source_label(repo),
+                skill_import.lock_path(sub_path), skill_import.clone_commit(tmp),
             )
         finally:
             if tmp:
@@ -16473,6 +16523,11 @@ class Agent:
         if self._is_automation_file(str(args.get("path", ""))):
             return _gate_outcome(
                 AUTOMATION_NOT_WRITABLE.format(path=str(args.get("path", ""))),
+                decision="blocked",
+            )
+        if fenced := skills.third_party_write_refusal(str(args.get("path", "")), self.cwd):
+            return _gate_outcome(
+                THIRD_PARTY_NOT_WRITABLE.format(path=str(args.get("path", "")), what=fenced),
                 decision="blocked",
             )
         if name == "write_file":

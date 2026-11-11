@@ -32,7 +32,7 @@ REAL_CORPUS_DIRS = tuple(
     directory
     for root in _CORPUS_ROOTS
     for directory in (
-        root,  # the root too: allow.txt, config.toml, and any dir a test invents
+        root,  # the root too: allow.txt, config.toml, skill-sources, any dir a test invents
         *(root / name for name in ("memory", "skills", "vendor-skills", "rules", "tools")),
     )
 )
@@ -146,6 +146,36 @@ def isolated_global_dirs(tmp_path_factory, monkeypatch, no_inherited_aish_env):
         directory = home / name
         directory.mkdir()
         monkeypatch.setattr(module, attr, directory)
+    # The owner's approved skill sources (#467): read before every import's
+    # clone, and fenced from every writer. Not created — a missing file is
+    # "no source approved", which is what an unconfigured suite should see.
+    monkeypatch.setattr(skills_module, "SKILL_SOURCES_FILE", home / "skill-sources")
+
+
+@pytest.fixture
+def approved_skill_source(monkeypatch, tmp_path):
+    """An approved GitHub source whose "clone" copies a local folder (#467).
+
+    The clone is the one network step of an import, so it is replaced at its
+    seam, `skill_import._clone`: the test fills `.repo` like a checkout, and
+    the import's every other step — the source check included — runs for real.
+    `.clones` records each address that was fetched."""
+    import shutil
+    from types import SimpleNamespace
+
+    from aish import skill_import
+
+    repo = tmp_path / "approved-repo"
+    repo.mkdir()
+    skills_module.SKILL_SOURCES_FILE.write_text("github.com/acme/skills\n")
+    clones: list[str] = []
+
+    def fake_clone(url, dest):
+        clones.append(url)
+        shutil.copytree(repo, dest, symlinks=True, dirs_exist_ok=True)
+
+    monkeypatch.setattr(skill_import, "_clone", fake_clone)
+    return SimpleNamespace(repo=repo, url="https://github.com/acme/skills", clones=clones)
 
 
 @pytest.fixture

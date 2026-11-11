@@ -1645,19 +1645,18 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "import_skill",
             "description": (
-                "Import a skill (a playbook) from a git repository or local "
-                "path. An imported skill is untrusted content, so aish shows "
-                "the user EVERY file for approval before anything is installed "
-                "(a shallow read-only clone; nothing is executed on import). "
-                "After staging, summarize what the skill and its scripts do so "
-                "the user can review before approving."
+                "Import a skill (a playbook) from a GitHub repo on the user's "
+                "approved skill sources; any other source or a local path is "
+                "refused. aish shows the user EVERY file for approval before "
+                "installing (nothing is executed). After staging, summarize what "
+                "the skill and its scripts do so the user can review."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "repo": {
                         "type": "string",
-                        "description": "A git URL (https/ssh) or a local directory path.",
+                        "description": "https://github.com/<owner>/<repo>",
                     },
                     "path": {
                         "type": "string",

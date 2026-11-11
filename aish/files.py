@@ -195,10 +195,14 @@ def read_file(
     offset: int = 1,
     limit: int = READ_MAX_LINES,
     section: str = "",
+    text: str | None = None,
 ) -> str:
+    """`text`, when given, is served in place of reading the file — the bytes
+    a caller already read and checked, so nothing can change in between."""
     target = resolve(path, cwd)
     try:
-        text = target.read_text(encoding="utf-8", errors="replace")
+        if text is None:
+            text = target.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return f"ERROR: no such file: {target}"
     except IsADirectoryError:

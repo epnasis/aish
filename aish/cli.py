@@ -2436,10 +2436,15 @@ def _skill_cli(args: list[str]) -> int:
     """`aish skill <import|approve|list|discard>` — the review-in-your-editor
     path for skill imports (#139). `import` STAGES to a quarantine dir (nothing
     installed); you review the files with your own tools, then `approve` installs.
-    For in-session import with an inline review card, just ask aish to import."""
+    For in-session import with an inline review card, just ask aish to import.
+    `import` takes the same sources as the tool — an approved GitHub URL, never
+    a local path (#467) — because `stage` decides, and both paths reach it."""
     from . import skill_import
 
-    usage = "usage: aish skill <import REPO [PATH] | approve NAME | list | discard NAME>"
+    usage = (
+        "usage: aish skill <import https://github.com/OWNER/REPO [PATH] | approve NAME "
+        "| list | discard NAME>"
+    )
     if not args:
         print(usage)
         return 2

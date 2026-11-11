@@ -182,7 +182,7 @@ unless you explicitly *Share* a selection.
 | `read_skill` / `recall` | load a playbook; ranked search across skills, memory & past sessions | auto (echoed) |
 | `create_skill` | save or update a **skill** playbook — aish locates and composes the file itself, and a new name too similar to an existing skill is refused with that skill's name | **diff + y/N** |
 | `create_tool` | author a reusable **plugin tool** (validated `TOOL.md` + wrapper) | **diff + y/N**; refuses to write an invalid manifest |
-| `import_skill` | install a skill from a git repo or local path | **one consolidated review** of the whole skill + risk flags |
+| `import_skill` | install a skill from a GitHub repo on your approved sources list (`~/.config/aish/skill-sources`); anything else, a local path included, is refused before it is fetched | **one consolidated review** of the whole skill + risk flags |
 | `read_tool_output` | read the next page of a **truncated** tool result, from cache | auto (never re-runs the tool) |
 | _plugin tools_ | any `TOOL.md` you or the model add — called like a built-in | read-only auto; **mutating ones prompt** |
 
@@ -508,17 +508,29 @@ thousands of entries without bloating the context.
   The model saves and updates skills itself with `create_skill`: it resolves
   the file's location (an existing name updates that skill in place), refuses
   a new name too similar to an existing skill, and every change is shown as a
-  diff for approval before anything is written. **Import skills from the ecosystem** with `import_skill`
-  (e.g. `anthropics/skills`): a read-only clone, then one consolidated review of
-  every file plus deterministic risk flags before anything installs. An import —
-  from a URL or a local path alike — goes to `~/.config/aish/vendor-skills/`,
-  never into your own `skills/`, with where it came from recorded in
-  `vendor-skills/skills.lock`. Imported skills are **third-party**: listed in a
-  separate index section, never preloaded, and loaded only when the model asks
-  for one by name; reading one (or a file bundled with it) with `read_skill` or `read_file` marks the task as
-  having read content from outside this machine, so the outbound gates treat
-  what follows accordingly. A skill you wrote yourself and want trusted goes into
-  `skills/` by hand, not through import.
+  diff for approval before anything is written. **Import skills from publishers you approve** with `import_skill`
+  (or `aish skill import <url> [path]`, then `aish skill approve NAME`). You
+  list the publishers yourself in `~/.config/aish/skill-sources`, one per line —
+  `github.com/<owner>/<repo>`, or `github.com/<owner>/<repo>/<folder>` to admit
+  only skills under that folder (`#` starts a comment). An import from any
+  other source, any address that is not `https://github.com/<owner>/<repo>`,
+  or a local path is refused before anything is fetched; aish's file and skill
+  tools will not edit that file. An approved import is a read-only clone, then
+  one consolidated review of every file plus deterministic risk flags before
+  anything installs. It goes to `~/.config/aish/vendor-skills/`, never into
+  your own `skills/`, with where it came from and a hash of every installed
+  file recorded in `vendor-skills/skills.lock`. Imported skills are
+  **third-party**: listed in a separate index section, never preloaded, and
+  loaded only when the model asks for one by name; reading one (or a file
+  bundled with it) with `read_skill` or `read_file` marks the task as having
+  read content from outside this machine, so the outbound gates treat what
+  follows accordingly. Those reads are also checked against the recorded
+  hashes: a skill whose files changed after install is refused, naming the
+  files (delete its folder and import it again); a skill with no recorded
+  hashes is served with a line saying it was not checked. aish's file and
+  skill tools never write into `vendor-skills/` — retiring or removing a
+  third-party skill is your own edit. A skill you wrote yourself and want
+  trusted goes into `skills/` by hand, not through import.
 - **Plugin tools** — where a skill *teaches*, a tool *does*. A droppable
   `<name>/TOOL.md` the model calls exactly like a built-in tool, choosing from a
   schema instead of improvising a shell command. Reserve one for an operation

@@ -2101,6 +2101,8 @@ def test_suite_never_reaches_the_real_knowledge_store():
         *rules_module.rule_dirs(),
     ]
     assert len(reached) == 5
+    # The approved skill sources (#467) are read before every import's clone.
+    reached.append(skills_module.SKILL_SOURCES_FILE)
     for directory in reached:
         assert directory.is_relative_to(isolated)
         assert not directory.is_relative_to(DEFAULT_CONFIG_HOME)

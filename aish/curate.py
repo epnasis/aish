@@ -839,6 +839,10 @@ def update_entry_meta(
     expected input, and erasing a working line over it would strictly reduce
     recall while the record said "repair". Both go into the action record —
     a drop nobody can see is a silent edit."""
+    # Third-party entries never reach the judge (`load_entries` leaves the
+    # tree out); this is the writer's own refusal should one ever be handed in.
+    if fenced := skills.third_party_write_refusal(path):
+        raise ValueError(f"{path} is {fenced}, which curate never writes")
     text = path.read_text(encoding="utf-8")
     # The same reading as `_parse` (#209). Its own regex was near-correct but
     # stricter than this writer needs — no CRLF, no trailing space on either
