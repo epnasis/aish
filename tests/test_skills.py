@@ -279,6 +279,20 @@ class TestThirdPartySkillTree:
         )
         return folder
 
+    def test_a_long_description_is_cut_in_the_index(self, tmp_path):
+        """Slice 2b: the one piece of a stranger's text that rides every task."""
+        cap = skills_module.INDEX_THIRD_PARTY_DESCRIPTION_MAX
+        self._vendor("long", description="Use when " + "x" * (cap * 2) + " TAIL")
+        text = knowledge_index(str(tmp_path))
+        line = next(ln for ln in text.splitlines() if ln.startswith("- long: "))
+        assert "TAIL" not in line and len(line) == len("- long: ") + cap
+
+    def test_the_section_names_use_skill_and_says_it_cannot_be_read(self, tmp_path):
+        self._vendor("helper")
+        third = knowledge_index(str(tmp_path)).split("Third-party skills — ", 1)[1]
+        assert "use_skill(<name>, brief, inputs)" in third and "You cannot read" in third
+        assert "read_skill" not in third
+
     def test_the_tree_is_not_a_writer_dir(self):
         assert skills_module.VENDOR_SKILLS_DIR not in skills_module.skill_dirs("/tmp")
         assert skills_module.skill_reading_dirs("/tmp")[-1] == skills_module.VENDOR_SKILLS_DIR
@@ -308,7 +322,7 @@ class TestThirdPartySkillTree:
         text = knowledge_index(str(tmp_path), on_index=report.update)
         assert all(f"- own{i:03d}:" in text for i in range(INDEX_SKILLS_MAX))
         assert "more skills" not in text  # no owner skill was pushed out
-        assert "2 more third-party skills not listed; read_skill(<name>)" in text
+        assert "2 more third-party skills not listed; use_skill(<name>)" in text
         assert report["caps"]["third_party"] == skills_module.INDEX_THIRD_PARTY_MAX
         assert report["corpus"]["third_party"] == skills_module.INDEX_THIRD_PARTY_MAX + 2
         assert report["omitted"]["third_party"] == 2

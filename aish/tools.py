@@ -1676,6 +1676,34 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "use_skill",
+            "description": (
+                "Run a third-party skill (the Third-party skills list) in an isolated "
+                "sandboxed runner; you never read it yourself. The user approves each "
+                "run. It returns status, the files it made and a report."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "brief": {
+                        "type": "string",
+                        "description": "What the runner must produce — complete; it sees "
+                        "nothing else of this chat.",
+                    },
+                    "inputs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Paths of the files it may read.",
+                    },
+                },
+                "required": ["name", "brief"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_rule",
             "description": (
                 "Write a RULE — a standing instruction aish ENFORCES, unlike a "

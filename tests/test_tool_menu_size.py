@@ -91,7 +91,11 @@ from aish import tools
 # B3; measured 41,330 after trimming its example and leaving its field without
 # a description): admission became exact, and his trust of a second address at
 # a company is the one way it can be widened — by his act, never by a count.
-MAX_MENU_CHARS = 41_350
+# Raised 41,350 -> 41,900 on 2026-11-12 for ONE new tool, use_skill (+583 chars
+# measured, 41,282 -> 41,865; epic #467 slice 2b). It replaces reading a
+# third-party skill, which the acting model may no longer do at all: without it
+# an installed skill would be listed with no way to use it.
+MAX_MENU_CHARS = 41_900
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.

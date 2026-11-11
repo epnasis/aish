@@ -39,6 +39,20 @@ class FakeConfinement:
         return "it could read this chat's folders (test stand-in)"
 
 
+class FakeSkillConfinement(FakeConfinement):
+    """A Tier S stand-in (epic #467 slice 2b): runs unconfined, says it is a
+    skill confinement, and records the paths it was prepared with."""
+
+    tier = "skill"
+
+    def __init__(self, owner: PassThroughSandbox, report: sandbox.RefusalReport, prepared: dict):
+        super().__init__(owner, report)
+        self.prepared = prepared
+
+    def describe(self) -> str:
+        return "it could read its inputs (test stand-in)"
+
+
 class PassThroughSandbox:
     """Available; runs the command unconfined; records what went through it."""
 
@@ -46,6 +60,7 @@ class PassThroughSandbox:
         self.launched: list[str] = []
         self.read: list[int | None] = []
         self.prepared: list[dict] = []
+        self.skill_prepared: list[dict] = []
         self.report = report if report is not None else sandbox.RefusalReport()
 
     def prepare(self, roots, scratch, protected=(), path_env=None):
@@ -53,6 +68,13 @@ class PassThroughSandbox:
             {"roots": list(roots), "scratch": scratch, "protected": list(protected)}
         )
         return FakeConfinement(self, self.report)
+
+    def prepare_skill(self, scratch, skill, inputs=(), env="", interpreter="", prefix="",
+                      path_env=None):
+        prepared = {"scratch": scratch, "skill": skill, "inputs": list(inputs), "env": env,
+                    "interpreter": interpreter, "prefix": prefix}
+        self.skill_prepared.append(prepared)
+        return FakeSkillConfinement(self, self.report, prepared)
 
 
 class RefusingSandbox(PassThroughSandbox):
@@ -71,5 +93,10 @@ class UnavailableSandbox:
         self.prepared = 0
 
     def prepare(self, roots, scratch, protected=(), path_env=None):
+        self.prepared += 1
+        return sandbox.Unavailable(self.observed)
+
+    def prepare_skill(self, scratch, skill, inputs=(), env="", interpreter="", prefix="",
+                      path_env=None):
         self.prepared += 1
         return sandbox.Unavailable(self.observed)

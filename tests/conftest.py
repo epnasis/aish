@@ -227,6 +227,25 @@ def no_real_sandbox(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_skill_env_installs(monkeypatch):
+    """A third-party skill's packages are installed by `uv` from the network
+    (epic #467 slice 2b). No test may fetch them: the one process the module
+    starts is replaced by a tripwire, and a test about installs puts its own
+    stand-in there. The environments themselves land under AISH_STATE_DIR,
+    which `no_real_browser` already points at a temp dir."""
+    from aish import skill_env
+
+    class SkillEnvInstalled(BaseException):
+        """BaseException: `skill_env.install` turns operational errors into a
+        record, which would eat an ordinary exception and pass silently."""
+
+    def refuse(argv):
+        raise SkillEnvInstalled(f"a test reached the real uv: {argv}")
+
+    monkeypatch.setattr(skill_env, "_run_uv", refuse)
+
+
+@pytest.fixture(autouse=True)
 def no_real_downloads(tmp_path_factory, monkeypatch, no_inherited_aish_env):
     """The review-file exports default to ~/Downloads, which is a macOS
     privacy-protected folder: a process outside the owner's own terminal that

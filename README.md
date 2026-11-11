@@ -520,17 +520,32 @@ thousands of entries without bloating the context.
   anything installs. It goes to `~/.config/aish/vendor-skills/`, never into
   your own `skills/`, with where it came from and a hash of every installed
   file recorded in `vendor-skills/skills.lock`. Imported skills are
-  **third-party**: listed in a separate index section, never preloaded, and
-  loaded only when the model asks for one by name; reading one (or a file
-  bundled with it) with `read_skill` or `read_file` marks the task as having
-  read content from outside this machine, so the outbound gates treat what
-  follows accordingly. Those reads are also checked against the recorded
-  hashes: a skill whose files changed after install is refused, naming the
-  files (delete its folder and import it again); a skill with no recorded
-  hashes is served with a line saying it was not checked. aish's file and
-  skill tools never write into `vendor-skills/` — retiring or removing a
-  third-party skill is your own edit. A skill you wrote yourself and want
-  trusted goes into `skills/` by hand, not through import.
+  **third-party**: listed in a separate index section and never preloaded,
+  and the model never reads one — `read_skill`, `read_file`, `read_pdf`,
+  `show_image` and `read_media` all refuse them. Instead the model calls
+  `use_skill(name, brief, inputs)`, and you approve each run on a card that
+  names the skill, the brief and the files. The skill then runs in an
+  **isolated runner**: a separate conversation holding only the skill, the
+  brief and the input paths, whose every command runs in aish's skill sandbox
+  (it can read only those files, the skill and its packages; it writes only
+  its own scratch folder under `~/.local/state/aish/skill-runs/`; no network).
+  What comes back is written by aish — how it ended, the files it made (moved
+  to names aish chooses) and kernel refusals — with the runner's own report
+  kept apart and marked as third-party; the result counts as content from
+  outside this machine, so the outbound gates treat what follows accordingly,
+  and so do later reads of its files. Not available in scheduled or mail-started
+  chats, or on `claude-max`. If a skill's code imports Python packages, the
+  import's review card lists them, and approving the import installs them
+  (pre-built wheels only, exact versions recorded in the lock) into
+  `~/.local/state/aish/skill-envs/<name>/` — never while the skill runs. In
+  this first version aish knows the packages of the `pdf` skill (`pypdf`,
+  `reportlab`); any other import is listed as not installed. The skill's
+  files are checked against the recorded hashes before a run: a skill whose
+  files changed after install is refused, naming the files (delete its folder
+  and import it again). aish's file and skill tools never write into
+  `vendor-skills/` — retiring or removing a third-party skill is your own
+  edit. A skill you wrote yourself and want trusted goes into `skills/` by
+  hand, not through import.
 - **Plugin tools** — where a skill *teaches*, a tool *does*. A droppable
   `<name>/TOOL.md` the model calls exactly like a built-in tool, choosing from a
   schema instead of improvising a shell command. Reserve one for an operation

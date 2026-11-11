@@ -1061,6 +1061,22 @@ Written by `Agent._inbox_items` through `_emit_record` for every resolve, restor
 
 **What it does NOT establish:** that the matter is settled. A `settled_by` demotes the item into the report's named "Probably settled" line; only his word removes it.
 
+### 3.27 · `skill_run` — one third-party skill run in quarantine (#467 slice 2b)
+
+```json
+{"kind": "skill_run", "turn": 4, "call": 2, "skill": "pdf", "model": "gemini:gemini-3.5-flash",
+ "ended": "answered", "model_calls": 6, "commands": 3,
+ "files": [{"path": "<state>/skill-runs/20261112-101500-pdf-a1b2c3/files/01.pdf", "size": 1630, "kind": ".pdf"}],
+ "links_skipped": 0, "over_cap": 0,
+ "sandbox": {"read": true, "refused": [], "refused_seen": 0, "sample": true, "log_ms": 812, "log_reads": 1},
+ "claim": "done", "report_chars": 140, "usage": {"input": 9120, "output": 610}, "ms": 41200,
+ "run_dir": "<state>/skill-runs/20261112-101500-pdf-a1b2c3"}
+```
+
+Written once per `use_skill` call that ran a runner, by `Agent._use_skill` through `_emit_record` after `skill_runner.run` returns, and **renderless** (`RENDERLESS_STEPS`). `turn` and `call` join it to the `use_skill` step. `model` is the spec the runner ran on (the session's own); `usage` is the providers' own reports summed over the runner's calls — attributed here, apart from the acting model's. `ended` is aish's observation: `answered`, `budget`, `time`, `cancelled`, `model_failed` (`error` carries the call's failure), `error` (aish stopped the run on its own error), or `unknown`. `sandbox` is the run's kernel refusals read ONCE at its end with §3.4's meaning and sample caveat, or `{read: false, why}` (`no command ran`, or the read failed). `claim` is the status the runner STATED (`done` / `failed` / `needs_input` / `none stated`) — its claim, not a fact; `report_chars` the length of its capped report, whose text is in the tool result and not here. A call refused for its origin writes `{kind, skill, ended: "blocked", why}` and nothing else; the other refusals (no seam, no sandbox, bad inputs, a denied card) write no record — the `use_skill` step's result says which.
+
+**What it does NOT establish:** that the files are what the brief asked for, or that the runner's claim is true; the runner's own steps are in no record beyond these counts (nested rendering is a later slice).
+
 ### 3.20 · `mail_verdict` — the inbox assistant's verdict on one mail (#142 W5)
 
 **BUILT 2026-10-24 (slice S1, shadow).** Rationale and fences: `docs/mail-assistant.md`. One record per (mail, Reader model), written by `mailverdicts.build_record` for every inbound mail a shadow pass or a backtest arm assessed — gated, unadmitted and failed readings included (§0 corollary 2: a mail that was not read says so).

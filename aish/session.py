@@ -713,6 +713,10 @@ RENDERLESS_STEPS = frozenset(
         # after the run's `tool` step was emitted and joined to it by turn +
         # call. Evidence about a step, never a step: renderless live and cold.
         "sandbox_refusals",
+        # #467 slice 2b: one third-party skill run, joined to its use_skill
+        # step by turn + call. The step is what renders; showing the runner's
+        # own steps nested under it is a later slice.
+        "skill_run",
         "rule_eval",  # #191
         "binding",  # #191
         "gate",  # #191

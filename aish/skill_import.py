@@ -37,6 +37,7 @@ from datetime import date
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import skill_env
 from .atomic_write import publish
 from .files import contains
 from .paths import state_home
@@ -448,6 +449,7 @@ def record_import(
     sub_path: str,
     commit: str | None,
     hashes: dict[str, str],
+    env: dict | None = None,
 ) -> None:
     """Add `name` to the tree's lock. The ONE writer, called by both install
     paths after the files are in place. Atomic against a torn write only: two
@@ -461,6 +463,7 @@ def record_import(
         "commit": commit,
         "imported_at": date.today().isoformat(),
         "files": hashes,
+        **({"env": env} if env else {}),
     }
     text = json.dumps({"version": LOCK_VERSION, "skills": entries}, indent=2, sort_keys=True)
     publish(tree / LOCK_NAME, text + "\n", encoding="utf-8")
@@ -706,7 +709,10 @@ def stage_to_disk(
     finally:
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
-    return name, dest, safety_scan(files) + keywords_flag(dropped)
+    return name, dest, (
+        safety_scan(files) + keywords_flag(dropped)
+        + skill_env.card_flags(skill_env.needs((rel, text) for rel, text, _x in files))
+    )
 
 
 def pending(root: Path | None = None) -> list[str]:
@@ -761,20 +767,32 @@ def install(name: str, root: Path | None = None) -> tuple[Path, list[str], str]:
     if not isinstance(origin, dict):
         origin = {}
     origin_file.unlink(missing_ok=True)
-    return dest, dropped, lock_failure_note(
-        tree, name, origin.get("source"), str(origin.get("path") or ""), origin.get("commit")
+    env = install_env(name, dest)
+    note = lock_failure_note(
+        tree, name, origin.get("source"), str(origin.get("path") or ""), origin.get("commit"),
+        env,
     )
+    return dest, dropped, "; ".join(n for n in (skill_env.install_note(env), note) if n)
+
+
+def install_env(name: str, dest: Path) -> dict:
+    """The skill's Python environment, installed on the approval that installed
+    its files (#467 slice 2b): derived from the installed bytes, never at run
+    time. Both install paths call this before the lock is written, so the lock
+    records what was installed."""
+    return skill_env.install(name, skill_env.needs_of_folder(dest))
 
 
 def lock_failure_note(
-    tree: Path, name: str, source: str | None, sub_path: str, commit: str | None
+    tree: Path, name: str, source: str | None, sub_path: str, commit: str | None,
+    env: dict | None = None,
 ) -> str:
     """`record_import` with the hashes of what is now on disk, and a failure
     turned into the sentence both install paths say: the skill is installed
     and still third-party, but nothing records where it came from or what its
     files were, so its reads will say they were not checked."""
     try:
-        record_import(tree, name, source, sub_path, commit, file_hashes(tree / name))
+        record_import(tree, name, source, sub_path, commit, file_hashes(tree / name), env)
     except OSError as exc:
         return (
             f"where it came from and its file hashes were NOT recorded in "

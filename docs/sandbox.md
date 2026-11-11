@@ -104,6 +104,47 @@ The roots matter: an earlier run that gave every command only its cwd produced 7
 
 Design review (before building) and delivery review (after), adversarial, each finding proven on this Mac. Design: the refusal record could be forged by a newline in a file name (fixed: ndjson, entry must end with the nonce); `/dev/ttysN` was writable (removed); `sort -o<path>` glued slipped the classifier (now carded; the kernel holds regardless); the metadata oracle and the `(allow default)` coupling (stated below). Delivery: no containment hole found across 17 probes; three should-fixes, all fixed — a Ctrl-B detach recorded a partial refusal sample as the whole run (now `refusals_read: false` like a background job), the note said "start only aish's read-only commands" while the list also holds the shell and mkdir/touch/rm (reworded), and the new session the signal rule rests on was unpinned (now a test).
 
+## Tier S — a third-party skill's runner (epic #467 slice 2b)
+
+The second profile, and the first that runs an interpreter. A third-party skill runs in a throwaway runner (`skill_runner.py`, `docs/knowledge-layer.md` "The skill runner") whose every command — and every file read or write outside the skill's own folder — runs under it. There is no card inside a runner and no way out of the profile: no `_sandbox_refused` memory, no re-proposal card, no `tools.Unsandboxed` reachable from the runner's code (`TestNoEscalationInsideTheRunner`). A kernel refusal there is a failed command. No sandbox ⇒ `use_skill` refuses; it never falls back to a card (`USE_SKILL_NO_SANDBOX`).
+
+`render_skill_profile` is Tier R's shape — the same sections, order, nonce tags, `MACH_SERVICES`, signal rule and `clean_env` allow-list — with these differences:
+
+| rule | Tier S | why |
+|---|---|---|
+| read | `CLOSED_TO_READ` closed, then reopened ONLY: the scratch, the skill's folder, the skill's environment, the interpreter's own installation (subpaths), and each input file (literal); then the secret names closed again | Not the chat's roots. `use_skill` promises the runner reads only what it named; the design review showed a tool-level `inputs` list was not a kernel limit, so the list IS the profile. |
+| exec | Tier R's list + exactly one program: the environment's interpreter, real path | Off the list stays off: a `pip` script in the environment's `bin` is refused at exec like any script. |
+| map-executable | `MAPPABLE` + the interpreter's installation + the environment | Python's stdlib extensions and the packages' compiled wheels load from there; nothing in scratch can be mapped. |
+| write | scratch + the terminal devices, nothing else | The environment is NOT writable: a runner that could write it could plant code the next run would load. |
+| env | `skill_env_vars`: `clean_env`, then HOME = scratch, the environment's `bin` first on PATH, `PYTHONDONTWRITEBYTECODE=1`, `PYTHONNOUSERSITE=1` | A tool that writes a cache under `~` writes where it may; `python` is the skill's. |
+
+**One nonce per run** (`SkillConfinement`): every command of a run carries the same tag, and the refusals are read ONCE, when the runner ends, labelled a sample — not after each command (design review amendment 9).
+
+**The canary gains a fourth probe.** `prepare_skill` runs Tier R's three (write into scratch lands, write outside does not, `/usr/bin/env` does not start) plus, when the skill has an interpreter, `<interpreter> -I -S -c "open(<scratch file>, 'w')…"` — the interpreter must start and write into scratch, with `-S` so no code from the environment (a `.pth` file) runs in the probe. A profile whose interpreter cannot start is `Unavailable` ("could not start the skill's Python"), judged by the file on disk. `test_a_canary_whose_interpreter_cannot_start_fails_closed`.
+
+**Where the interpreter comes from.** `skill_env.locate` reads `pyvenv.cfg`'s `home` — never runs the interpreter — and requires the environment's `bin/python` to resolve inside the installation `home` names, and that installation not to hold the owner's home (`/`, `/Users` and an ancestor of `~` are refused), because the profile opens it for reading and mapping code. Measured on this Mac: `uv venv`'s `bin/python` is a symlink to the uv-managed CPython (`~/.local/share/uv/python/cpython-3.13.9-macos-aarch64-none/bin/python3.13`), so the per-skill boundary is the environment's READ and LOAD scope, not a separate executable — every skill environment execs the same shared interpreter.
+
+### Measured (macOS 26.6.2, 2026-11-12)
+
+Through the product's own code: `skill_env.install` with the real `uv` (wheels only) into a temp `AISH_STATE_DIR`, `skill_env.locate`, `SeatbeltSandbox.prepare_skill` (canary included, 0.06 s), then commands launched by the confinement:
+
+| probe | result |
+|---|---|
+| install `pypdf` + `reportlab` | resolved and recorded `pypdf 7.0.1`, `reportlab 5.1.0`, plus dependencies `pillow 13.0.0`, `charset-normalizer 3.5.2` (0.6 s, from uv's cache) |
+| `python -c 'import pypdf, reportlab'` | ran; `sys.prefix` is the skill's environment |
+| reportlab writes `hello.pdf` into scratch; pypdf reads it back | ran: 1 page, text `hello` |
+| a compiled wheel: `import PIL._imaging` (pillow's `.so`, in the environment) | ran |
+| read of an input file | ran |
+| read of a file beside it that was not an input | refused, `Operation not permitted`; log: `file-read-data` |
+| write outside scratch | refused; log: `file-write-create` |
+| write into the environment | refused; log: `file-write-create`; the file does not exist |
+| `socket.create_connection(("1.1.1.1", 443))` | refused, `Operation not permitted` (not a timeout); log: `network-outbound remote:*:443` |
+| `python -m pip` | `No module named pip` — `uv venv` installs none |
+
+The one read the log named that no probe asked for: `python3.13 file-read-data ~/.CFUserTextEncoding` (CoreFoundation reads the owner's real home file at start-up; refused, and every probe above still ran). No `mach-lookup` refusal appeared in that run (14 tagged entries, 5 distinct, all listed). The same properties are permanent tests on the suite's own virtualenv — the shape `uv venv` makes, with compiled wheels (`_cffi_backend`) in it, so nothing is fetched: `TestTheRealTierSProfile` (marker-gated to macOS, skipped on Linux CI). The profile's text is pinned by `TestTheTierSProfile`.
+
+**`(allow default)` with an interpreter on the list.** Tier R's residual below — the exec list is the real fence, and a program with plugin or network capability on it gets every default-allowed operation — is no longer hypothetical here: Python is a general interpreter, and it holds every operation the profile does not name (iokit, sysctl reads, other processes' info, POSIX IPC, `ctypes` loading of system libraries under `MAPPABLE`). What it does NOT hold is named: no exec beyond the list, no writes outside scratch, no reads outside the reopened set, no network, no Apple events, no signals outside its group, only the six mach services. Reviewing that coupling is part of any change to Tier S.
+
 ## Residuals — stated, not contained
 
 - **A chain mixing a prefix-rule segment with read-only segments runs unsandboxed, as before S1** (Tier T is S2's). The classifier now also cards glued and bundled one-letter unsafe flags (`sort -o<path>`, `sort -ro<path>`; design review finding 4), which closes the spelling the exploit used in such a chain, not the class.

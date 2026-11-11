@@ -67,7 +67,9 @@ from . import (
     sandbox,
     schedule,
     secrets,
+    skill_env,
     skill_import,
+    skill_runner,
     skills,
     token_ratio,
     tool_menu,
@@ -1278,6 +1280,50 @@ THIRD_PARTY_NOT_WRITABLE = (
     "change, tell the user what and why."
 )
 
+# The acting model never reads a third-party skill (#467 slice 2b): its text
+# goes only to a runner, so its instructions never sit in this conversation.
+# Structural, every origin, no card — a card here would be a model-proposed
+# way to put a stranger's instructions back into the owner's chat.
+THIRD_PARTY_SKILL_NOT_READ = (
+    "NOT READ: {skill!r} is a third-party skill, and aish does not put a "
+    "third-party skill's text into this conversation. To use it, call "
+    "use_skill(name={skill!r}, brief=<the complete task>, inputs=[<file paths>]): "
+    "it runs in an isolated runner, and you get its result."
+)
+THIRD_PARTY_FILE_NOT_READ = (
+    "NOT READ: {path} is a file of the third-party skill {skill!r}, and aish does "
+    "not put a third-party skill's files into this conversation. To use the "
+    "skill, call use_skill(name={skill!r}, brief=…, inputs=[…])."
+)
+
+# use_skill's refusals (#467 slice 2b). Each says what was observed; none
+# offers a card, because each is a fact about this session a card cannot change.
+USE_SKILL_UNATTENDED = (
+    "NOT RUN: use_skill runs only in a chat a person started (this chat's "
+    "origin is {origin!r}). Nothing ran."
+)
+USE_SKILL_NO_SEAM = (
+    "NOT RUN: this chat's model ({provider}) has no stateless chat seam for a "
+    "skill runner to call — aish runs a third-party skill only on a backend it "
+    "calls directly. Nothing ran."
+)
+USE_SKILL_NO_SANDBOX = (
+    "NOT RUN: a third-party skill runs only inside aish's skill sandbox, and the "
+    "sandbox is not available here: {observed}. There is no way to run it "
+    "without the sandbox. Nothing ran."
+)
+USE_SKILL_ENV_BROKEN = (
+    "NOT RUN: skill {skill!r} has a Python environment aish cannot use: "
+    "{problem}. Nothing ran."
+)
+USE_SKILL_DENIED = "use_skill was DENIED by the user: nothing ran."
+USE_SKILL_NO_APPROVER = (
+    "NOT RUN: no approval card is available here, and every use_skill run is "
+    "approved by the user. Nothing ran."
+)
+USE_SKILL_MAX_INPUTS = 10
+USE_SKILL_BRIEF_CHARS = 4000
+
 AUTOMATION_COMMAND_REFUSED = (
     "NOT EXECUTED: this command names aish's automations folder ({where}) — the "
     "files that start unattended runs. A command touching it is refused whether "
@@ -2207,6 +2253,11 @@ UNRECORDED_PICTURE = provenance.ArtefactSource(
     source="",
     what="a picture aish stored; where its bytes came from was not recorded",
 )
+# Every file under the skill-runs store, whatever is beside it (#467 slice 2b):
+# the runner held the pen in its scratch, so no record there is evidence.
+SKILL_RUN_ARTEFACT = provenance.ArtefactSource(
+    tool="use_skill", outside=True, source="", what=skill_runner.ARTEFACT_WHAT,
+)
 TOOL_MEDIA_EXPIRED = (
     "[aish: picture(s) from an earlier task were dropped from view to save "
     "context. Call the tool again if you need to look at them.]"
@@ -2600,6 +2651,7 @@ ASKED_BY_PLUGIN = "plugin"
 ASKED_BY_CASES = "cases"
 ASKED_BY_PREFERENCES = "inbox_preferences"
 ASKED_BY_ITEMS = "inbox_items"
+ASKED_BY_SKILL = "use_skill"
 
 # The client-side approvers label their own cards, since no gate in this
 # file raises them. They are here so the whole vocabulary is one list a
@@ -2613,7 +2665,7 @@ ASKED_BY = (
     ASKED_BY_EGRESS, ASKED_BY_MAIL_LINK, ASKED_BY_PRESS, ASKED_BY_BATCH,
     ASKED_BY_KNOWLEDGE, ASKED_BY_RULE, ASKED_BY_PLUGIN, ASKED_BY_SHELL,
     ASKED_BY_READ, ASKED_BY_WRITE, ASKED_BY_IMPORT, ASKED_BY_CASES,
-    ASKED_BY_PREFERENCES, ASKED_BY_ITEMS,
+    ASKED_BY_PREFERENCES, ASKED_BY_ITEMS, ASKED_BY_SKILL,
 )
 
 # Tools whose results carry bytes from OUTSIDE this machine. Once one has run,
@@ -4513,6 +4565,15 @@ class Agent:
             Path(state_dir) / "tool-downloads"
             if state_dir is not None
             else self.scratch_dir / "downloads"
+        )
+        # Third-party skill runs (#467 slice 2b): each run's scratch, and the
+        # files aish collected out of it under its own names. use_skill names
+        # them and the model is meant to read them — the #375 reasoning for
+        # tool-downloads, and like it, everything here is outside content.
+        self.skill_runs_dir = (
+            Path(state_dir) / "skill-runs"
+            if state_dir is not None
+            else self.scratch_dir / "skill-runs"
         )
         # Probed recordings, keyed by the source the model named -> (what it
         # is, when we asked). Per-session and in memory only: the expensive
@@ -7924,6 +7985,10 @@ class Agent:
         required = rules.needed_tools(self._bindings)
         if self._pending_skill_reads:
             required.append("read_skill")
+        if skills.third_party_entries(self.cwd):
+            # The index's third-party section names use_skill as the only way
+            # in; a menu without it would list skills nothing can run.
+            required.append("use_skill")
         if self.holds_kept_outside_note():
             # The daily inbox report's chat (#142 W5): what the owner says
             # there is about his mail, its cases and his standing preferences,
@@ -8355,6 +8420,9 @@ class Agent:
             # read-only plugin tools auto-run, unattended included. Reads
             # inside it are outside content (see _outside_populated_stores).
             self.tool_downloads_dir,
+            # …and use_skill names the files its runner wrote (#467 slice 2b).
+            # Asked for by the model's own call; outside content, recordless.
+            self.skill_runs_dir,
         ]
 
     def _execute_tool_calls(self, tool_calls: list[dict], model_call: int = 0) -> list[str]:
@@ -8743,6 +8811,10 @@ class Agent:
             return True
         if name in self._plugin_tools:
             return True
+        if name == "use_skill":
+            # A runner followed a stranger's skill (#467 slice 2b): its report
+            # and every name and byte it made are third-party-derived.
+            return True
         if name in MAIL_STORE_TOOLS:
             # The case store quotes mail (#142 W5): every result, read or
             # change, carries text a stranger wrote or a model read from one;
@@ -8817,6 +8889,8 @@ class Agent:
         if name in ("remember", "forget_memory"):
             return str(a.get("name") or "memory")
         if name == "create_skill":
+            return str(a.get("name") or "skill")
+        if name == "use_skill":
             return str(a.get("name") or "skill")
         if "command" in a:
             return str(a["command"])  # read_docs, run_command
@@ -9607,6 +9681,13 @@ class Agent:
     def _read_only_call(self, name: str, args: dict) -> tuple[str, Callable[[], str]]:
         """(echo label, execution thunk) for a READ_ONLY_TOOLS member — split
         so the label prints before the thunk possibly runs on a worker thread."""
+        if name in DUAL_SOURCE_TOOLS:
+            source = str(args.get("source", "") or "")
+            if not source.lower().startswith(("http://", "https://")) and (
+                self._in_third_party_skills(source)
+            ):
+                refusal = self._third_party_door_refusal(source)
+                return f"→ {name}: {source}", lambda: refusal
         if name == "read_docs":
             command = str(args.get("command", ""))
             topic = args.get("topic") or None
@@ -13279,6 +13360,7 @@ class Agent:
             self.transcripts_dir,
             browser.downloads_dir(),
             self.tool_downloads_dir,
+            self.skill_runs_dir,
         ]
 
     def _recordless_stores(self) -> list[Path]:
@@ -13294,8 +13376,11 @@ class Agent:
         along — so in these two a record is not evidence of anything and is
         never read. documents/ and transcripts/ stay record-reading: their
         records are written by aish itself at conversion time, and their leaf
-        names are content hashes no sender chooses."""
-        return [browser.downloads_dir(), self.tool_downloads_dir]
+        names are content hashes no sender chooses.
+
+        The skill-runs store is the third (#467 slice 2b): a runner writes its
+        own scratch, so it could write a record there as easily as a file."""
+        return [browser.downloads_dir(), self.tool_downloads_dir, self.skill_runs_dir]
 
     def _artefact_source(self, path: str) -> "provenance.ArtefactSource | None":
         """Where the bytes at `path` came from, or None when the path is not in
@@ -13314,6 +13399,8 @@ class Agent:
         """
         for store in self._outside_populated_stores():
             if files.contains(store, path, self.cwd):
+                if store == self.skill_runs_dir:
+                    return SKILL_RUN_ARTEFACT
                 if store in self._recordless_stores():
                     return provenance.UNKNOWN_ARTEFACT
                 target = files.resolved(path, self.cwd)
@@ -13373,8 +13460,8 @@ class Agent:
         )
         read = partial(self._read_file_or_picture, path, offset, limit, section)
         if self._in_third_party_skills(path):
-            verified = partial(self._verified_third_party_read, path, offset, limit, section)
-            return label, partial(self._marked_third_party_read, verified)
+            refusal = self._third_party_door_refusal(path)
+            return label, lambda: refusal
         # Wrapped HERE rather than in `_dispatch`, because read_file also runs on
         # the parallel read-only path and a marking only the sequential door
         # applied would be a marking that depends on how many tools the model
@@ -13390,45 +13477,23 @@ class Agent:
         entry = skills.resolve_skill(skill, self.cwd)
         if entry is None or entry.third_party:
             self._third_party_skill_reads.add(skill)
+        if entry is not None and entry.third_party:
+            return _gate_outcome(
+                THIRD_PARTY_SKILL_NOT_READ.format(skill=entry.name), decision="blocked"
+            )
         return provenance.disarm_markers(
             skills.load_skill(skill, skills.skill_reading_dirs(self.cwd))
         )
 
-    def _verified_third_party_read(
-        self, path: str, offset: int, limit: int, section: str
-    ) -> str:
-        """A file of an imported skill, served only if it is the file that was
-        installed (#467 P4): checked against the hash in the lock and served
-        from that same read. A file the lock holds no hashes for is read as
-        before, under a line saying it was not checked."""
-        target = files.resolved(path, self.cwd)
-        if target is None or not target.is_file():
-            return self._read_file_or_picture(path, offset, limit, section)
-        try:
-            data = skill_import.verified_file(skills.VENDOR_SKILLS_DIR, target)
-        except skill_import.SkillImportError as exc:
-            return f"ERROR: {exc}"
-        except (OSError, ValueError) as exc:
-            return f"ERROR: cannot read {target}: {exc}"
-        if data is None:
-            served = self._read_file_or_picture(path, offset, limit, section)
-            return served if served.startswith("ERROR") else (
-                skills.NO_REVIEW_HASHES_NOTE + served
-            )
-        return files.read_file(
-            path, self.cwd, offset=offset, limit=limit, section=section,
-            text=data.decode("utf-8", errors="replace"),
+    def _third_party_door_refusal(self, path: str) -> tools.ToolOutcome:
+        """The acting model never reads a third-party skill's files (#467
+        slice 2b): its text reaches only a runner, through use_skill. Asked by
+        every door that reads a local path — read_file, read_pdf, show_image,
+        read_media — with the same tree test the taint uses."""
+        skill = skills.third_party_skill_of(path, self.cwd) or "?"
+        return _gate_outcome(
+            THIRD_PARTY_FILE_NOT_READ.format(path=path, skill=skill), decision="blocked"
         )
-
-    @staticmethod
-    def _marked_third_party_read(read: Callable[[], str]) -> str:
-        """A read of an imported skill's file, told for what it is (#467) —
-        on the result, like `_marked_outside_read`, and for the same reasons.
-        An error is aish's own sentence and stays unbannered."""
-        served = read()
-        if served.startswith("ERROR"):
-            return served
-        return skills.THIRD_PARTY_NOTE + provenance.disarm_markers(served)
 
     def _marked_outside_read(
         self, read: Callable[[], str], path: str, record: "provenance.ArtefactSource"
@@ -15342,6 +15407,11 @@ class Agent:
         if name == "import_skill":
             return self._import_skill(args)
 
+        if name == "use_skill":
+            # The second execution point (docs/agent-core.md L1): entered only
+            # here, carded, and every command it runs is in the kernel's sandbox.
+            return self._use_skill(args)
+
         if name == "show_video":
             return self._show_video(
                 str(args.get("url", "")), str(args.get("caption", "") or "")
@@ -16418,8 +16488,10 @@ class Agent:
             # Always the third-party tree (#467), decided here, not by the caller.
             tree = skills.VENDOR_SKILLS_DIR
             dest = tree / name
-            flags = skill_import.safety_scan(imported) + skill_import.keywords_flag(
-                dropped_keywords
+            flags = (
+                skill_import.safety_scan(imported)
+                + skill_import.keywords_flag(dropped_keywords)
+                + skill_env.card_flags(skill_env.needs((r, t) for r, t, _x in imported))
             )
             files_payload = [
                 {"path": rel, "content": text, "lang": skill_import.lang_for(rel),
@@ -16458,9 +16530,10 @@ class Agent:
                         os.chmod(target, mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
                     except OSError:
                         pass
+            env = skill_import.install_env(name, dest)
             lock_note = skill_import.lock_failure_note(
                 tree, name, skill_import.source_label(repo),
-                skill_import.lock_path(sub_path), skill_import.clone_commit(tmp),
+                skill_import.lock_path(sub_path), skill_import.clone_commit(tmp), env,
             )
         finally:
             if tmp:
@@ -16470,12 +16543,147 @@ class Agent:
         keywords_note = "".join(
             f" {flag}." for flag in skill_import.keywords_flag(dropped_keywords)
         )
+        env_note = skill_env.install_note(env)
+        env_note = f" {env_note[0].upper()}{env_note[1:]}." if env_note else ""
         lock_note = f" NOTE: {lock_note}." if lock_note else ""
         return (
             f"Imported third-party skill {name!r} into {dest} ({len(imported)} files)."
-            f"{skipped_note}{keywords_note}{lock_note} It is third-party: from the next "
-            "task it is listed as such and never preloaded; read_skill(<name>) loads it."
+            f"{skipped_note}{keywords_note}{env_note}{lock_note} It is third-party: from "
+            "the next task it is listed as such and never preloaded; use_skill(<name>) "
+            "runs it in an isolated runner."
         )
+
+    def _skill_inputs(self, raw: Any) -> tuple[list[str], str]:
+        """The files a runner may read, each resolved and checked, or why not.
+        Each must be an existing regular file inside this chat's workspace
+        boundary, not a secret-holding name, and not in aish's own trees —
+        the Tier S profile opens exactly these, so this list IS the promise."""
+        items = [raw] if isinstance(raw, str) else list(raw or [])
+        if len(items) > USE_SKILL_MAX_INPUTS:
+            return [], f"at most {USE_SKILL_MAX_INPUTS} input files"
+        state = Path(self.state_dir) if self.state_dir else paths.state_home()
+        out: list[str] = []
+        for item in items:
+            path = str(item)
+            target = files.resolved(path, self.cwd)
+            if target is None or not target.is_file():
+                return [], f"{path!r} is not an existing file"
+            if files.is_sensitive_path(str(target), self.cwd):
+                return [], f"{path!r} is a file that commonly holds secrets"
+            if files.is_outside_roots(str(target), self.cwd, self.workspace_roots()):
+                return [], f"{path!r} is outside this chat's folders"
+            aish_tree = any(
+                files.contains(tree, target) for tree in (state, paths.config_home())
+            ) and not any(
+                files.contains(store, target)
+                for store in (self.media_dir, self.documents_dir, self.transcripts_dir,
+                              self.tool_downloads_dir, self.skill_runs_dir,
+                              browser.downloads_dir())
+            )
+            if aish_tree or self._in_third_party_skills(str(target)):
+                return [], f"{path!r} is in aish's own files"
+            out.append(str(target))
+        return list(dict.fromkeys(out)), ""
+
+    def _use_skill(self, args: dict) -> str | tools.ToolOutcome:
+        """Run a third-party skill in quarantine (#467 slice 2b,
+        `skill_runner`). Refused before any card unless a person started
+        this chat, the backend has a stateless seam, the inputs check out and
+        the Tier S sandbox is available; then carded, every call; then run
+        with nothing of this conversation. The result is outside content."""
+        name = str(args.get("name", "") or "").strip()
+        brief = str(args.get("brief", "") or "").strip()
+        if self.origin != "user":
+            self._emit_record(kind="skill_run", skill=name, ended="blocked",
+                              why=f"origin {self.origin}")
+            return _gate_outcome(USE_SKILL_UNATTENDED.format(origin=self.origin),
+                                 decision="blocked")
+        if not name or not brief:
+            return "ERROR: use_skill needs name and brief."
+        if len(brief) > USE_SKILL_BRIEF_CHARS:
+            return f"ERROR: brief is over {USE_SKILL_BRIEF_CHARS} characters."
+        entry = skills.resolve_skill(name, self.cwd)
+        if entry is None or not entry.third_party:
+            listed = ", ".join(e.name for e in skills.third_party_entries(self.cwd)) or "none"
+            own = " It is your own skill: read_skill it." if entry is not None else ""
+            return f"ERROR: no third-party skill named {name!r}.{own} Third-party: {listed}."
+        model_spec = roles.session_model_spec(self.provider, self.model)
+        if not model_spec:
+            return _gate_outcome(USE_SKILL_NO_SEAM.format(provider=self.provider),
+                                 decision="blocked")
+        inputs, problem = self._skill_inputs(args.get("inputs"))
+        if problem:
+            return f"ERROR: inputs: {problem}. Nothing ran."
+        body = skills.load_skill(entry.name, [skills.VENDOR_SKILLS_DIR])
+        if body.startswith(("ERROR", "NOTE")):
+            return body
+        assert entry.path is not None
+        skill_dir = entry.path.parent if entry.path.name == "SKILL.md" else entry.path
+        env = skill_env.locate(entry.name)
+        if isinstance(env, str):
+            return _gate_outcome(
+                USE_SKILL_ENV_BROKEN.format(skill=entry.name, problem=env), decision="blocked"
+            )
+        if self.approve_tool is None:
+            return _gate_outcome(USE_SKILL_NO_APPROVER, decision="blocked")
+        run_dir = self.skill_runs_dir / (
+            time.strftime("%Y%m%d-%H%M%S") + "-" + entry.name + "-" + os.urandom(3).hex()
+        )
+        scratch = run_dir / "scratch"
+        scratch.mkdir(parents=True, exist_ok=True)
+        confinement = self._sandbox().prepare_skill(
+            scratch, skill_dir, inputs,
+            env=env.dir if env else "",
+            interpreter=env.interpreter if env else "",
+            prefix=env.prefix if env else "",
+            path_env=os.environ.get("PATH", ""),
+        )
+        if not confinement:
+            shutil.rmtree(run_dir, ignore_errors=True)
+            return _gate_outcome(
+                USE_SKILL_NO_SANDBOX.format(observed=confinement.observed), decision="blocked"
+            )
+        preview = (
+            f"Run the third-party skill {entry.name!r} in an isolated runner. It sees "
+            f"only the brief and may read only the {len(inputs)} file(s) listed, the "
+            "skill's own folder and its packages; every command runs in aish's sandbox "
+            "with no network, and it writes only to its own scratch folder."
+        )
+        card_args = dict(skill=entry.name, brief=brief, inputs=inputs)
+        decision = self._ask_owner(ASKED_BY_SKILL, "use_skill", card_args, preview)
+        if isinstance(decision, Denied):
+            shutil.rmtree(run_dir, ignore_errors=True)
+            self._arm_stop_gate(decision.comment)
+            return _gate_outcome(
+                _with_feedback(USE_SKILL_DENIED, decision.comment, card_said=preview),
+                decision="denied", comment=decision.comment,
+            )
+        if isinstance(decision, Approved):
+            shutil.rmtree(run_dir, ignore_errors=True)
+            return _gate_outcome(
+                _tool_held("use_skill", decision.comment, card_said=preview),
+                decision="held", comment=decision.comment,
+            )
+        if decision is None or decision is False:
+            shutil.rmtree(run_dir, ignore_errors=True)
+            return _gate_outcome(USE_SKILL_DENIED, decision="denied")
+        self._note(f"→ use_skill: running {entry.name!r} in an isolated runner")
+        self.status.start("use_skill")
+        try:
+            outcome = skill_runner.run(skill_runner.Request(
+                skill=entry.name, body=body, skill_dir=skill_dir, brief=brief,
+                inputs=tuple(inputs), run_dir=run_dir, confinement=confinement,
+                chat=self.chat, model=model_spec, model_name=self.model,
+                has_python=env is not None, num_ctx=self.num_ctx,
+                should_stop=self._cancel.is_set,
+            ))
+        finally:
+            self.status.stop()
+        self._emit_record(
+            kind="skill_run", call=getattr(self._call_ids, "current", 0), **outcome.record()
+        )
+        self._note(f"→ use_skill: {outcome.ended_sentence()}; {len(outcome.files)} file(s)")
+        return outcome.envelope()
 
     def _dispatch_write(self, name: str, args: dict) -> str:
         # Before the plan, because planning an edit reads the file. A write

@@ -33,6 +33,11 @@ from the system log by a per-run nonce the profile tags every denial with
 log lines, so `process == "kernel"` is part of the query. The kernel collapses
 repeats and drops lines under a flood, so the record is a SAMPLE and says so.
 
+Tier S (epic #467 slice 2b) is the same shape for a third-party skill's
+runner (`render_skill_profile`, `SkillConfinement`): reads reopened only for
+what `use_skill` named, one interpreter added to the exec list, and no card
+anywhere — its caller refuses to run at all when it is unavailable.
+
 Fail closed: no `sandbox-exec`, a profile that does not apply, or a canary
 that writes where it must not ⇒ `Unavailable`, and the caller cards (attended)
 or refuses (unattended). The state is never inferred from an exit code — 65
@@ -44,6 +49,7 @@ from __future__ import annotations
 import os
 import re
 import secrets as _random
+import shlex
 import shutil
 import stat
 import subprocess
@@ -378,6 +384,108 @@ def render_profile(paths: ProfilePaths, exec_list: Iterable[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+@dataclass(frozen=True)
+class SkillPaths:
+    """The inputs of a Tier S profile (epic #467 slice 2b), every one already
+    resolved. `env`, `interpreter` and `prefix` are empty for a skill with no
+    Python environment: then no interpreter is on the exec list at all."""
+
+    scratch: str
+    skill: str
+    inputs: tuple[str, ...]
+    env: str = ""
+    interpreter: str = ""
+    prefix: str = ""
+
+
+def skill_paths(
+    scratch: os.PathLike | str,
+    skill: os.PathLike | str,
+    inputs: Iterable[os.PathLike | str] = (),
+    env: os.PathLike | str = "",
+    interpreter: os.PathLike | str = "",
+    prefix: os.PathLike | str = "",
+) -> SkillPaths:
+    return SkillPaths(
+        scratch=_real(scratch),
+        skill=_real(skill),
+        inputs=tuple(dict.fromkeys(_real(p) for p in inputs)),
+        env=_real(env) if env else "",
+        interpreter=_real(interpreter) if interpreter else "",
+        prefix=_real(prefix) if prefix else "",
+    )
+
+
+def render_skill_profile(paths: SkillPaths, exec_list: Iterable[str]) -> str:
+    """The Tier S profile: what a third-party skill's runner may do.
+
+    Tier R's shape with three differences, each the reason the tier exists.
+    READS reach only what `use_skill` named — its input files, the skill's
+    folder, the skill's Python environment and the interpreter's own
+    installation — and the runner's scratch; not the chat's roots, so the
+    tool's promise about what the skill may read is the kernel's, not the
+    tool's (design review, 2026-11-11). EXEC adds exactly one program, the
+    environment's interpreter, and MAP-EXECUTABLE adds the two trees its code
+    loads from. The environment is never writable here: a runner that could
+    write it could plant code its next run would load.
+    """
+    tag = f'(with message "{NONCE_SLOT}")'
+    s = _sbpl_string
+    exec_list = [*exec_list, *([paths.interpreter] if paths.interpreter else [])]
+    lines = ["(version 1)", "(allow default)"]
+
+    lines.append(f"(deny process-exec* {tag})")
+    lines.append(
+        "(allow process-exec* "
+        + " ".join(f"(literal {s(p)})" for p in dict.fromkeys(exec_list)) + ")"
+    )
+
+    code_trees = [*MAPPABLE, *(p for p in (paths.prefix, paths.env) if p)]
+    lines.append(f"(deny file-map-executable {tag})")
+    lines.append(
+        "(allow file-map-executable "
+        + " ".join(f"(subpath {s(p)})" for p in code_trees) + ")"
+    )
+
+    lines.append(f"(deny file-write* {tag})")
+    lines.append(
+        "(allow file-write* "
+        f"(subpath {s(paths.scratch)}) "
+        + " ".join(f"(literal {s(d)})" for d in WRITABLE_DEVICES)
+        + ' (regex #"^/dev/fd/[0-9]+$"))'
+    )
+
+    lines.append(
+        "(deny file-read* " + " ".join(f"(subpath {s(p)})" for p in CLOSED_TO_READ)
+        + f" {tag})"
+    )
+    trees = [paths.scratch, paths.skill, *(p for p in (paths.env, paths.prefix) if p)]
+    lines.append(
+        "(allow file-read* "
+        + " ".join(f"(subpath {s(p)})" for p in trees)
+        + "".join(f" (literal {s(p)})" for p in paths.inputs)
+        + ")"
+    )
+    lines.append(
+        "(deny file-read* "
+        + " ".join(f'(regex #"{r}")' for r in sensitive_regexes())
+        + f" {tag})"
+    )
+    lines.append("(allow file-read-metadata)")
+
+    lines.append(f"(deny network* {tag})")
+    lines.append(f"(deny appleevent-send {tag})")
+    lines.append(f"(deny mach-lookup {tag})")
+    lines.append(
+        "(allow mach-lookup "
+        + " ".join(f"(global-name {s(n)})" for n in MACH_SERVICES)
+        + ")"
+    )
+    lines.append(f"(deny signal {tag})")
+    lines.append("(allow signal (target self) (target pgrp))")
+    return "\n".join(lines) + "\n"
+
+
 def clean_env(scratch: str, source: Mapping[str, str] | None = None) -> dict[str, str]:
     """The environment of a sandboxed command: the allow-listed names from
     `source`, HOME as it is (paths the classifier resolved with `~` must mean
@@ -487,6 +595,52 @@ class Confinement:
         )
 
 
+class SkillConfinement(Confinement):
+    """A skill runner's sandbox (Tier S): ONE nonce for the whole run, so its
+    refusals are read once, at the runner's end, from its first command on."""
+
+    tier = "skill"
+
+    def __init__(self, template: str, paths: SkillPaths, sandbox: SeatbeltSandbox):
+        super().__init__(template, paths, sandbox)  # type: ignore[arg-type]
+        self.skill_paths = paths
+        self._launched = False
+
+    def launch(self, command: str) -> tuple[list[str], dict[str, str]]:
+        env = skill_env_vars(self.skill_paths)
+        os.makedirs(env["TMPDIR"], exist_ok=True)
+        if not self._launched:
+            self.started = time.time()
+            self._launched = True
+        return [SANDBOX_EXEC, "-p", self.profile, SHELL, "-c", command], env
+
+    def describe(self) -> str:
+        python = (
+            " and the skill's own Python" if self.skill_paths.interpreter
+            else " (no Python: this skill has no environment)"
+        )
+        return (
+            "it could read only its input files, the skill's folder, the skill's "
+            f"Python environment and its scratch folder {self.skill_paths.scratch}; "
+            "write only to that scratch folder; start only the shell, aish's "
+            f"read-only commands, mkdir/touch/rm{python}; and it had no network"
+        )
+
+
+def skill_env_vars(paths: SkillPaths, source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """`clean_env` for a runner: HOME is the scratch folder too, so a tool that
+    writes a cache under `~` writes it where it may; the environment's `bin`
+    comes first on PATH, so `python` is the skill's; and Python neither writes
+    bytecode into the environment (refused anyway) nor reads a user site."""
+    env = clean_env(paths.scratch, source)
+    env["HOME"] = paths.scratch
+    if paths.env:
+        env["PATH"] = os.path.join(paths.env, "bin") + ":" + env["PATH"]
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
+
+
 class SeatbeltSandbox:
     """The process-wide sandbox: builds profiles, proves each one with a
     canary before its first use, and reads refusals back from the kernel log.
@@ -538,21 +692,69 @@ class SeatbeltSandbox:
             return verdict
         return Confinement(template, paths, self)
 
-    def _canary(self, template: str, paths: ProfilePaths) -> Unavailable | None:
+    def prepare_skill(
+        self,
+        scratch: os.PathLike | str,
+        skill: os.PathLike | str,
+        inputs: Iterable[os.PathLike | str] = (),
+        env: os.PathLike | str = "",
+        interpreter: os.PathLike | str = "",
+        prefix: os.PathLike | str = "",
+        path_env: str | None = None,
+    ) -> SkillConfinement | Unavailable:
+        """A Tier S confinement for one skill run, proven by the same canary
+        as Tier R plus one probe: when the skill has an interpreter, it must
+        start and write into scratch, or the run would be a sandbox in which
+        the skill's own code cannot run."""
+        problem = self._platform_problem()
+        if problem:
+            return Unavailable(problem)
+        try:
+            paths = skill_paths(scratch, skill, inputs, env, interpreter, prefix)
+            exec_list = exec_allow_list(
+                self.names(), path_env if path_env is not None else os.environ.get("PATH", "")
+            )
+            template = render_skill_profile(paths, exec_list)
+        except (OSError, ValueError) as exc:
+            return Unavailable(f"aish could not build the skill sandbox profile: {exc}")
+        with self._lock:
+            if template not in self._proven:
+                self._proven[template] = self._canary(
+                    template, paths, make=SkillConfinement, interpreter=paths.interpreter
+                )
+            verdict = self._proven[template]
+        if verdict is not None:
+            return verdict
+        return SkillConfinement(template, paths, self)
+
+    def _canary(
+        self,
+        template: str,
+        paths: ProfilePaths | SkillPaths,
+        make: type[Confinement] = Confinement,
+        interpreter: str = "",
+    ) -> Unavailable | None:
         """Run the profile once with three probes and check their EFFECTS on
         disk: a write into scratch must land (the command ran under it), a
         write outside must not, and a program off the exec list must not
-        start. Exit codes are not consulted."""
-        probe = Confinement(template, paths, self)
+        start. A Tier S profile with an interpreter adds a fourth: the
+        interpreter must start (`-I -S`, so no code from the environment runs)
+        and write into scratch. Exit codes are not consulted."""
+        probe = make(template, paths, self)  # type: ignore[arg-type]
         token = _random.token_hex(6)
         outside = tempfile.mkdtemp(prefix="aish-sandbox-canary-")
         ran = os.path.join(paths.scratch, f".aish-canary-ran-{token}")
         leaked = os.path.join(outside, "written")
         exec_leak = os.path.join(paths.scratch, f".aish-canary-exec-{token}")
+        python_ran = os.path.join(paths.scratch, f".aish-canary-python-{token}")
         script = (
             f"echo ok > '{ran}'; echo leak > '{leaked}'; "
             f"/usr/bin/env /bin/sh -c \"echo leak > '{exec_leak}'\""
         )
+        if interpreter:
+            script += "; " + shlex.join(
+                [interpreter, "-I", "-S", "-c", f"open({python_ran!r}, 'w').write('ok')"]
+            )
         try:
             os.makedirs(paths.scratch, exist_ok=True)
             argv, env = probe.launch(script)
@@ -573,9 +775,14 @@ class SeatbeltSandbox:
                 return Unavailable("the sandbox canary wrote outside scratch")
             if os.path.exists(exec_leak):
                 return Unavailable("the sandbox canary started a program off its list")
+            if interpreter and not os.path.exists(python_ran):
+                return Unavailable(
+                    f"the sandbox canary could not start the skill's Python {interpreter} "
+                    "inside the profile"
+                )
             return None
         finally:
-            for path in (ran, exec_leak, leaked):
+            for path in (ran, exec_leak, leaked, python_ran):
                 try:
                     os.unlink(path)
                 except OSError:
