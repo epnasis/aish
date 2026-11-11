@@ -268,6 +268,8 @@ A file changed, missing, absent from the record, a symlink, or not a regular fil
 **Residuals, named so the words above do not outrun the code.**
 - **A command approved on a card can write anywhere the command can**, the tree and `skill-sources` included: the fence is on aish's file and skill tools, not on `run_command`, and no command-text fence (the charter fence's shape) covers these paths.
 - **A prefix-rule command runs cardless AND unsandboxed** (`tools.ALLOWLIST_RULE`, `docs/sandbox.md` "The typed verdict and the seam"), so it can write there too. Cardless commands WITHOUT a rule run under the Seatbelt profile, whose write rule allows only the chat's scratch and a few devices (`docs/sandbox.md` "The profile", the table's write row), so those cannot.
+- `TestAMalformedImportFailsCleanly`: a control character in `path` is refused before the clone, and a non-UTF-8 `SKILL.md` is a refusal that removes the clone, where both used to escape as unhandled errors leaving the clone on disk (found in the slice-2 code review).
+- **A plugin tool declared non-mutating runs its wrapper cardless and unsandboxed**, so such a wrapper could write there too. Its code reached the machine through `create_tool`'s diff card, which puts it in the same class as the first residual.
 - **Only `read_skill` and `read_file` verify.** `cat`, `run_command` of a bundled script, and any other shell read of the tree check nothing — the hashes protect what aish SERVES through its two doors, not what a shell runs.
 - **Removing the lock, or its entry, turns a refusal into the stated unchecked line** — reachable by the same writers the first two residuals name. The line is said on every read, so the downgrade is visible, not silent.
 

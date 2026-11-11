@@ -643,3 +643,36 @@ class TestReviewHashes:
         (installed / "extra.md").write_text("x\n")
         with pytest.raises(skill_import.SkillImportError, match="not in the review"):
             skill_import.verified_file(tree, installed / "extra.md")
+
+
+class TestAMalformedImportFailsCleanly:
+    """Slice-2 code review (Fable 5.0): a NUL in `path` passed the source check,
+    the clone ran, and the path join raised an unhandled ValueError that left the
+    clone on disk; a non-UTF-8 SKILL.md did the same. Both are now refusals."""
+
+    def _leftover_clones(self, tmp_path):
+        return [p for p in tmp_path.iterdir() if p.name.startswith("aish-skill-import-")]
+
+    def test_a_control_character_in_path_is_refused_before_the_clone(
+        self, approved_skill_source
+    ):
+        with pytest.raises(skill_import.SkillImportError, match="control character"):
+            skill_import.stage(approved_skill_source.url, "a\x00b")
+        assert approved_skill_source.clones == []
+
+    def test_a_non_utf8_manifest_is_refused_and_the_clone_removed(
+        self, approved_skill_source, monkeypatch, tmp_path
+    ):
+        made = tmp_path / "clones"
+        made.mkdir()
+        monkeypatch.setattr(skill_import.tempfile, "tempdir", str(made))
+        skill = approved_skill_source.repo / "s"
+        skill.mkdir()
+        (skill / "SKILL.md").write_bytes(b"---\nname: s\ndescription: \xff\xfe\n---\nb\n")
+        with pytest.raises(skill_import.SkillImportError, match="not UTF-8"):
+            skill_import.stage(approved_skill_source.url, "s")
+        assert self._leftover_clones(made) == []
+
+    def test_the_locks_name_is_reserved_in_any_case(self):
+        assert skill_import.reserved_name_error(["Skills.LOCK"]) is not None
+        assert skill_import.reserved_name_error(["skills-lock"]) is None

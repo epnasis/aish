@@ -206,6 +206,13 @@ def path_segments(path: str) -> list[str]:
     the approved-prefix check compares these segments, so they must mean
     exactly the folder that is cloned."""
     text = path.strip()
+    # A control character (NUL above all) passed the check and then broke the
+    # path join after the clone, as an unhandled error that left the clone on
+    # disk — refused here, before anything is fetched, like the URL's own.
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise SkillImportError(
+            f"NOT imported: path {path!r} contains a control character. Nothing was fetched."
+        )
     if text.startswith(("/", "~")) or "\\" in text:
         raise SkillImportError(
             f"NOT imported: path {path!r} must be relative to the repository root, "
@@ -392,7 +399,9 @@ LOCK_VERSION = 2
 def reserved_name_error(names: list[str]) -> str | None:
     """The lock's own name is not a skill name: a folder by that name would
     stand where the lock is written and every later record would fail."""
-    if LOCK_NAME in names:
+    # Case-folded: the owner's disk is case-insensitive, so `Skills.lock` would
+    # stand where the lock is written just the same.
+    if any(n.casefold() == LOCK_NAME for n in names):
         return f"{LOCK_NAME!r} is the name of the third-party tree's lock, not a skill name"
     return None
 
@@ -626,7 +635,11 @@ def stage(
 
     from . import skills as sk
 
-    entry = sk._parse(manifest, "skill")
+    try:
+        entry = sk._parse(manifest, "skill")
+    except (UnicodeDecodeError, ValueError):
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise SkillImportError("SKILL.md is not UTF-8 text — nothing was imported") from None
     name = entry.name
     if not sk.NAME_RE.match(name or ""):
         if tmp:
