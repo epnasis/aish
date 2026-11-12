@@ -70,6 +70,7 @@ from . import (
     skill_env,
     skill_import,
     skill_runner,
+    skillaudit,
     skills,
     token_ratio,
     tool_menu,
@@ -4195,6 +4196,9 @@ class Agent:
         self.approve_read = approve_read
         self.approve_tool = approve_tool
         self.approve_import = approve_import
+        # The import auditor's chat seam (#467 slice 3). None: the role
+        # builds its own from the named model spec (`skillaudit.model_spec`).
+        self.skill_audit_chat: Callable[..., Any] | None = None
         self.echo = echo
         # Wrapped once here rather than at each `on_line=` site, so a new
         # streaming caller cannot be the one that forgets.
@@ -16571,10 +16575,11 @@ class Agent:
                  "executable": is_exec}
                 for rel, text, is_exec in imported
             ]
+            audit = self._audit_import(name, imported)
             self._note(f"→ reviewing skill '{name}' ({len(imported)} files)")
             decision = self.approve_import(
                 name=name, description=description, files=files_payload,
-                skipped=skipped, flags=flags, dest=str(dest),
+                skipped=skipped, flags=flags, dest=str(dest), audit=audit.card(),
             )
             if isinstance(decision, Denied):
                 self._arm_stop_gate(decision.comment)
@@ -16607,6 +16612,7 @@ class Agent:
             lock_note = skill_import.lock_failure_note(
                 tree, name, skill_import.source_label(repo),
                 skill_import.lock_path(sub_path), skill_import.clone_commit(tmp), env,
+                audit=audit,
             )
         finally:
             if tmp:
@@ -16625,6 +16631,23 @@ class Agent:
             "the next task it is listed as such and never preloaded; use_skill(<name>) "
             "runs it in an isolated runner."
         )
+
+    def _audit_import(
+        self, name: str, imported: list[tuple[str, str, bool]]
+    ) -> skillaudit.Audit:
+        """The import auditor's reading of the staged files (#467 slice 3),
+        for the card and the lock — never for the tool result, so nothing the
+        model wrote about a stranger's text reaches the acting model. Every
+        call leaves its R7 record, the not-loaded case included."""
+        audit, charter, result = skillaudit.audit(
+            name, [(rel, text) for rel, text, _x in imported], state_dir=self.state_dir,
+            chat=self.skill_audit_chat, should_stop=self._cancel.is_set,
+        )
+        if charter is not None and result is not None:
+            self._record_role(charter, result)
+        else:
+            self._record_role_skip(skillaudit.AUDITOR, audit.why)
+        return audit
 
     def _skill_inputs(self, raw: Any) -> tuple[list[str], str]:
         """The files a runner may read, each resolved and checked, or why not.

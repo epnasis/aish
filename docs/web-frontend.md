@@ -66,6 +66,8 @@ A card showed the action and nothing else, so the owner reverse-engineered its p
 
 `tests/js/test_card_intent.js`.
 
+- **The import auditor's block (#467 slice 3).** `importAuditBlock` draws `event.audit` on the import card, after the deterministic flags and in its own dashed box — never the flags' box and never a pass colour, because it is a model's reading and must not borrow the authority of a check. The headline is aish's sentence (an empty result: "flagged nothing — this is not a verdict"; no call: "did not run: <reason>"), and each finding's quote is set with `textContent` under "quoted from the skill:". `tests/js/test_import_audit.js`.
+
 **The sandbox note (epic #462 S1).** A command card can carry `sandbox_note` — the server's sentence for why a command that would have run with no card is on a card after all: aish's sandbox is not available, or it refused this very command earlier in the chat, and approving runs it with the owner's full rights. `sandboxNote` draws it as text in the escape note's orange warning style, after the escapes and before the intent block, because it says the same kind of thing: this approval reaches further than an ordinary run. Absent on every other card. `docs/sandbox.md`.
 
 ### `[CARD-LATENCY]` — a sub-second tap is a blind tap

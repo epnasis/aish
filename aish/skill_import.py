@@ -35,6 +35,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 from . import skill_env
@@ -480,6 +481,7 @@ def record_import(
     commit: str | None,
     hashes: dict[str, str],
     env: dict | None = None,
+    audit: dict | None = None,
 ) -> None:
     """Add `name` to the tree's lock. The ONE writer, called by both install
     paths after the files are in place. Atomic against a torn write only: two
@@ -494,6 +496,7 @@ def record_import(
         "imported_at": date.today().isoformat(),
         "files": hashes,
         **({"env": env} if env else {}),
+        **({"audit": audit} if audit else {}),
     }
     text = json.dumps({"version": LOCK_VERSION, "skills": entries}, indent=2, sort_keys=True)
     publish(tree / LOCK_NAME, text + "\n", encoding="utf-8")
@@ -707,6 +710,33 @@ def quarantine_root() -> Path:
     return state_home() / "skill-imports"
 
 
+def _audit_path(root: Path, name: str) -> Path:
+    """Beside the quarantined folder, like the origin note: the auditor's
+    reading of the staged files, carried to the lock at approve."""
+    return root / f"{name}.audit.json"
+
+
+def staged_files(folder: Path) -> list[tuple[str, str]]:
+    """(relative path, text) of every text file under a quarantined skill,
+    in the order the card would list them — what `aish skill import` audits.
+    Links are not followed; binary files are skipped, as `stage` skips them."""
+    out: list[tuple[str, str]] = []
+    for rel, path, is_link in _walk(folder):
+        if is_link or not path.is_file():
+            continue
+        text = _decodes(path.read_bytes())
+        if text is not None:
+            out.append((rel, text))
+    return out
+
+
+def save_audit(name: str, audit: Any, root: Path | None = None) -> None:
+    """Keep the auditor's reading beside the quarantine until approve or
+    discard. Raises OSError."""
+    root = root or quarantine_root()
+    publish(_audit_path(root, name), json.dumps(audit.as_json()) + "\n", encoding="utf-8")
+
+
 def _origin_path(root: Path, name: str) -> Path:
     """Beside the quarantined folder, not in it, so it never installs as a
     bundled file: where the staged skill came from, for the lock at approve."""
@@ -797,10 +827,18 @@ def install(name: str, root: Path | None = None) -> tuple[Path, list[str], str]:
     if not isinstance(origin, dict):
         origin = {}
     origin_file.unlink(missing_ok=True)
+    from . import skillaudit
+
+    audit_file = _audit_path(root, name)
+    try:
+        audit = skillaudit.Audit.from_json(json.loads(audit_file.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        audit = None
+    audit_file.unlink(missing_ok=True)
     env = install_env(name, dest)
     note = lock_failure_note(
         tree, name, origin.get("source"), str(origin.get("path") or ""), origin.get("commit"),
-        env,
+        env, audit,
     )
     return dest, dropped, "; ".join(n for n in (skill_env.install_note(env), note) if n)
 
@@ -815,14 +853,25 @@ def install_env(name: str, dest: Path) -> dict:
 
 def lock_failure_note(
     tree: Path, name: str, source: str | None, sub_path: str, commit: str | None,
-    env: dict | None = None,
+    env: dict | None = None, audit: Any = None,
 ) -> str:
     """`record_import` with the hashes of what is now on disk, and a failure
     turned into the sentence both install paths say: the skill is installed
     and still third-party, but nothing records where it came from or what its
-    files were, so its reads will say they were not checked."""
+    files were, so its reads will say they were not checked.
+
+    `audit` is the import auditor's `skillaudit.Audit` (#467 slice 3), or None
+    when none was recorded; the lock's copy says which bytes it read."""
+    from . import skillaudit
+
     try:
-        record_import(tree, name, source, sub_path, commit, file_hashes(tree / name), env)
+        hashes = file_hashes(tree / name)
+        entry = (
+            audit.lock_entry(skillaudit.covers(audit, hashes)) if audit is not None
+            else {"status": skillaudit.NOT_RUN, "covers": "nothing",
+                  "why": "no audit was recorded when this skill was staged"}
+        )
+        record_import(tree, name, source, sub_path, commit, hashes, env, entry)
     except OSError as exc:
         return (
             f"where it came from and its file hashes were NOT recorded in "
@@ -839,4 +888,5 @@ def discard(name: str, root: Path | None = None) -> bool:
         return False
     shutil.rmtree(src, ignore_errors=True)
     _origin_path(root, name).unlink(missing_ok=True)
+    _audit_path(root, name).unlink(missing_ok=True)
     return True

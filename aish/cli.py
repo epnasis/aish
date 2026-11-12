@@ -788,12 +788,23 @@ def make_write_approver(log, get_intent=None):
     return approve_write
 
 
+def print_audit(audit: dict) -> None:
+    """The import auditor's block (#467 slice 3), apart from the code-computed
+    flags above it: aish's headline, then each finding — a model's reading,
+    with a quote that is a stranger's text and is printed as such."""
+    print(f"{YELLOW}  ◇ auditor — {_plain(str(audit.get('headline', '')))}{RESET}")
+    for f in audit.get("findings") or ():
+        print(f"{YELLOW}    • {_plain(str(f.get('file', '')))} — "
+              f"{_plain(str(f.get('label', '')))}: {_plain(str(f.get('reason', '')))}{RESET}")
+        print(f"{DIM}      quoted from the skill: “{_plain(str(f.get('quote', '')))}”{RESET}")
+
+
 def make_import_approver(log, get_intent=None):
     """Consolidated review for a skill import (#139): the WHOLE skill in one
     decision — name, description, risk flags, and every file's contents — so
     untrusted code is reviewed properly, not rubber-stamped file-by-file."""
 
-    def approve_import(name, description, files, skipped, flags, dest) -> bool:
+    def approve_import(name, description, files, skipped, flags, dest, audit=None) -> bool:
         said = (get_intent() if get_intent else "") or ""
         print_intent(said)
         # Attacker-authored by construction — that is what this review reads.
@@ -805,6 +816,8 @@ def make_import_approver(log, get_intent=None):
             print(f"{RED}  ⚠ review closely:{RESET}")
             for flag in flags:
                 print(f"{RED}    • {_plain(str(flag))}{RESET}")
+        if audit is not None:
+            print_audit(audit)
         if skipped:
             print(f"{DIM}  (binary assets skipped: {_plain(', '.join(skipped))}){RESET}")
         for f in files:
@@ -2432,6 +2445,34 @@ def _personal_cli(args: list[str]) -> int:
     return 2
 
 
+def _audit_staged(name: str, dest: Path):
+    """`aish skill import`'s audit of the bytes it just staged (#467 slice 3).
+    No session log exists here, so the role's R7 record goes to its own file
+    (`skillaudit.records_path`); the reading waits beside the quarantine for
+    `approve`, which records in the lock whether it covers what installed."""
+    from . import skill_import, skillaudit
+    from .paths import state_home
+
+    state = state_home()
+    audit, charter, result = skillaudit.audit(
+        name, skill_import.staged_files(dest), state_dir=state
+    )
+    record = (
+        skillaudit.role_record(charter, result) if charter is not None and result is not None
+        else {"kind": "role", "charter": skillaudit.AUDITOR, "status": audit.status,
+              "why": audit.why, "model": audit.model}
+    )
+    for write, what in (
+        (lambda: skillaudit.append_record(state, record), "its record"),
+        (lambda: skill_import.save_audit(name, audit), "its reading for `approve`"),
+    ):
+        try:
+            write()
+        except OSError as exc:
+            print(f"{DIM}  (the auditor's {what} could not be written: {_plain(str(exc))}){RESET}")
+    return audit
+
+
 def _skill_cli(args: list[str]) -> int:
     """`aish skill <import|approve|list|discard>` — the review-in-your-editor
     path for skill imports (#139). `import` STAGES to a quarantine dir (nothing
@@ -2465,6 +2506,7 @@ def _skill_cli(args: list[str]) -> int:
             print(f"{RED}  ⚠ review closely:{RESET}")
             for flag in flags:
                 print(f"{RED}    • {_plain(str(flag))}{RESET}")
+        print_audit(_audit_staged(name, dest).card())
         print(f"\nreview the files, then install with:  {BOLD}aish skill approve {name}{RESET}")
         print(f"or drop it with:                      aish skill discard {name}")
         return 0

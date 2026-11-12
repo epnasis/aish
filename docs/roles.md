@@ -36,6 +36,13 @@ Issue #297, stage 1 of the epic in #295.
 > `roles.WIRINGS`: its one capped text field, `reason`, is stored and rendered nowhere; the report's
 > evidence line is code's. A fourth output shape, `settlement`, delegated to `mailsettle.py`.
 
+> **The fourth caller (#467 slice 3): `skill-auditor`**, the import auditor, called on both
+> skill-import review paths before the card (`skillaudit.audit`, `docs/knowledge-layer.md`
+> §The import auditor) — `caller` class, one named spec (`$AISH_SKILL_AUDITOR_MODEL`, default
+> `gemini:gemini-flash-latest`), no entry in `roles.WIRINGS`: its findings reach the owner's
+> card and the lock, never an acting context. A fifth output shape, `findings`, delegated to
+> `skillaudit.py`.
+
 > ## Read this first: no role is called today, and the thing that replaced one was reverted
 >
 > The framework shipped with one customer — the snippet reader, wired to every
@@ -197,6 +204,19 @@ citations), and the framework hands off to `mailsettle` exactly as for `verdict`
 must be the bundle's one candidate, citations that must be in the bundle, a capped reason. An exam
 case may use `answer_in`, `cites_any` and `absent`, checked at load
 (`mailsettle.check_expectation`). `tests/test_mailsettle.py::TestTheExam`.
+
+**`shape: findings`** (#467 slice 3) is the fifth, for the import auditor. Its frontmatter
+declares only caps (`skillaudit.FINDINGS_CAPS`: `max_findings`, `max_quote_chars`,
+`max_reason_chars`), and the framework hands off to `skillaudit` as for `settlement`: the answer
+is `Findings` — a `summary` that can say `could_not_assess` (added to `UNSURE_VALUES` for it),
+and findings whose category vocabulary can say `cannot_tell`, whose file must be in the bundle and
+whose quote must be text that file holds. An exam case may use `summary_in`,
+`categories_include`, `categories_absent`, `files_flagged`, `files_not_flagged` and `absent`,
+checked at load (`skillaudit.check_expectation`, which also refuses a case requiring and
+forbidding one category). Its exam ships benign real-shaped skills, one injected variant per
+category, an injection aimed at the auditor itself, a `could_not_assess` case and three
+discrimination cases named in `TestTheAuditorCharter.DISCRIMINATION_CASES`.
+`tests/test_skillaudit.py`.
 
 `roles.capped` is the enforcement: control characters are flattened first (a field that
 can carry a newline can carry a fake banner into whatever renders it), then the cap is
@@ -1189,8 +1209,10 @@ Read this list before assuming a capability.
   owner message and runs a model only when admitted; its capped statement reaches the
   acting model's reminder, the one entry in `roles.WIRINGS` (`docs/objective.md`). The mail
   Reader (#142 W5) is called by the shadow inbox CLI, only when admitted for the named spec, and
-  its verdict reaches no acting context (`docs/mail-assistant.md`).
-  Its `role` record is written by `objective.role_record` through the server-side sink,
+  its verdict reaches no acting context (`docs/mail-assistant.md`). The settlement judge and,
+  since #467 slice 3, the import auditor are called the same way — only when admitted for the
+  spec their caller names, and into no acting context.
+  The tracker's `role` record is written by `objective.role_record` through the server-side sink,
   in `Agent._record_role`'s shape but with no `call` — it belongs to the task, not to a
   tool call.
 - **No fan-out, aggregation, hierarchy, or a wiring data format.** Zero customers is even

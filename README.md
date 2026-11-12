@@ -518,7 +518,17 @@ thousands of entries without bloating the context.
   tools will not edit that file. An approved import is a read-only clone, then
   one consolidated review of every file plus deterministic risk flags (network
   access, a download piped to a shell, Keychain reads, AppleScript, package
-  installs, decoded payloads, credential paths, …) before anything installs. It goes to `~/.config/aish/vendor-skills/`, never into
+  installs, decoded payloads, credential paths, …) before anything installs.
+  The card also carries an **auditor**: an isolated model (no tools, one
+  named model — `gemini:gemini-flash-latest` unless you set
+  `AISH_SKILL_AUDITOR_MODEL`) reads the files and lists what a reviewer
+  should look at, each with a quote that aish checks is really in the file.
+  It only adds warnings: it approves nothing, an empty list is shown as
+  "flagged nothing — this is not a verdict", and its findings are recorded in
+  the lock but never handed to the model. It runs only once you have admitted
+  it (`uv run python scripts/role-admission.py --model
+  gemini:gemini-flash-latest skill-auditor`); until then the card says it did
+  not run, and why. It goes to `~/.config/aish/vendor-skills/`, never into
   your own `skills/`, with where it came from and a hash of every installed
   file recorded in `vendor-skills/skills.lock`. Imported skills are
   **third-party**: listed in a separate index section and never preloaded,

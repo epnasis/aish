@@ -8691,6 +8691,7 @@ function buildImportCard(card, event) {
     }
     card.appendChild(warn);
   }
+  if (event.audit) card.appendChild(importAuditBlock(event.audit));
   if ((event.skipped || []).length) {
     const sk = document.createElement("div");
     sk.className = "import-skipped";
@@ -8734,6 +8735,33 @@ function buildImportCard(card, event) {
   denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
   actionsRow.append(approveBtn, denyBtn);
   card.appendChild(actionsRow);
+}
+
+// The import auditor's block (#467 slice 3). Apart from the code-computed
+// flags above it and never styled as a pass: the headline is aish's own
+// sentence (an empty result reads "flagged nothing — this is not a verdict"),
+// and each finding is a model's reading whose quote is a stranger's text —
+// set with textContent, labelled as quoted from the skill.
+function importAuditBlock(audit) {
+  const box = document.createElement("div");
+  box.className = "import-audit";
+  const head = document.createElement("div");
+  head.className = "import-audit-title";
+  head.textContent = audit.headline || "";
+  box.appendChild(head);
+  for (const f of audit.findings || []) {
+    const row = document.createElement("div");
+    row.className = "import-audit-finding";
+    const what = document.createElement("div");
+    what.className = "import-audit-what";
+    what.textContent = `${f.file} — ${f.label}: ${f.reason}`;
+    const quote = document.createElement("div");
+    quote.className = "import-audit-quote mono";
+    quote.textContent = `quoted from the skill: “${f.quote}”`;
+    row.append(what, quote);
+    box.appendChild(row);
+  }
+  return box;
 }
 
 function wrenchIcon() {

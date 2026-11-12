@@ -1841,10 +1841,12 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             return Approved(comment) if comment else True
         return Denied(comment) if comment else False
 
-    def approve_import(name, description, files, skipped, flags, dest):
+    def approve_import(name, description, files, skipped, flags, dest, audit=None):
         # One consolidated review of the WHOLE skill (#139): every file's
         # contents (rendered syntax-highlighted by app.js) + risk flags, one
         # decision. Untrusted code is reviewed as whole files, not diffs.
+        # `audit` is the import auditor's block (#467 slice 3), composed by
+        # `skillaudit.Audit.card`: aish's headline and the model's findings.
         request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "import",
@@ -1855,6 +1857,8 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             "flags": flags,
             "dest": dest,
         }
+        if audit is not None:
+            request["audit"] = audit
         carry_intent(request)
         answer = bridge.ask(request)
         approved = answer.get("action") == "approve"

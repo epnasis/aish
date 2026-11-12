@@ -132,7 +132,11 @@ class Field:
 # A closed vocabulary must be able to say "I cannot tell". Spelled out rather
 # than inferred: on 2026-08-26 a shipped vocabulary with no such value made a
 # hypothesis the product's own voice for weeks.
-UNSURE_VALUES = frozenset({"unclear", "unknown", "cant_tell", "cannot_tell", "unsure"})
+# `could_not_assess` is the import auditor's (#467 slice 3) word for a skill it
+# could not read whole, or at all.
+UNSURE_VALUES = frozenset(
+    {"unclear", "unknown", "cant_tell", "cannot_tell", "unsure", "could_not_assess"}
+)
 
 
 @dataclass(frozen=True)
@@ -290,9 +294,22 @@ def _parse_shape(raw: Any) -> Shape:
                 raise CharterError(f"a settlement output must declare a positive {name}")
             caps[name] = value
         return Shape(kind, mailsettle.shape_fields(caps), 0, caps)
+    if kind == "findings":
+        # The import auditor's typed answer (#467 slice 3). Its vocabularies
+        # and rules live in `skillaudit`; the frontmatter declares only caps.
+        from . import skillaudit
+
+        caps = {}
+        for name in skillaudit.FINDINGS_CAPS:
+            value = raw.get(name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise CharterError(f"a findings output must declare a positive {name}")
+            caps[name] = value
+        return Shape(kind, skillaudit.shape_fields(caps), 0, caps)
     if kind != "rows":
         raise CharterError(
-            f"unknown output shape {kind!r} (rows | objective | verdict | settlement)")
+            f"unknown output shape {kind!r} (rows | objective | verdict | settlement | "
+            "findings)")
     fields = tuple(_parse_field(f) for f in (raw.get("fields") or ()))
     if not fields:
         raise CharterError("output: declares no fields")
@@ -540,6 +557,10 @@ def _case(raw: Any, input_names: set[str], shape: Shape, source: str) -> Case:
         from . import mailsettle
 
         mailsettle.check_expectation(name, expect)
+    if shape.kind == "findings":
+        from . import skillaudit
+
+        skillaudit.check_expectation(name, expect)
     checks = dict(expect)
     values: dict[str, list[str]] = {}
     for fname, wanted in (expect.get("field_values") or {}).items():
@@ -770,6 +791,10 @@ def validate(
         from . import mailsettle
 
         return mailsettle.validate_answer(shape, payload, inputs or {})
+    if shape.kind == "findings":
+        from . import skillaudit
+
+        return skillaudit.validate_answer(shape, payload, inputs or {})
     if not isinstance(payload, dict):
         raise ValueError("the reply must be a JSON object")
     raw = payload.get("rows")
@@ -1072,6 +1097,10 @@ def contract_text(shape: Shape, rows: tuple[int, ...]) -> str:
         from . import mailsettle
 
         return mailsettle.contract_text(shape)
+    if shape.kind == "findings":
+        from . import skillaudit
+
+        return skillaudit.contract_text(shape)
     lines = [
         "Reply with ONE JSON object and nothing else. No prose before or after "
         "it, no code fence.",
@@ -1349,7 +1378,7 @@ def check_case(case: Case, value: Any) -> list[str]:
     model chooses, so a literal expectation would be unmeetable and the exam
     would be measuring formatting.
     """
-    from . import mailreader, mailsettle
+    from . import mailreader, mailsettle, skillaudit
 
     table: dict[str, Callable[[Any, Any], list[str]]]
     if isinstance(value, Rows):
@@ -1358,6 +1387,8 @@ def check_case(case: Case, value: Any) -> list[str]:
         table = dict(mailreader.ASSERTIONS)
     elif isinstance(value, mailsettle.Settlement):
         table = dict(mailsettle.ASSERTIONS)
+    elif isinstance(value, skillaudit.Findings):
+        table = dict(skillaudit.ASSERTIONS)
     else:
         table = _objective_assertions()
     return [
@@ -1457,6 +1488,10 @@ def _assertions_for(shape: Shape) -> dict[str, Any]:
         from . import mailsettle
 
         return dict(mailsettle.ASSERTIONS)
+    if shape.kind == "findings":
+        from . import skillaudit
+
+        return dict(skillaudit.ASSERTIONS)
     return _objective_assertions() if shape.kind == "objective" else dict(_ASSERTIONS)
 
 
@@ -1536,6 +1571,10 @@ def tally_flags(shape: Shape, value: Any) -> dict[str, dict[str, int]]:
         from . import mailsettle
 
         return mailsettle.tally(value)
+    if shape.kind == "findings":
+        from . import skillaudit
+
+        return skillaudit.tally(value)
     out: dict[str, dict[str, int]] = {}
     for declared in shape.fields:
         if declared.type != "enum":
