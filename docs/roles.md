@@ -964,6 +964,47 @@ remaining calls could not be recorded), prints that the run could not complete, 
 run overwrote the auditor's record for that model with 0/16. An `invalid` answer is the
 model answering badly and IS recorded as a failure. `tests/test_role_admission.py::TestAnIncompleteRun`.
 
+### Repeated runs — what admission means since #472, and what it does not
+
+**The evidence that changed it.** On 2026-11-12 the local Qwen3.6-35B sat the
+skill-auditor's 16-case exam three times: 15/16, 15/16 (the same case both times), 16/16 —
+and was recorded ADMITTED, because the record held the last run's outcome. A pass after
+failures erased them; a failure after a pass would have revoked it.
+
+**What the script does now.** `scripts/role-admission.py` runs the whole exam `--runs N`
+times (`DEFAULT_RUNS = 3`) and every run is spent even after one fails, so the per-case
+counts cover the whole batch. **The cost is N× one exam** — one metered call per case per
+run, plus one per answer that did not validate — stated in the script's docstring, and the
+token, call and time totals of all runs are printed at the end. A case ending `unavailable`
+in ANY run makes the batch incomplete (above): the complete runs before it are discarded
+with it, not recorded as a shorter batch.
+
+**What the record carries** (`roles.Admission`, written by `write_admission`):
+
+| field | meaning |
+|---|---|
+| `passed` / `total`, `owner_passed` / `owner_total` | **summed over every run** (46/48 is three 16-case runs with two misses) |
+| `runs_required` | how many runs the batch was (`--runs`) |
+| `runs_passed` | how many of them passed every case, both halves |
+| `runs` | one entry per run: `passed`, `total`, `owner_passed`, `owner_total`, `failing` (case ids) |
+| `case_failures` | case id → in how many runs it failed; only cases that failed at least once |
+| `supersedes` | what this record replaced, newest first, at most `SUPERSEDED_KEPT` (5): `at`, `version`, `passed`, `total`, and `runs_required` / `runs_passed` / `failing_cases` — or `single_run: true` and no `failing_cases` for a record that never named them |
+| `single_run: true` | instead of the runs fields, on a record written under the one-run rule |
+
+An owner case is named `owner:<case_digest>`, never by its mined name — `roles.case_digest`
+exists so the state dir does not copy his half. `supersedes` is derived by the writer from
+the file, never taken from the caller, so a passing batch cannot erase the failing ones
+before it. **`Admission.ok` requires `runs_passed == runs_required`** on a record with runs,
+so one failing run keeps the role out. The script prints the verdict `roles.admitted` gives
+for the record it just wrote, so it cannot print ADMITTED about a record the role would be
+refused on. `TestRepeatedRuns`, `TestWhatARecordSupersedes`.
+
+**What it does not mean.** Every run passing every case is a **tripwire for gross
+flakiness, not proof of stability.** A case a model passes 90% of the time passes a 3-run
+batch about 73% of the time (0.9³); one it passes a third of the time still slips through
+about 4% of the time (⅓³). Nothing here estimates a model's per-case reliability, and three
+clean runs are three observations.
+
 **On a fresh install nothing is admitted, so the reader does not run and search behaves
 exactly as it did before.** That is the correct default and it is visible in the log rather
 than silent. Two commands make it live:

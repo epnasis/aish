@@ -9,6 +9,7 @@ exam can end — and that a run which could not complete writes nothing.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -106,7 +107,7 @@ class TestAnIncompleteRun:
     def test_it_writes_nothing_and_exits_with_its_own_code(self, exam, capsys):
         charter, state_dir, run, script = exam
         before = a_recorded_pass(charter, state_dir)
-        code, _ = run([roles.Status.UNAVAILABLE, roles.Status.OK])
+        code, _ = run([roles.Status.UNAVAILABLE])
         assert code == script.EXIT_INCOMPLETE == 3
         assert roles.admission_path(state_dir).read_bytes() == before
         out = capsys.readouterr().out
@@ -129,7 +130,124 @@ class TestAnIncompleteRun:
         """`invalid` is the model answering badly — a verdict on it, unlike
         `unavailable`. Only the status decides which, never the error text."""
         charter, state_dir, run, _ = exam
-        code, _ = run([roles.Status.INVALID, roles.Status.OK])
+        code, _ = run([roles.Status.INVALID, roles.Status.OK] * 3)
         assert code == 1
         found = roles.read_admissions(state_dir)[charter.name][MODEL]
-        assert (found.passed, found.total) == (1, 2)
+        assert (found.passed, found.total) == (3, 6)
+
+
+OK, FAIL = roles.Status.OK, roles.Status.INVALID
+
+
+class TestRepeatedRuns:
+    """One pass can be luck (#472): a model that missed a case in 2 of 3 runs
+    was admitted on the third. The exam runs `--runs N` times (default 3) and
+    admits only if every run passes every case."""
+
+    def test_three_clean_runs_admit_and_the_record_carries_each(self, exam, capsys):
+        charter, state_dir, run, script = exam
+        code, scripted = run([OK] * 6)
+        assert code == 0 and scripted.calls == 6 == 2 * script.DEFAULT_RUNS
+        found = roles.read_admissions(state_dir)[charter.name][MODEL]
+        assert (found.runs_required, found.runs_passed) == (3, 3)
+        assert (found.passed, found.total) == (6, 6)
+        assert [r["failing"] for r in found.runs] == [[], [], []]
+        assert found.case_failures == {} and not found.single_run
+        assert roles.admitted(charter, MODEL, state_dir) is None
+        out = capsys.readouterr().out
+        assert "ADMITTED (3 of 3 run(s) passed every case)" in out
+
+    def test_one_failing_run_keeps_it_out_and_names_the_case(self, exam, capsys):
+        charter, state_dir, run, _ = exam
+        code, scripted = run([OK, OK, OK, FAIL, OK, OK])
+        assert code == 1
+        assert scripted.calls == 6, "every run is spent, so the fail counts cover the batch"
+        found = roles.read_admissions(state_dir)[charter.name][MODEL]
+        assert (found.runs_required, found.runs_passed) == (3, 2)
+        assert found.case_failures == {"second": 1}
+        assert [r["failing"] for r in found.runs] == [[], ["second"], []]
+        assert "did not pass" in roles.admitted(charter, MODEL, state_dir)
+        out = capsys.readouterr().out
+        assert "failed in 1 of 3 run(s): second" in out
+        assert "NOT ADMITTED" in out
+
+    def test_runs_is_a_knob(self, exam):
+        charter, state_dir, run, _ = exam
+        code, scripted = run([OK] * 8, "--runs", "4")
+        assert scripted.calls == 8
+        found = roles.read_admissions(state_dir)[charter.name][MODEL]
+        assert (found.runs_required, found.runs_passed) == (4, 4)
+
+    def test_a_nonsense_runs_value_starts_nothing(self, exam):
+        _, state_dir, run, _ = exam
+        code, scripted = run([], "--runs", "0")
+        assert code == 2 and scripted.calls == 0
+        assert not roles.admission_path(state_dir).exists()
+
+    def test_an_incomplete_later_run_discards_the_complete_ones(self, exam):
+        charter, state_dir, run, script = exam
+        before = a_recorded_pass(charter, state_dir)
+        code, _ = run([OK, OK, OK, OK, OK, roles.Status.UNAVAILABLE])
+        assert code == script.EXIT_INCOMPLETE
+        assert roles.admission_path(state_dir).read_bytes() == before
+
+    def test_the_cost_of_every_run_is_printed(self, exam, capsys):
+        _, _, run, _ = exam
+        run([OK] * 6)
+        # ScriptedRun reports 100 in / 10 out and one attempt per call.
+        assert "spent over 3 run(s): ↑600 ↓60 tokens, 6 metered call(s)" in (
+            capsys.readouterr().out)
+
+    def test_an_owner_case_is_recorded_by_digest_never_by_name(self, exam, monkeypatch):
+        charter, state_dir, run, _ = exam
+        mined = roles.Case("his-private-mail-subject", "owner", {"results": "1. C"},
+                           {"rows": 1})
+        monkeypatch.setattr(roles, "owner_cases", lambda c: (mined,))
+        run([OK, OK, FAIL] * 3)
+        text = roles.admission_path(state_dir).read_text()
+        assert "his-private-mail-subject" not in text
+        found = roles.read_admissions(state_dir)[charter.name][MODEL]
+        assert found.case_failures == {f"owner:{roles.case_digest(mined)}": 3}
+        assert (found.owner_passed, found.owner_total) == (0, 3)
+
+
+class TestWhatARecordSupersedes:
+    """A later passing batch does not erase failed ones: the writer keeps what
+    each record replaced, newest first, capped."""
+
+    def test_a_pass_after_a_failure_keeps_the_failure(self, exam):
+        charter, state_dir, run, _ = exam
+        run([OK, OK, OK, FAIL, OK, OK])
+        run([OK] * 6)
+        found = roles.read_admissions(state_dir)[charter.name][MODEL]
+        assert roles.admitted(charter, MODEL, state_dir) is None
+        (previous,) = found.supersedes
+        assert previous["runs_passed"] == 2 and previous["runs_required"] == 3
+        assert previous["failing_cases"] == ["second"]
+        assert previous["at"]
+
+    def test_a_single_run_predecessor_is_labelled_and_names_no_cases(self, exam):
+        """It never recorded which cases failed; an empty list would claim
+        nothing did."""
+        charter, state_dir, run, _ = exam
+        a_recorded_pass(charter, state_dir)
+        run([OK] * 6)
+        (previous,) = roles.read_admissions(state_dir)[charter.name][MODEL].supersedes
+        assert previous["single_run"] is True
+        assert "failing_cases" not in previous
+
+    def test_the_history_is_capped(self, exam):
+        charter, state_dir, run, _ = exam
+        for _ in range(roles.SUPERSEDED_KEPT + 3):
+            run([OK] * 6)
+        found = roles.read_admissions(state_dir)[charter.name][MODEL]
+        assert len(found.supersedes) == roles.SUPERSEDED_KEPT
+
+    def test_a_single_run_record_is_labelled_in_the_file(self, tmp_path):
+        charter = roles.parse_charter(charter_text())
+        roles.write_admission(tmp_path, roles.Admission(
+            charter.name, charter.version, "a:m", "t", passed=1, total=1,
+            charter_digest=charter.digest,
+        ))
+        raw = json.loads(roles.admission_path(tmp_path).read_text())
+        assert raw[charter.name]["models"]["a:m"]["single_run"] is True

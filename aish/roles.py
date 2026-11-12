@@ -878,15 +878,39 @@ class Admission:
     # which is not the same as one whose text still matches — see `admitted`.
     charter_digest: str = ""
     cases_digest: str = ""
+    # Repeated runs (#472): one pass can be luck — a model that missed a case
+    # 2 of 3 times was admitted on the run it passed. With runs, `passed` and
+    # `total` (and the owner's pair) are SUMMED over every run. 0 means a
+    # record written under the single-run rule; see `single_run`.
+    runs_required: int = 0
+    runs_passed: int = 0
+    # One entry per run: {"passed", "total", "owner_passed", "owner_total",
+    # "failing": [case ids]}. Owner cases are named by `case_digest`, never by
+    # their mined name.
+    runs: tuple[dict[str, Any], ...] = ()
+    # Case id → in how many runs it failed; only cases that failed at least once.
+    case_failures: dict[str, int] = field(default_factory=dict)
+    # What this record replaced, newest first, capped at SUPERSEDED_KEPT —
+    # derived by `write_admission` from the file, never taken from the caller,
+    # so a passing batch cannot erase the failed ones before it.
+    supersedes: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def single_run(self) -> bool:
+        """Written before #472, when one passing run admitted. Labelled so in
+        the record (`single_run: true`) — and nowhere else."""
+        return self.runs_required <= 0
 
     @property
     def ok(self) -> bool:
-        """Every case, both halves. The owner's mined half is absent-is-fine
-        (0 of 0 passes), but a half that RAN and failed is a failure — the
-        automation only ever exercises the public cases, so a recorded private
-        failure is the one signal that a charter is green where the machine
-        looks and wrong where he lives."""
+        """Every case, both halves, in every run. The owner's mined half is
+        absent-is-fine (0 of 0 passes), but a half that RAN and failed is a
+        failure — the automation only ever exercises the public cases, so a
+        recorded private failure is the one signal that a charter is green
+        where the machine looks and wrong where he lives."""
         if self.total <= 0 or self.passed != self.total:
+            return False
+        if not self.single_run and self.runs_passed != self.runs_required:
             return False
         return self.owner_passed == self.owner_total
 
@@ -941,7 +965,42 @@ def _admission_of(name: str, entry: dict) -> Admission:
         owner_total=int(entry.get("owner_total") or 0),
         charter_digest=str(entry.get("charter_digest") or ""),
         cases_digest=str(entry.get("cases_digest") or ""),
+        runs_required=int(entry.get("runs_required") or 0),
+        runs_passed=int(entry.get("runs_passed") or 0),
+        runs=tuple(r for r in entry.get("runs") or () if isinstance(r, dict)),
+        case_failures={
+            str(k): int(v) for k, v in _dict_or_empty(entry.get("case_failures")).items()
+        },
+        supersedes=tuple(s for s in entry.get("supersedes") or () if isinstance(s, dict)),
     )
+
+
+def _dict_or_empty(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+# How many replaced records an entry keeps. Enough to see a pattern (a fail, a
+# pass, a fail) without the file growing for ever.
+SUPERSEDED_KEPT = 5
+
+
+def _superseded(entry: dict) -> dict[str, Any]:
+    """What a replaced record said, short. A single-run record never named
+    its failing cases, so it gets no `failing_cases` key — an empty list
+    there would read as "nothing failed", which nobody observed."""
+    summary: dict[str, Any] = {
+        "at": entry.get("at") or "",
+        "version": entry.get("version") or "",
+        "passed": entry.get("passed") or 0,
+        "total": entry.get("total") or 0,
+    }
+    if int(entry.get("runs_required") or 0) > 0:
+        summary["runs_required"] = entry.get("runs_required")
+        summary["runs_passed"] = entry.get("runs_passed") or 0
+        summary["failing_cases"] = sorted(entry.get("case_failures") or {})
+    else:
+        summary["single_run"] = True
+    return summary
 
 
 def write_admission(state_dir: os.PathLike | str, admission: Admission) -> Path:
@@ -959,7 +1018,7 @@ def write_admission(state_dir: os.PathLike | str, admission: Admission) -> Path:
         models = {
             str(e.get("model") or ""): e for e in _admission_entries(existing)
         }
-    models[admission.model] = {
+    entry: dict[str, Any] = {
         "version": admission.version,
         "model": admission.model,
         "at": admission.at,
@@ -970,6 +1029,24 @@ def write_admission(state_dir: os.PathLike | str, admission: Admission) -> Path:
         "charter_digest": admission.charter_digest,
         "cases_digest": admission.cases_digest,
     }
+    if admission.single_run:
+        entry["single_run"] = True
+    else:
+        entry["runs_required"] = admission.runs_required
+        entry["runs_passed"] = admission.runs_passed
+        entry["runs"] = [dict(r) for r in admission.runs]
+        entry["case_failures"] = dict(admission.case_failures)
+    previous = models.get(admission.model)
+    if isinstance(previous, dict):
+        history = [_superseded(previous)]
+        history += [h for h in previous.get("supersedes") or () if isinstance(h, dict)]
+        entry["supersedes"] = history[:SUPERSEDED_KEPT]
+    models[admission.model] = entry
+    for other in models.values():
+        # A record of this charter carried along unchanged (another model's)
+        # gets the label too, once anything rewrites this charter's entry.
+        if isinstance(other, dict) and not int(other.get("runs_required") or 0):
+            other["single_run"] = True
     current[admission.charter] = {"models": models}
     atomic_write.publish(path, json.dumps(current, indent=1, sort_keys=True))
     return path

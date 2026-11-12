@@ -4,6 +4,7 @@
     uv run python scripts/role-admission.py                    # every charter
     uv run python scripts/role-admission.py snippet-reader     # one
     uv run python scripts/role-admission.py --model gemini:gemini-3.5-flash
+    uv run python scripts/role-admission.py --runs 5 tracker   # more runs (default 3)
     uv run python scripts/role-admission.py --dry-run          # cases only, no calls
 
 **Why this is a script and not a test.** #297's D6 wanted golden pairs run
@@ -18,15 +19,24 @@ a pass was RECORDED for this charter version and this model. `docs/roles.md`
 says the same in the same words, so nothing promises a check the code
 downgrades.
 
-**It spends real money.** One metered call per case, plus one more for each case
-whose first answer does not validate.
+**It spends real money — `--runs` times over.** The exam runs `--runs N` times
+(default 3, `DEFAULT_RUNS`) and admits only if EVERY run passes EVERY case (#472:
+a model that missed a case in 2 of 3 runs had been admitted on the third). So
+the bill is N× one exam: one metered call per case per run, plus one more for
+each answer that does not validate. Every run is spent even after one fails, so
+the record's per-case fail counts cover the whole batch; the token total of all
+runs is printed at the end.
+
+This is a tripwire for gross flakiness, not proof of stability: a case a model
+passes 90% of the time passes a 3-run batch about 73% of the time (0.9³).
 
 **A run that could not complete records nothing.** A case ending
-`Status.UNAVAILABLE` — no key, a refused or failed call — says nothing about
-the model's quality, so the exam stops there, the existing record is left
-exactly as it was, and the exit code is 3 (`EXIT_INCOMPLETE`). It stops rather
-than spending the remaining calls, because nothing they returned could be
-recorded. Before this, an all-503 run overwrote a charter's record with 0/16.
+`Status.UNAVAILABLE` in any run — no key, a refused or failed call — says
+nothing about the model's quality, so the batch stops there, the existing
+record is left exactly as it was (earlier complete runs included), and the
+exit code is 3 (`EXIT_INCOMPLETE`). It stops rather than spending the
+remaining calls, because nothing they returned could be recorded. Before
+this, an all-503 run overwrote a charter's record with 0/16.
 
 **Two halves, and the second is the owner's.** The charter's own sanitized cases
 ship inside the package and are what the load gate binds on. His full-fidelity
@@ -52,6 +62,8 @@ from aish import roles, web  # noqa: E402
 # Distinct from 1 (examined and failed) and 2 (could not start): the exam began
 # and could not finish, so there is no verdict and nothing was written.
 EXIT_INCOMPLETE = 3
+
+DEFAULT_RUNS = 3
 
 
 def state_dir() -> Path:
@@ -91,6 +103,52 @@ def run_case(charter, case, model, verbose):
     return not (problems := roles.check_case(case, result.value)), problems, result
 
 
+def case_id(case: roles.Case) -> str:
+    """How the record names a case. The owner's mined cases by digest, never by
+    name: `roles.case_digest` exists so the state dir does not copy his half."""
+    if case.source == "owner":
+        return f"owner:{roles.case_digest(case)}"
+    return case.name
+
+
+def exam_once(charter, cases, model, spent) -> tuple[dict, roles.Case | None]:
+    """One run of every case. The run's tally, and the case that could not
+    complete if one did (the run stops there)."""
+    tally: dict = {"passed": 0, "total": 0, "owner_passed": 0, "owner_total": 0, "failing": []}
+    for case in cases:
+        ok, problems, result = run_case(charter, case, model, verbose=True)
+        prefix = "owner_" if case.source == "owner" else ""
+        tally[prefix + "total"] += 1
+        tally[prefix + "passed"] += int(ok)
+        if not ok:
+            tally["failing"].append(case_id(case))
+        if result is not None:
+            spent["input"] += int(result.usage.get("input") or 0)
+            spent["output"] += int(result.usage.get("output") or 0)
+            spent["ms"] += result.ms
+            spent["calls"] += result.attempts
+        mark = "ok  " if ok else "FAIL"
+        extra = f"  [{result.attempts} attempt(s), {result.ms} ms]" if result else ""
+        print(f"    {mark} {case.source:7} {case.name}{extra}")
+        for problem in problems:
+            print(f"         ↳ {problem}")
+        # roles.py's own vocabulary decides this, never the error text: a
+        # provider's wording is not a contract, the status is.
+        if result is not None and result.status == roles.Status.UNAVAILABLE:
+            return tally, case
+    return tally, None
+
+
+def runs_of(argv: list[str]) -> tuple[int | None, list[str]]:
+    """`--runs N`, or None when N is not a whole number of at least one."""
+    if "--runs" not in argv:
+        return DEFAULT_RUNS, argv
+    at = argv.index("--runs")
+    raw = argv[at + 1] if at + 1 < len(argv) else ""
+    rest = argv[:at] + argv[at + 2 :]
+    return (int(raw), rest) if raw.isdigit() and int(raw) >= 1 else (None, rest)
+
+
 def main(argv: list[str]) -> int:
     dry_run = "--dry-run" in argv
     argv = [a for a in argv if a != "--dry-run"]
@@ -100,6 +158,10 @@ def main(argv: list[str]) -> int:
         model = argv[at + 1] if at + 1 < len(argv) else ""
         argv = argv[:at] + argv[at + 2 :]
     model = model or os.environ.get("AISH_ROLE_MODEL", "")
+    runs, argv = runs_of(argv)
+    if runs is None:
+        print("--runs takes a whole number of at least 1")
+        return 2
     wanted = [a for a in argv if not a.startswith("-")]
 
     try:
@@ -127,7 +189,7 @@ def main(argv: list[str]) -> int:
         print(
             f"\n{name} v{charter.version} — {len(shipped)} shipped case(s), "
             f"{len(private)} of the owner's"
-            + (f", against {model}" if model else "")
+            + (f", against {model}, {runs} run(s)" if model else "")
         )
         if dry_run:
             for case in shipped + private:
@@ -139,35 +201,25 @@ def main(argv: list[str]) -> int:
                 print(f"  · {case.source:7} {case.name}  ({shape})")
             continue
 
-        tally = {"charter": [0, 0], "owner": [0, 0]}
-        spent = {"input": 0, "output": 0, "ms": 0}
+        spent = {"input": 0, "output": 0, "ms": 0, "calls": 0}
+        tallies: list[dict] = []
         unavailable: roles.Case | None = None
-        for case in shipped + private:
-            ok, problems, result = run_case(charter, case, model, verbose=True)
-            tally[case.source][1] += 1
-            tally[case.source][0] += int(ok)
-            if result is not None:
-                spent["input"] += int(result.usage.get("input") or 0)
-                spent["output"] += int(result.usage.get("output") or 0)
-                spent["ms"] += result.ms
-            mark = "ok  " if ok else "FAIL"
-            extra = f"  [{result.attempts} attempt(s), {result.ms} ms]" if result else ""
-            print(f"  {mark} {case.source:7} {case.name}{extra}")
-            for problem in problems:
-                print(f"       ↳ {problem}")
-            # roles.py's own vocabulary decides this, never the error text: a
-            # provider's wording is not a contract, the status is.
-            if result is not None and result.status == roles.Status.UNAVAILABLE:
-                unavailable = case
+        for n in range(1, runs + 1):
+            print(f"  run {n} of {runs}")
+            tally, unavailable = exam_once(charter, shipped + private, model, spent)
+            if unavailable is not None:
                 break
-
-        total = tally["charter"][1] + tally["owner"][1]
-        if total:
+            tallies.append(tally)
             print(
-                f"  spent: ↑{spent['input']} ↓{spent['output']} tokens over "
-                f"{total} case(s), {spent['ms']} ms total, "
-                f"{spent['ms'] // total} ms each"
+                f"    {tally['passed']}/{tally['total']} shipped, "
+                f"{tally['owner_passed']}/{tally['owner_total']} of the owner's"
             )
+
+        started = len(tallies) + (unavailable is not None)
+        print(
+            f"  spent over {started} run(s): ↑{spent['input']} ↓{spent['output']} "
+            f"tokens, {spent['calls']} metered call(s), {spent['ms']} ms"
+        )
         if unavailable is not None:
             print(
                 f"  COULD NOT COMPLETE — {unavailable.name} ended "
@@ -176,27 +228,45 @@ def main(argv: list[str]) -> int:
             )
             incomplete += 1
             continue
+
+        case_failures: dict[str, int] = {}
+        for tally in tallies:
+            for failing in tally["failing"]:
+                case_failures[failing] = case_failures.get(failing, 0) + 1
+        for failing, count in sorted(case_failures.items()):
+            print(f"  failed in {count} of {runs} run(s): {failing}")
         admission = roles.Admission(
             charter=name,
             version=charter.version,
             model=model,
             at=datetime.datetime.now().isoformat(timespec="seconds"),
-            passed=tally["charter"][0],
-            total=tally["charter"][1],
-            owner_passed=tally["owner"][0],
-            owner_total=tally["owner"][1],
+            passed=sum(t["passed"] for t in tallies),
+            total=sum(t["total"] for t in tallies),
+            owner_passed=sum(t["owner_passed"] for t in tallies),
+            owner_total=sum(t["owner_total"] for t in tallies),
             # WHAT was examined, not just that something was. This is the pair
             # `roles.admitted` binds to, and it is what makes an edit through a
             # door nobody enumerated retire the admission instead of riding it.
             charter_digest=charter.digest,
             cases_digest=roles.owner_cases_digest(charter),
+            runs_required=runs,
+            runs_passed=sum(not t["failing"] for t in tallies),
+            runs=tuple(tallies),
+            case_failures=case_failures,
         )
         path = roles.write_admission(state_dir(), admission)
         # Written whether it passed or failed. A recorded FAILURE is the useful
         # artifact — `roles.admitted` reads it and keeps the role out, and a
         # reader can see the exam ran rather than inferring it from silence.
-        print(f"  {'ADMITTED' if admission.ok else 'NOT ADMITTED'} — recorded in {path}")
-        failed += not admission.ok
+        # The verdict printed is the reader's own, so the script cannot say
+        # ADMITTED about a record the role would be refused on.
+        why = roles.admitted(charter, model, state_dir())
+        print(
+            f"  {'ADMITTED' if why is None else 'NOT ADMITTED — ' + why}"
+            f" ({admission.runs_passed} of {runs} run(s) passed every case)"
+            f" — recorded in {path}"
+        )
+        failed += why is not None
     if incomplete:
         return EXIT_INCOMPLETE
     return 1 if failed else 0
