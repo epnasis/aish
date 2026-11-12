@@ -11,7 +11,8 @@ returning (or yielding, when stream=True) objects with a .message
 Cloud providers are addressed with a provider prefix: ``gemini:<model>``,
 ``openai:<model>`` (bare ``gemini`` / ``openai`` picks that provider's
 default model). ``local:<model>`` is a self-hosted OpenAI-compatible server
-(tested with mlx-lm) at ``AISH_LOCAL_URL``. Anything without
+(tested with mlx-lm) at ``AISH_LOCAL_URL`` or config.toml's ``[local] url``
+(`local_url`). Anything without
 a known prefix is an Ollama model, so all existing invocations keep working
 unchanged.
 """
@@ -25,12 +26,13 @@ import mimetypes
 import os
 import threading
 import time
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import ratelimit
+from . import paths, ratelimit
 
 # --------------------------------------------------------- the sent seam
 #
@@ -332,7 +334,7 @@ PROVIDERS = {
     "local": Provider(
         name="local",
         env_key="AISH_LOCAL_API_KEY",  # optional; see `_local_client`
-        base_url=None,  # AISH_LOCAL_URL, read when a local model is selected
+        base_url=None,  # `local_url()`, read when a local model is selected
         # mlx-lm's own name for "the model the server was started with".
         default_model="default_model",
         key_url="",
@@ -342,6 +344,17 @@ PROVIDERS = {
 
 LOCAL = "local"
 LOCAL_URL_ENV = "AISH_LOCAL_URL"
+# The address's home is config.toml (#474): every entry point reads that file,
+# while the environment reached only processes launched through an env file —
+# aish-web had the address, a plain terminal `aish` had none. The variable
+# stays as an explicit override. Only the address lives there: the key is a
+# secret and the config tree is git-backed, and the tuning knobs below have
+# working defaults on any entry point.
+LOCAL_CONFIG_TABLE = "local"
+LOCAL_URL_CONFIG_KEY = "url"
+# How every sentence that tells the owner where the address goes names it:
+# both homes, so neither is presented as the only one.
+LOCAL_URL_WHERE = f"{LOCAL_URL_ENV} or config.toml's [{LOCAL_CONFIG_TABLE}] {LOCAL_URL_CONFIG_KEY}"
 LOCAL_KEY_ENV = "AISH_LOCAL_API_KEY"
 LOCAL_CTX_ENV = "AISH_LOCAL_CTX"
 LOCAL_MAX_TOKENS_ENV = "AISH_LOCAL_MAX_TOKENS"
@@ -836,6 +849,55 @@ def list_models(provider_name: str) -> list[str]:
     return sorted(set(ids), reverse=True)  # newer version numbers first
 
 
+def local_config_path() -> Path:
+    """The config.toml every entry point reads: `AISH_CONFIG`, else the config
+    home's — resolved at call time, so a test's or a replay run's config home
+    is the one read (`paths`)."""
+    return Path(os.environ.get("AISH_CONFIG") or paths.config_home() / "config.toml")
+
+
+def local_url() -> str:
+    """The `local:` server's address (#474): `AISH_LOCAL_URL` when set, else
+    config.toml's `[local] url`, else "" — the one resolver every reader uses,
+    so the terminal, aish-web and the roles resolve it by the same rule (an
+    aish-web whose env file still sets the variable is overridden by it, as
+    the rule says).
+
+    Read at every call, never cached: config.toml is the owner's live file.
+    A missing file is "no address". A file that exists but cannot be read or
+    parsed, a `local` that is not a table, or a `url` that is not a string is
+    a `BackendError` naming the file — "not set" would be a claim about a file
+    aish could not read.
+    """
+    from_env = os.environ.get(LOCAL_URL_ENV, "").strip()
+    if from_env:
+        return from_env
+    path = local_config_path()
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise BackendError(
+            f"cannot read the local: server's address from {path}: {exc}"
+        ) from exc
+    table = data.get(LOCAL_CONFIG_TABLE)
+    if table is None:
+        return ""
+    if not isinstance(table, dict):
+        raise BackendError(
+            f"{path}: `{LOCAL_CONFIG_TABLE}` must be a table holding "
+            f'`{LOCAL_URL_CONFIG_KEY} = "http://…/v1"`, not {table!r}'
+        )
+    url = table.get(LOCAL_URL_CONFIG_KEY, "")
+    if not isinstance(url, str):
+        raise BackendError(
+            f"{path}: [{LOCAL_CONFIG_TABLE}] {LOCAL_URL_CONFIG_KEY} must be a string "
+            f"(the server's address), not {url!r}"
+        )
+    return url.strip()
+
+
 def _local_client(timeout: float | None = None):
     """An openai client for the owner's own server, and nothing of OpenAI's.
 
@@ -846,11 +908,16 @@ def _local_client(timeout: float | None = None):
     same reason: the SDK reads them from `OPENAI_ORG_ID`/`OPENAI_PROJECT_ID`
     whenever they are None, and sends them as headers on every request.
     """
-    url = os.environ.get(LOCAL_URL_ENV, "").strip()
+    url = local_url()
     if not url:
+        config = local_config_path()
+        lacks = "does not exist" if not config.exists() else (
+            f"has no [{LOCAL_CONFIG_TABLE}] {LOCAL_URL_CONFIG_KEY}")
         raise BackendError(
-            f"{LOCAL_URL_ENV} is not set — a local: model needs the address of your "
-            f"OpenAI-compatible server, e.g. `export {LOCAL_URL_ENV}=http://mi.lan:8080/v1`"
+            f"{LOCAL_URL_ENV} is not set and {config} {lacks} — a local: model needs the address "
+            f"of your OpenAI-compatible server, e.g. `[{LOCAL_CONFIG_TABLE}]` "
+            f'`{LOCAL_URL_CONFIG_KEY} = "http://mi.lan:8080/v1"` in config.toml, or '
+            f"`export {LOCAL_URL_ENV}=http://mi.lan:8080/v1` (which overrides it)"
         )
     try:
         from openai import OpenAI

@@ -334,7 +334,7 @@ in that conversation then leaves your machine, so it's an explicit choice
 | `claude[:model]` | Anthropic API | pay per token — `export ANTHROPIC_API_KEY=…` |
 | `claude-max[:opus\|sonnet]` | Claude Agent SDK via the local `claude` CLI | **your Claude Pro/Max subscription** — no API key |
 | `openai[:model]` | OpenAI API | pay per token — `export OPENAI_API_KEY=…` |
-| `local[:model]` | your own OpenAI-compatible server (tested with mlx-lm 0.31.3) | free — `export AISH_LOCAL_URL=…` |
+| `local[:model]` | your own OpenAI-compatible server (tested with mlx-lm 0.31.3) | free — `[local] url = …` in config.toml |
 
 Bare provider names pick a sensible default model. `claude-max` strips Claude
 Code down to bare inference and hands it aish's own tools, so every command
@@ -348,13 +348,25 @@ server and nowhere else. Everything after `local:` is sent as the request's
 `model` verbatim (an mlx-lm server loads it on first use); bare `local` asks
 mlx-lm for the model it was started with.
 
+The server's address lives in `~/.config/aish/config.toml`, which the terminal
+and aish-web both read:
+
+```toml
+[local]
+url = "http://mi.lan:8080/v1"   # required — no fallback when unset
+```
+
+`AISH_LOCAL_URL`, when set, overrides it (for one shell, or one run). With
+neither, a `local:` model is refused with a message naming both. The rest are
+environment variables:
+
 ```sh
-export AISH_LOCAL_URL=http://mi.lan:8080/v1   # required — no fallback when unset
 export AISH_LOCAL_CTX=98304          # tokens one whole request may use, answer included (default 98304)
 export AISH_LOCAL_MAX_TOKENS=16384   # answer cap sent on every request (default 16384)
 export AISH_LOCAL_SAMPLING='{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.5}'
                                      # sampling sent on every request (these are the defaults)
-export AISH_LOCAL_API_KEY=…          # only if your server checks one
+export AISH_LOCAL_API_KEY=…          # only if your server checks one — never in config.toml,
+                                     # which is a git-backed file
 export AISH_EMBED_HOST=http://localhost:11434  # optional: where the embedder runs
 aish --model local:mlx-community/Qwen3.6-35B-A3B-8bit
 ```
@@ -521,14 +533,15 @@ thousands of entries without bloating the context.
   installs, decoded payloads, credential paths, …) before anything installs.
   The card also carries an **auditor**: an isolated model (no tools, one
   named model — `local:mlx-community/Qwen3.6-35B-A3B-8bit` on your own server at
-  `$AISH_LOCAL_URL` unless you set `AISH_SKILL_AUDITOR_MODEL`) reads the files and lists what a reviewer
+  config.toml's `[local] url` (or `$AISH_LOCAL_URL`) unless you set
+  `AISH_SKILL_AUDITOR_MODEL`) reads the files and lists what a reviewer
   should look at, each with a quote that aish checks is really in the file.
   It only adds warnings: it approves nothing, an empty list is shown as
   "flagged nothing — this is not a verdict", and its findings are recorded in
   the lock but never handed to the model. It runs only once you have admitted
   it (`uv run python scripts/role-admission.py --model
   local:mlx-community/Qwen3.6-35B-A3B-8bit skill-auditor`, three exam runs, all of
-  which must pass); until then — or with `AISH_LOCAL_URL` unset, or the server
+  which must pass); until then — or with no server address, or the server
   down — the card says it did not run, and why. It goes to `~/.config/aish/vendor-skills/`, never into
   your own `skills/`, with where it came from and a hash of every installed
   file recorded in `vendor-skills/skills.lock`. Imported skills are
@@ -1208,7 +1221,7 @@ several notes, remaining — and never prints an account, an amount or a name;
 `AISH_PAYNOTES_INVOICES=0` stops that collection alone.
 
 **Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
-`vi_mode`, and an `[aliases]` table (aish-level aliases, since commands run
+`vi_mode`, `[local] url` (your own model server's address), and an `[aliases]` table (aish-level aliases, since commands run
 through a non-interactive shell that never sources your `~/.zshrc`). CLI flags
 override config; `$AISH_MODEL` overrides the model. Saving a model as the
 default (`/model --save`, or **make startup default** in the web model list)

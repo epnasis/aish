@@ -330,8 +330,9 @@ def main() -> None:
     r.add_argument("--samples", type=int, default=2)
     r.add_argument("--limit", type=int, default=0)
     r.add_argument("--seed", type=int, default=441)
-    r.add_argument("--url", default=os.environ.get("AISH_LOCAL_URL", ""),
-                   help="the local model server (default: $AISH_LOCAL_URL)")
+    r.add_argument("--url", default="",
+                   help="the local model server (default: aish's own, from $AISH_LOCAL_URL "
+                   "or config.toml's [local] url)")
     j = sub.add_parser("judge")
     j.add_argument("out", type=Path)
     j.add_argument("--seed", type=int, default=7)
@@ -352,7 +353,14 @@ def main() -> None:
         print(f"{len(cases)} cases -> {args.out}")
     elif args.cmd == "run":
         if not args.url:
-            sys.exit("no model server: pass --url or set AISH_LOCAL_URL")
+            # The address aish itself would use (#474), so the measurement and
+            # the agent cannot be pointed at different servers by accident.
+            from aish import backends
+
+            args.url = backends.local_url()
+        if not args.url:
+            sys.exit("no model server: pass --url, or set AISH_LOCAL_URL or "
+                     "config.toml's [local] url")
         cases = list(_records(args.cases))
         if args.limit:
             cases = cases[: args.limit]

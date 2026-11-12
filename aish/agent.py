@@ -3599,8 +3599,11 @@ def identity_context(model: str, provider: str) -> str:
             "and let them decide."
         )
     if provider == "local":
-        where = os.environ.get(backends.LOCAL_URL_ENV, "").strip()
-        where = where or f"the address in {backends.LOCAL_URL_ENV}"
+        try:
+            where = backends.local_url()
+        except backends.BackendError:
+            where = ""  # the identity is no place to report a broken config
+        where = where or f"the address in {backends.LOCAL_URL_WHERE}"
         return (
             f"- YOUR IDENTITY: you are the model '{model}' served by the user's own "
             f"OpenAI-compatible server at {where} — not a cloud service, and not Ollama. "

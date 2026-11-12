@@ -10,12 +10,14 @@ a request with it.
 
 import datetime
 import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from aish import agent as agent_module
-from aish import backends, cli, embeddings, ratelimit, tool_plugins, usage
+from aish import backends, cli, embeddings, paths, ratelimit, tool_plugins, usage
 from aish import skills as skills_module
 from aish.agent import Agent
 from aish.backends import BackendError, make_chat, parse_model
@@ -110,6 +112,107 @@ class TestLocalMissingAddress:
         monkeypatch.delenv("AISH_LOCAL_URL", raising=False)
         with pytest.raises(BackendError, match="AISH_LOCAL_URL"):
             backends.list_models("local")
+
+
+CONFIG_URL = "http://mi.lan:9090/v1"
+
+
+def _write_config(text: str, path: Path | None = None) -> Path:
+    """config.toml in the suite's tmp config home (`isolated_global_dirs`) —
+    never the owner's."""
+    path = path or paths.config_home() / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+class TestLocalAddressFromConfig:
+    """#474: the address has one home every entry point reads, config.toml's
+    `[local] url`; `AISH_LOCAL_URL` overrides it. Before, only the variable
+    was read, so a terminal not launched through aish-web's env file could
+    reach no `local:` model at all."""
+
+    def test_a_terminal_with_no_variable_reaches_the_configured_server(self, monkeypatch):
+        monkeypatch.delenv("AISH_LOCAL_URL", raising=False)
+        _write_config(f'model = "qwen3:8b"\n\n[local]\nurl = " {CONFIG_URL} "\n')
+        chat, provider, _ = make_chat(f"local:{REPO}")
+        assert provider == "local"
+        assert str(chat.__wrapped__.client.base_url).rstrip("/") == CONFIG_URL
+
+    def test_the_variable_overrides_the_config(self, local_env):
+        _write_config(f'[local]\nurl = "{CONFIG_URL}"\n')
+        assert backends.local_url() == URL
+
+    def test_aish_config_names_the_file_read(self, monkeypatch, tmp_path):
+        """The same `AISH_CONFIG` override the terminal and aish-web load
+        config.toml through."""
+        elsewhere = _write_config(f'[local]\nurl = "{CONFIG_URL}"\n', tmp_path / "other.toml")
+        monkeypatch.setenv("AISH_CONFIG", str(elsewhere))
+        assert backends.local_url() == CONFIG_URL
+
+    def test_no_file_and_no_table_mean_no_address(self):
+        assert backends.local_url() == ""
+        _write_config('model = "qwen3:8b"\n')
+        assert backends.local_url() == ""
+        _write_config('[local]\nurl = "  "\n')
+        assert backends.local_url() == ""
+
+    def test_the_missing_address_error_names_both_homes_and_the_file(self):
+        config = paths.config_home() / "config.toml"
+        for absent_or_empty in ("does not exist", "has no [local] url"):
+            with pytest.raises(BackendError) as caught:
+                make_chat(f"local:{REPO}")
+            message = str(caught.value)
+            assert "AISH_LOCAL_URL" in message
+            assert "[local]" in message and "url = " in message
+            assert f"{config} {absent_or_empty}" in message
+            _write_config('model = "qwen3:8b"\n')
+
+    @pytest.mark.parametrize("text, said", [
+        ("[local\nurl = 1\n", "cannot read"),
+        ('local = "http://x/v1"\n', "must be a table"),
+        ("[local]\nurl = 8080\n", "must be a string"),
+    ])
+    def test_a_config_it_cannot_use_is_said_never_called_unset(self, text, said):
+        """"Not set" would be a claim about a file aish could not read."""
+        path = _write_config(text)
+        with pytest.raises(BackendError, match=said) as caught:
+            backends.local_url()
+        assert str(path) in str(caught.value)
+        assert "is not set" not in str(caught.value)
+
+    def test_the_picker_counts_a_configured_address_as_set_up(self, monkeypatch):
+        for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        assert "local" not in cli._configured_providers()
+        _write_config(f'[local]\nurl = "{CONFIG_URL}"\n')
+        assert cli._configured_providers() == ["local"]
+        _write_config("[local\n")
+        assert "local" not in cli._configured_providers()
+
+    def test_identity_and_failure_hint_name_the_configured_server(self):
+        _write_config(f'[local]\nurl = "{CONFIG_URL}"\n')
+        assert CONFIG_URL in agent_module.identity_context(REPO, "local")
+        assert CONFIG_URL in cli._backend_hint(SimpleNamespace(provider="local"))
+
+    def test_with_no_address_identity_and_hint_name_both_homes(self):
+        for text in (agent_module.identity_context(REPO, "local"),
+                     cli._backend_hint(SimpleNamespace(provider="local"))):
+            assert "AISH_LOCAL_URL" in text and "[local] url" in text
+
+    def test_no_other_code_reads_the_variable(self):
+        """One resolver, so no entry point can disagree about the address:
+        `local_url` is the only place in aish/ or scripts/ that reads
+        AISH_LOCAL_URL from the environment."""
+        root = Path(backends.__file__).resolve().parent.parent
+        reads = re.compile(r"environ(?:\.get\(|\[)\s*(?:backends\.)?(?:LOCAL_URL_ENV|"
+                           r"[\"']AISH_LOCAL_URL[\"'])")
+        found = [
+            f"{path.relative_to(root)}:{number}"
+            for path in sorted([*(root / "aish").glob("*.py"), *(root / "scripts").glob("*.py")])
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+            if reads.search(line)
+        ]
+        assert len(found) == 1 and found[0].startswith("aish/backends.py:"), found
 
 
 class TestLocalTheRealClient:

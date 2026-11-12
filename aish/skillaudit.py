@@ -40,11 +40,12 @@ BUNDLE_INPUT = "bundle"
 # The model the import path names for the auditor (`caller` class, the mail
 # Reader's precedent): admission binds to this one spec, so a pass recorded
 # for it is what lets the auditor run. The owner's local server (reached at
-# AISH_LOCAL_URL), by his decision of 2026-11-12 on that day's measurement
-# (#467 ledger): this model answered every call of three exam runs, while
-# Gemini Flash refused 21 of 32 calls with 503. With no AISH_LOCAL_URL the
-# backend refuses, and the card says the auditor did not run, with that
-# reason. The environment variable overrides it.
+# `backends.local_url()`: config.toml's [local] url, or AISH_LOCAL_URL), by
+# his decision of 2026-11-12 on that day's measurement (#467 ledger): this
+# model answered every call of three exam runs, while Gemini Flash refused 21
+# of 32 calls with 503. With no address the backend refuses, and the card
+# says the auditor did not run, with that reason. MODEL_ENV overrides the
+# model.
 MODEL_ENV = "AISH_SKILL_AUDITOR_MODEL"
 DEFAULT_MODEL = "local:mlx-community/Qwen3.6-35B-A3B-8bit"
 

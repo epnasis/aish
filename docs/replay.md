@@ -69,12 +69,12 @@ A regression guard — a scenario that pins behaviour which already works — pa
 | `embeddings.json` | **own copy** of one batch snapshot | both arms start from the same cache |
 | notifications | **off** | `AISH_NOTIFY=0` |
 | the scheduler | **off** | the config copy carries the owner's `automations/` and the state starts empty, so a live scheduler would fire his tasks as unwatched chats inside the run (a recurring one with a run since its file was saved is due at once, #460). The driver sets `app.state.server.scheduler = None` before startup and records `scheduler_off`; a code root it cannot reach that way does not run (`test_the_driver_switches_the_copied_automations_scheduler_off`) |
-| every other `AISH_*` from the caller | **dropped** | `run_env`; `AISH_LOCAL_URL` is the one passed through |
+| every other `AISH_*` from the caller | **dropped** | `run_env`; `AISH_LOCAL_URL` is the one passed through (the address's home, config.toml's `[local] url`, arrives with the config copy) |
 | tool data (e.g. trippy's cache) | **own** if the scenario says so | `[env] TRIPPY_DATA_DIR = "{run}/trippy"` |
 | cwd | **own, empty** | |
 | **real network** | shared | `web_search`, `read_url` and live fetches by approved commands leave the machine |
 | **real shell** | shared | approved commands and aish's built-in read-only set execute for real in the run's cwd, and an approved command can read, write or delete wherever its arguments point — under `$HOME` or anywhere else. Every non-`AISH_*` variable of the caller passes through, so a command with no `[env]` row of its own uses this machine's own data; `unisolated_commands` names such commands in the report header and `run` warns on stderr (a name match on `<BINARY>_*`, nothing more) |
-| **model server** | shared | the same `AISH_LOCAL_URL`, so runs are sequential |
+| **model server** | shared | the same address (`AISH_LOCAL_URL`, or the config copy's `[local] url`), so runs are sequential |
 | **login Keychain** | not moved | the run's secrets index is empty, so aish looks no stored secret up — and its scrub has nothing to match |
 
 The report header repeats the shared rows (`STILL_SHARED`) so nobody reads a number without them.

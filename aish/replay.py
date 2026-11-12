@@ -58,7 +58,8 @@ DRIVER = Path(__file__).resolve().parent / "replay_driver.py"
 #: spend money, and a replay must not reach any of it by default. `evals/` is
 #: the harness's own scenarios, not something the agent reads.
 CORPUS_EXCLUDED = (".git", ".ruff_cache", "tools", "allow.txt", "evals")
-#: The one AISH_* variable a run inherits: where the local model server is.
+#: The one AISH_* variable a run inherits: the override of where the local model
+#: server is. Its home, config.toml's [local] url, arrives with the config copy.
 PASSTHROUGH_ENV = ("AISH_LOCAL_URL",)
 STILL_SHARED = (
     "still shared: the real network (search, page reads, live fetches by approved commands); "

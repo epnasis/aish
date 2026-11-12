@@ -279,7 +279,8 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  plain 'clear' works too)
   {CYAN}/model [name]{RESET}  switch the model (Ollama name, or a cloud model: gemini:/
                  openai:/claude:, or local:<m> for your own OpenAI-compatible
-                 server at $AISH_LOCAL_URL — bare provider name picks a default); no
+                 server at config.toml [local] url or $AISH_LOCAL_URL — bare
+                 provider name picks a default); no
                  arg opens a searchable picker of local + cloud models
                  (typing provider:model there offers that exact model);
                  add --save to persist as the startup default (config.toml),
@@ -1218,7 +1219,7 @@ def cloud_model_catalog(state_dir: Path) -> dict[str, list[str]]:
     try:
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         fetched = datetime.datetime.fromisoformat(cached["fetched"])
-        # A provider set up since the fetch (a new key, AISH_LOCAL_URL) would
+        # A provider set up since the fetch (a new key, a local address) would
         # otherwise stay out of the picker until the cache expired a day later.
         if now - fetched < CATALOG_TTL and cached.get("configured") == configured:
             kept, kept_since = cached["models"], fetched
@@ -1275,13 +1276,18 @@ def _fetch_catalogs(names: list[str]) -> dict[str, list[str]]:
 
 
 def _configured_providers() -> list[str]:
-    """Providers whose gating environment variable is set: the API key, or for
-    `local:` the server address (its key is optional)."""
-    gates = {
-        name: backends.LOCAL_URL_ENV if name == backends.LOCAL else provider.env_key
-        for name, provider in backends.PROVIDERS.items()
-    }
-    return sorted(name for name, var in gates.items() if os.environ.get(var, "").strip())
+    """Providers that are set up: the API key's variable is set, or for
+    `local:` an address resolves (`backends.local_url`; its key is optional)."""
+    configured = [
+        name for name, provider in backends.PROVIDERS.items()
+        if name != backends.LOCAL and os.environ.get(provider.env_key, "").strip()
+    ]
+    try:
+        if backends.local_url():
+            configured.append(backends.LOCAL)
+    except backends.BackendError:
+        pass  # unreadable config: not set up here; make_chat says why when chosen
+    return sorted(configured)
 
 
 def available_models(agent, state_dir: Path | None = None) -> list[tuple[str, str]]:
@@ -1833,7 +1839,7 @@ def handle_slash(
             else:
                 print(f"{DIM}current model: {agent.model} — /model <name> to switch "
                       f"('ollama list' shows local models; gemini:/openai: for cloud; "
-                      f"local:<m> for your own server at $AISH_LOCAL_URL); "
+                      f"local:<m> for your own server at {backends.LOCAL_URL_WHERE}); "
                       f"--save makes it the startup default{RESET}")
             return "handled"
         if save:
@@ -2310,8 +2316,12 @@ def _backend_hint(agent) -> str:
     if provider == "claude-max":
         return " — is the claude CLI installed and logged in? (run `claude` then /login)"
     if provider == backends.LOCAL:
-        url = os.environ.get(backends.LOCAL_URL_ENV, "").strip()
-        return f" — is the server at {url or backends.LOCAL_URL_ENV} running and reachable?"
+        try:
+            url = backends.local_url()
+        except backends.BackendError as exc:
+            return f" — {exc}"
+        where = url or f"the address in {backends.LOCAL_URL_WHERE}"
+        return f" — is the server at {where} running and reachable?"
     return " — check your API key, network, and the provider's rate limits"
 
 
@@ -2902,7 +2912,8 @@ def main() -> int:
         "claude:<m> (API keys via GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY; "
         "bare provider name picks its default), or claude-max[:opus|sonnet] to run on "
         "a Claude Pro/Max subscription via the claude CLI login, or local:<m> for your "
-        "own OpenAI-compatible server (e.g. mlx-lm) at $AISH_LOCAL_URL. "
+        "own OpenAI-compatible server (e.g. mlx-lm) at config.toml's [local] url "
+        "($AISH_LOCAL_URL overrides it). "
         "Default: $AISH_MODEL, config, or qwen3.6:35b-a3b",
     )
     parser.add_argument(

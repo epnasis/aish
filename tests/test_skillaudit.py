@@ -287,9 +287,10 @@ class TestTheAudit:
         assert skillaudit.model_spec() == "openai:gpt-x"
 
     def test_with_no_local_server_address_the_card_says_so(self, tmp_path, monkeypatch):
-        """The default is the owner's own server, reached at AISH_LOCAL_URL.
-        Unset, the backend refuses to build a client, and that refusal is the
-        observed reason on the card — admitted, and still not run."""
+        """The default is the owner's own server, reached at AISH_LOCAL_URL or
+        config.toml's [local] url (#474). With neither, the backend refuses to
+        build a client, and that refusal is the observed reason on the card —
+        admitted, and still not run."""
         monkeypatch.delenv("AISH_LOCAL_URL", raising=False)
         admit(tmp_path)
         audit, charter, result = skillaudit.audit("s", SKILL, state_dir=tmp_path)
