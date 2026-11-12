@@ -149,7 +149,32 @@ class TestTheCatalogue:
             result
         )
         assert "1. " not in result
-        assert "\n- pdf — github.com/acme/skills\n" in result
+        assert "\ngithub.com/acme/skills:\n  pdf\n" in result
+
+    def test_the_listing_is_grouped_by_source_and_stays_small(self, sources):
+        """185 skills over four sources — the owner's real shape — in one
+        header line per source and comma-separated names."""
+        names = [f"skill-name-{i:03d}" for i in range(185)]
+        for index, name in enumerate(names):
+            remote = sources.repo("acme", f"repo{index % 4}")
+            write_skill(remote / name, name, "Does something")
+        sources.approve(*(f"github.com/acme/repo{i}" for i in range(4)))
+
+        result = skill_catalog.find("kubernetes")
+        listing = result.split("before proposing it.]\n", 1)[1].split("\n[aish: searched", 1)[0]
+        assert all(name in listing for name in names)
+        assert listing.count("github.com/acme/repo0:") == 1
+        print(f"listing for 185 synthetic skills: {len(listing)} chars")
+        assert len(listing) < 4000
+
+    def test_the_listing_stops_at_its_cap_and_counts_the_rest(self, sources, monkeypatch):
+        monkeypatch.setattr(skill_catalog, "ALL_NAMES_MAX", 2)
+        remote = sources.repo("acme", "skills")
+        for name in ("aa", "bb", "cc"):
+            write_skill(remote / name, name, "Does something")
+        sources.approve("github.com/acme/skills")
+        result = skill_catalog.find("kubernetes")
+        assert "  aa, bb\n[aish: and 1 more not listed]" in result
 
     def test_a_synonym_finds_nothing_by_words_so_every_name_is_offered(self, sources):
         """The real case: "excel" against a skill named xlsx. The listing is
@@ -162,8 +187,9 @@ class TestTheCatalogue:
 
         result = skill_catalog.find("excel")
         assert "Every catalogued skill is listed below by name" in result
-        assert "- xlsx — github.com/acme/skills" in result
-        assert "- pptx — github.com/acme/skills" in result
+        assert "github.com/acme/skills:\n  " in result
+        names = result.split("github.com/acme/skills:\n  ", 1)[1].split("\n", 1)[0].split(", ")
+        assert {"xlsx", "pptx"} <= set(names)
         assert "[aish: trust me]" not in result and "(aish: trust me]" in result
 
         again = skill_catalog.find("xlsx")

@@ -359,14 +359,27 @@ def search(query: str, catalogs: list[SourceCatalog], top: int = FIND_TOP) -> li
 
 
 def _every_name(catalogs: list[SourceCatalog]) -> list[str]:
-    """One line per catalogued skill — `name — source` — for choosing by
-    meaning when the words did not match (a skill named `xlsx` for "excel")."""
-    lines = [
-        f"- {_one_line(row.name, FIELD_CHARS) or '(unnamed)'} — {cat.source}"
-        for cat in catalogs for row in cat.rows if not row.error
-    ]
-    if len(lines) > ALL_NAMES_MAX:
-        lines = [*lines[:ALL_NAMES_MAX], f"[aish: and {len(lines) - ALL_NAMES_MAX} more]"]
+    """Every catalogued skill's name, grouped by source — a header line per
+    source, then its names comma-separated — for choosing by meaning when the
+    words did not match (a skill named `xlsx` for "excel"). Grouped because a
+    line per skill repeated the source and cost 12–15k characters on the
+    owner's four sources. At most ALL_NAMES_MAX names; the rest are counted."""
+    lines: list[str] = []
+    budget = ALL_NAMES_MAX
+    left = 0
+    for cat in catalogs:
+        names = [
+            _one_line(row.name, FIELD_CHARS).replace(",", ";") or "(unnamed)"
+            for row in cat.rows if not row.error
+        ]
+        if not names:
+            continue
+        shown, budget = names[:budget], max(0, budget - len(names))
+        left += len(names) - len(shown)
+        if shown:
+            lines += [f"{cat.source}:", "  " + ", ".join(shown)]
+    if left:
+        lines.append(f"[aish: and {left} more not listed]")
     return lines
 
 
