@@ -437,5 +437,5 @@ expect:
   summary_in: [flags_raised]
   categories_include: [sends_data_out]
   files_flagged: [scripts/stats.py]
-  files_not_flagged: [SKILL.md, scripts/convert.py]
+  files_not_flagged: [scripts/convert.py]
 ```
