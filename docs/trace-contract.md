@@ -121,6 +121,8 @@ So it is emitted through `_emit_step` (both logged and rendered), joins `TURN_ST
 
 The row states only what the record holds — how many results were shortened, and whether the model can page them back — and never why. Which results, and their keys, stay in the dossier one tap below.
 
+**Amendment (2026-11-12): `item_act` LEAVES this set too**, for the same reason in a stronger form: his resolve / restore now applies with no card, so the act's own record is what tells him what was marked (§3.25). Emitted through `_emit_step`, turn-stamped, drawn by `traceStep`.
+
 ---
 
 ## 2 · Turn identity and call identity
@@ -1031,10 +1033,14 @@ Written by `Agent._inbox_preferences` through `_emit_record` for every add, edit
 ### 3.25 · `item_act` — an owner resolve / restore proposed through `inbox_items` (#142 W5)
 
 ```json
-{"kind": "item_act", "turn": 3, "verb": "resolve", "anchor": "3e2e…", "outcome": "applied", "items": ["yours|3e2e…|tenant@flat.example"]}
+{"kind": "item_act", "turn": 3, "call": 4, "verb": "resolve", "anchor": "3e2e…", "outcome": "applied", "carded": false, "items": ["needs|3e2e…|club@swim.example"], "what": "pay", "party": "club@swim.example", "day": "2026-11-02", "ref": "3e2ea1e21b1b"}
 ```
 
-Written by `Agent._inbox_items` through `_emit_record` for every resolve, restore, vouch or revoke the model proposed (`verb`; a vouch or revoke carries an empty `anchor`, and its act — domain, meaning, the card's sentence, `by: owner`, session and turn — is appended to `<state>/mail/settler-vouch-acts.jsonl` by `mailitemtool`, read by `mailvouch.current`), whatever became of it, and **renderless** (`RENDERLESS_STEPS`). `outcome` has `case_act`'s vocabulary: `blocked` (not a task a person sent — `why` says so; no card), `denied`, `held`, `applied`, `not_applied` (approved, then refused at save time: the item changed since the card, or the item acts' lock was held). `anchor` is the item's anchor digest (absent on `blocked`, which plans nothing); `items` the item keys (`kind|anchor|counterparty`) the act covered, only when applied. A `list` writes none. The act — verb, anchor, item keys, the card's sentence, `by: owner`, the session and turn — is ALSO appended by the one writer to `<state>/mail/item-acts.jsonl` (`mailitems.read_acts`), which is what `mailitems.Context.state_of` reads. **What it does NOT establish:** what `task_from_owner` does not (§3.23); and that the matter is done in the world — only that he said so.
+Written by `Agent._inbox_items` for every resolve, restore, vouch or revoke the model proposed (`verb`; a vouch or revoke carries an empty `anchor`, and its act — domain, meaning, the card's sentence, `by: owner`, session and turn — is appended to `<state>/mail/settler-vouch-acts.jsonl` by `mailitemtool`, read by `mailvouch.current`), whatever became of it. `outcome` has `case_act`'s vocabulary: `blocked` (not a task a person sent — `why` says so; no card), `denied`, `held`, `applied`, `not_applied` (refused at save time: the item changed since it was planned, or the item acts' lock was held). `anchor` is the item's anchor digest (absent on `blocked`, which plans nothing); `items` the item keys (`kind|anchor|counterparty`) the act covered, only when applied. **`carded`** says whether a card was shown: `false` for a resolve / restore applied with no card when a person sent the task (the owner's decision of 2026-11-12), `true` for a vouch / revoke and for any resolve of an item carrying a caution mark (always carded, whatever his message says — `docs/mail-assistant.md` §The verbs). `what` (the item's ask, or *your turn* / *their turn*), `party` (the counterparty's address as shown, `mailindex.shown_party`), `day` and `ref` are the row's fields — code's words and an address, never a subject or a body (§8.6). A `list` writes none. The act — verb, anchor, item keys, the card's or the result's sentence, `carded`, `by: owner`, the session and turn — is ALSO appended by the one writer to `<state>/mail/item-acts.jsonl` (`mailitems.read_acts`), which is what `mailitems.Context.state_of` reads.
+
+**Amended 2026-11-12 (slice 1c): `item_act` LEFT the renderless registry**, as `trim` did (§1.3): with no card shown, what was marked done must reach him in code's words whatever the model says, so the record is emitted through `_emit_step` (logged AND handed to `on_step`), joins `TURN_STAMPED_STEPS`, carries the `call` it belongs to, and is drawn by `traceStep` as a row under that call (`app.js` `itemActView`) — live and on replay alike, since `reconstruct_events` no longer skips it. Every outcome draws, saying what the record holds. `TestTheRowLiveAndCold` (tests/test_mailitemtool.py), `tests/js/test_item_act_row.js`.
+
+**What it does NOT establish:** what `task_from_owner` does not (§3.23); that the person who asked meant THIS item when the model chose the ref (the stated, accepted risk — `docs/mail-assistant.md` §The verbs); and that the matter is done in the world — only that he said so.
 
 ### 3.26 · `item_settlement` — one settlement judgement on one (item, candidate) pair (#142 W5)
 

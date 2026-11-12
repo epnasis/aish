@@ -781,7 +781,9 @@ RENDERLESS_STEPS = frozenset(
         "presented",  # #142 W5
         "case_act",  # #142 W5: an owner case verb, applied or not
         "preference_act",  # #142 W5: an owner inbox preference, saved or not
-        "item_act",  # #142 W5: an owner resolve / restore on an inbox-report item
+        # `item_act` LEFT this set on 2026-11-12 (slice 1c): his resolve /
+        # restore applies with no card, so the act is drawn as a row in the
+        # turn, from its record, live and cold (contract §3.25).
         # #142 W5. The inbox assistant's verdict on one mail. In S1 it is
         # written ONLY to the verdict store (`mailverdicts`), never to a chat
         # log; it is registered here so the first slice that does carry one

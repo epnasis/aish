@@ -3258,6 +3258,51 @@ function drawOutcome(t, step) {
   updateTraceHead(t);
 }
 
+// The owner's act on an inbox item (contract §3.25). Since 2026-11-12 his
+// resolve / restore applies with no card, so what was marked done reaches him
+// as this row, composed here from the act's own record — code's words and the
+// counterparty's address, never a subject and never the model's account of it.
+// Every outcome draws, saying what the record holds; an unknown verb or
+// outcome still draws, as what it is. Live and cold take this one function.
+const ITEM_ACT_DONE = {
+  resolve: "Marked done", restore: "Kept open",
+  vouch: "Allowed a sender to settle items", revoke: "Stopped a sender settling items",
+};
+const ITEM_ACT_NOT = {
+  blocked: "the task was not a message you sent",
+  denied: "you declined the card",
+  held: "held on the card — nothing changed",
+  not_applied: "refused when saving — nothing changed",
+};
+function itemActView(step) {
+  const verb = ITEM_ACT_DONE[step.verb] || `Inbox item: ${step.verb || "?"}`;
+  const what = step.what ? step.what.charAt(0).toUpperCase() + step.what.slice(1) : "";
+  const item = [what, step.party || ""].filter(Boolean).join(" — ")
+    + (step.day ? ` (${step.day})` : "");
+  if (step.outcome !== "applied") {
+    const why = ITEM_ACT_NOT[step.outcome] || `not saved (${step.outcome || "?"})`;
+    return ["denied", "var(--orange)", `Not changed: ${verb.toLowerCase()}`,
+      [item, why].filter(Boolean).join(" · ")];
+  }
+  const how = step.carded ? "approved on a card" : "no card — you asked for it";
+  const undo = step.carded === false && step.verb === "resolve" ? "say “restore” to bring it back" : "";
+  return ["check", "var(--green)", verb, [item, how, undo].filter(Boolean).join(" · ")];
+}
+
+function drawItemAct(t, step) {
+  t.started += 1;
+  const [icon, color, title, sub] = itemActView(step);
+  const owner = step.call
+    ? [...t.inner.querySelectorAll(".step")].find((r) => r.dataset && r.dataset.call === String(step.call))
+    : null;
+  const ref = traceRow(t, traceSvg(icon, color), title, sub,
+    owner ? stepUnder(owner._ref || (owner._ref = { row: owner })) : undefined);
+  ref.row.classList.add("step-item-act");
+  // A tap opens the call it belongs to: the act is that call's result.
+  if (step.call) ref.row.dataset.call = String(step.call);
+  updateTraceHead(t);
+}
+
 // A result decided AFTER the answer, off the turn — the objective tracker's
 // (§3.18). Live, the turn's card is finished by then, and a step through
 // traceStep would open an empty card of its own; so it joins the card it
@@ -3477,6 +3522,7 @@ function traceStep(step) {
     return;
   }
   if (step.kind === "outcome") { drawOutcome(t, step); return; }
+  if (step.kind === "item_act") { drawItemAct(t, step); return; }
   if (step.kind === "model_error") {
     // A failed model call draws a row for the same reason `trim` does: it
     // CONTRADICTS what is in front of you. Before #261 this was a grey echo

@@ -49,6 +49,7 @@ from . import (
     files,
     mailcases,
     mailcasetool,
+    mailitems,
     mailitemtool,
     mailprefs,
     media,
@@ -819,6 +820,11 @@ class _Cardless:
         self._entries.append(
             {"tool": name, "ran_ok": ran_ok, "first": _shown_args(args), "count": 1}
         )
+
+    def add_line(self, sentence: str) -> None:
+        """A sentence its own module composed (his inbox item acts), as one
+        line in aish's voice."""
+        self._entries.append({"line": AISH_LINE + " ".join(sentence.split())})
 
     def lines(self) -> list[str]:
         return [
@@ -2868,7 +2874,7 @@ KNOWLEDGE_WRITE_TOOLS = frozenset({"remember", "forget_memory"})
 # gate records. `thinking` is deliberately left out: it is the high-volume kind
 # and buys nothing #197 asks for. Renderless kinds are stamped by _emit_record.
 TURN_STAMPED_STEPS = frozenset(
-    {"tool_start", "tool", "knowledge", "trim", "model_error", "outcome"}
+    {"tool_start", "tool", "knowledge", "trim", "model_error", "outcome", "item_act"}
 )
 
 # The result of a decision made beside the acting model — a rule compiled from
@@ -17222,10 +17228,15 @@ class Agent:
 
     def _inbox_items(self, args: dict) -> str | tools.ToolOutcome:
         """The items of his inbox reports (#142 W5, `docs/mail-assistant.md`
-        §Open items and settlement) — the case verbs' law: list is free outside
-        content; resolve / restore are refused with no card unless a person
-        sent this task, carded with the one sentence code composed
-        (`mailitemtool.plan`), and saved under the item acts' lock. Only a save
+        §Open items and settlement). list is free outside content. resolve /
+        restore are refused with no card unless a person sent this task; when
+        one did, they are applied at once with NO card (the owner's decision of
+        2026-11-12) — except resolving an item that carries a caution mark,
+        which ALWAYS keeps its card: no message can waive it, since a chip the
+        model writes in a mail-tainted chat sends whatever words it chose. The
+        vouch verbs keep their card. Every outcome is an `item_act` step the
+        chat draws as a row in the turn (contract §3.25), so what was marked
+        reaches him in code's words whatever the model says. Only a save
         answers SAVED — the one result that may confirm a resolution."""
         state_dir = Path(self.state_dir) if self.state_dir else paths.state_home()
         action = str(args.get("action") or "list").strip()
@@ -17236,48 +17247,61 @@ class Agent:
         if action not in mailitemtool.CHANGE_ACTIONS:
             return f"ERROR: action must be one of {', '.join(mailitemtool.ACTIONS)}."
         if not self.task_from_owner:
-            self._emit_record(kind="item_act", verb=action, outcome="blocked",
-                              why="task not sent by the owner")
+            self._emit_item_act(verb=action, outcome="blocked", carded=False,
+                                why="task not sent by the owner")
+            if action in mailitems.VERBS:
+                self._cardless.add_line(mailitemtool.NOT_FROM_OWNER_LINE)
             return _gate_outcome(ITEMS_CHANGE_NOT_FROM_OWNER, decision="blocked")
-        if self.approve_tool is None:
-            return _gate_outcome(ITEMS_NO_APPROVER, decision="blocked")
         try:
             planned = mailitemtool.plan(state_dir, {**args, "action": action})
         except mailitemtool.ItemError as exc:
             return f"ERROR: {exc}. NOT SAVED: nothing changed."
+        item_act = {"verb": action, "anchor": planned.anchor, **planned.row}
+        if action in mailitems.VERBS and not (action == mailitems.RESOLVE and planned.cautioned):
+            applied = mailitemtool.apply(state_dir, planned, source=self._act_source(),
+                                         now=mailitemtool.clock(), carded=False)
+            self._emit_item_act(**item_act, carded=False,
+                                outcome="applied" if applied.ok else "not_applied",
+                                items=list(planned.items) if applied.ok else [])
+            self._note(f"→ inbox_items: {action}" + ("" if applied.ok else " (not saved)"))
+            # What changed with no card is said in aish's voice on the
+            # delivered answer — the owner-opted vault write's precedent — so
+            # it reaches him whatever the model writes, live and cold.
+            self._cardless.add_line(planned.result if applied.ok else planned.unsaved)
+            if applied.ok:
+                self.cardless_this_task += 1
+            if not applied.ok:
+                return _gate_outcome(applied.text, decision="blocked")
+            return (mailitemtool.ASKED_NOTE + web.UNTRUSTED_NOTE
+                    + provenance.disarm_markers(applied.text))
+        if self.approve_tool is None:
+            return _gate_outcome(ITEMS_NO_APPROVER, decision="blocked")
         preview = planned.sentence
         # The card carries the TYPED fields only, as the case verbs' does.
         decision = self._ask_owner(ASKED_BY_ITEMS, "inbox_items",
                                    {"action": action, **planned.fields}, preview)
-        item_act = {"kind": "item_act", "verb": action, "anchor": planned.anchor}
         if isinstance(decision, Denied):
             self._arm_stop_gate(decision.comment)
-            self._emit_record(**item_act, outcome="denied")
+            self._emit_item_act(**item_act, carded=True, outcome="denied")
             return _gate_outcome(
                 _with_feedback(ITEMS_DENIED, decision.comment, card_said=preview),
                 decision="denied", comment=decision.comment,
             )
         if isinstance(decision, Approved):
-            self._emit_record(**item_act, outcome="held")
+            self._emit_item_act(**item_act, carded=True, outcome="held")
             return _gate_outcome(
                 "NOT SAVED yet: nothing changes until a card is approved. "
                 + _tool_held("inbox_items", decision.comment, card_said=preview),
                 decision="held", comment=decision.comment,
             )
         if decision is None or decision is False:
-            self._emit_record(**item_act, outcome="denied")
+            self._emit_item_act(**item_act, carded=True, outcome="denied")
             return _gate_outcome(ITEMS_DENIED, decision="denied")
-        chat = ""
-        if self.current_session is not None:
-            try:
-                chat = Path(self.current_session()).stem
-            except Exception:  # noqa: BLE001 — a name is a label, never worth a call
-                chat = ""
-        applied = mailitemtool.apply(state_dir, planned,
-                                     source={"session": chat, "turn": self._turn},
+        applied = mailitemtool.apply(state_dir, planned, source=self._act_source(),
                                      now=mailitemtool.clock())
-        self._emit_record(**item_act, outcome="applied" if applied.ok else "not_applied",
-                          items=list(planned.items))
+        self._emit_item_act(**item_act, carded=True,
+                            outcome="applied" if applied.ok else "not_applied",
+                            items=list(planned.items) if applied.ok else [])
         self._note(f"→ inbox_items: {action}" + ("" if applied.ok else " (not saved)"))
         if not applied.ok:
             # Never under DONE_NOTE: a failed save in aish's "saved" voice is
@@ -17285,6 +17309,21 @@ class Agent:
             return _gate_outcome(applied.text, decision="blocked")
         return (mailitemtool.DONE_NOTE + web.UNTRUSTED_NOTE
                 + provenance.disarm_markers(applied.text))
+
+    def _act_source(self) -> dict:
+        chat = ""
+        if self.current_session is not None:
+            try:
+                chat = Path(self.current_session()).stem
+            except Exception:  # noqa: BLE001 — a name is a label, never worth a call
+                chat = ""
+        return {"session": chat, "turn": self._turn}
+
+    def _emit_item_act(self, **fields: Any) -> None:
+        """The `item_act` step (contract §3.25): logged AND drawn — the chat's
+        row for his act on an item is composed by the client from this record,
+        live and on replay alike, never relayed by the model."""
+        self._emit_step(kind="item_act", call=self._current_call(), **fields)
 
     @staticmethod
     def _automation_deny_prefixes() -> list[str]:

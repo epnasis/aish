@@ -2052,8 +2052,8 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "inbox_items",
             "description": (
                 "Items of the owner's inbox reports. list is free. resolve (a matter is done or "
-                "needs no reply) / restore (still open) ONLY when his own message asks; he "
-                "approves a card. Use the report's ref. Example: 'Catherine already paid' -> "
+                "needs no reply) / restore (still open) ONLY when his own message asks; applied "
+                "at once, no card. Use the report's ref. Example: 'Catherine already paid' -> "
                 "resolve ref=3e2ea1e21b1b; the report's 'vouch settler paczkomaty.pl delivery' "
                 "-> vouch domain=paczkomaty.pl meaning=delivery. NEVER say a matter is done "
                 "unless this tool answered SAVED."

@@ -106,6 +106,12 @@ The wrapper is `chmod +x`'d after commit and the plugin signature is reset, so t
 
 ---
 
+**Latent, noted 2026-11-12 (slice 1c review)**: on a timeout `execute` relies on
+`subprocess.run`, which kills only the DIRECT child, not its process group — a wrapper whose
+grandchild inherits the output pipe could keep running, and keep `run` waiting, past the tool's
+limit. The `bank_sync` wrapper (which `aish-mailreport` runs under a hard limit) is a single
+Python process, so it is not exposed today; nothing here verifies other plugins.
+
 ## Secrets — `secrets.py` (#142)
 
 A local secret store backed by the **macOS login Keychain**, for the non-CLI integrations aish must hold a credential for (Fastmail, Home Assistant, ntfy, webhooks — "auth stays with the CLI" covers none of them). Each secret is a generic-password item under service `"aish"` via `/usr/bin/security`; a plaintext NAME index (never values) in the state dir backs `aish secret list`. Managed with `aish secret <set|get|list|rm>`, intercepted before the main arg parser, with `set` reading via getpass on a terminal and from stdin when piped. The pipe path is load-bearing, not convenience: getpass reads the tty in canonical mode, whose macOS line buffer tops out at 1024 bytes, and a pasted line past that is discarded WHOLESALE — Enter never registers and the prompt looks hung (measured 2026-09-05 against a pty: a 1000-byte line arrives, a 1024-byte line never does; a base64-encoded RSA key is ~4300 bytes). `base64 < key.pem | tr -d '\n' | aish secret set NAME` is the supported route for long values. `TestSecrets`, `TestSecretCliSet`.

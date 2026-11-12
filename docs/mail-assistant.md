@@ -1173,14 +1173,16 @@ reads, and the presented answer he reads — so `mailreport` now composes TWO te
   through the SAME `server.presented_report` sanitiser and link allowlist (`docs/web-server.md`).
   `--dry-run` prints it. Headline `Thu 12 Nov — N new, M still open.`, the watcher's warnings
   before it. Sections, each omitted when empty: *Reminders* (his own, due today — kept because they
-  reach him only in the report), *New*, *Still open* (overdue first, oldest due date first; then
-  dated, soonest first; then undated, newest first), *New, from senders you have not dealt with*,
+  reach him only in the report), *New*, *Still open* (ordered by importance since 2026-11-12 —
+  §Dates by kind below), *New, from senders you have not dealt with*,
   *Waiting on others* (their turn, 5 to `BRIEF_WAITING_LISTED_DAYS` (30) days). Your-turn rows
   ride *New* or *Still open* as `Answer — …` lines (new = their asks were not in an earlier
-  report's `followups`). Then one line *N item(s) look handled by later mail.* (no list), and ONE
-  counts line — *Not listed: N that ask nothing, …, N newsletters, N codes, N other; N hidden by
+  report's `followups`). Then one line *N item(s) look handled by later mail.* (no list) — since
+  the bank slice *N item(s) look handled (M by a bank payment).* when the bank settled any — and
+  ONE counts line — *Not listed: N that ask nothing, …, N newsletters, N codes, N other; N hidden by
   your preferences. /mail shows everything.* — whose preferences clause is printed always, zero
-  included (the suppression-visibility law, now as one clause). An empty day says *Nothing needs
+  included (the suppression-visibility law, now as one clause); when any Pay line exists it also
+  says where the bank stands (§The bank as a settlement source). An empty day says *Nothing needs
   you.* Every eligible reading is in a line or that counts line.
 - **A line**: `Pay — who — “subject” — amount — due 1 Nov (11 days overdue) — open N days ·
   [done] · [open]`. The what-word in sentence case; dates as `1 Nov` with `(today)`, `(in N
@@ -1198,11 +1200,10 @@ reads, and the presented answer he reads — so `mailreport` now composes TWO te
   preference, caution, his restore) repeats while open. A line resting ONLY on the Reader's `pay`
   or `reply` from a sender he does not write to is shown once, under *New, from senders you have
   not dealt with*, and afterwards counted (*N unanswered from new senders*): a cold pitch must not
-  nag for 60 days; the miss counter measures what this loses. **Ageing, a stated choice**: a
-  *Still open* line open longer than `BRIEF_AGEING_DAYS` (14) with no deadline still ahead — an
-  undated one, and also an OVERDUE dated one — is listed on Mondays only and counted on other days (*N older open items (listed on Mondays)*);
-  its last morning in the window is listed whatever the day. The working copy still lists every
-  open line.
+  nag for 60 days; the miss counter measures what this loses. **Ageing — the Monday rule is
+  REMOVED** (the owner's decision of 2026-11-12: *"Why Mondays only? Importance differs.
+  Deadline is contextual."*); §Dates by kind below replaces it. The working copy still lists
+  every open line.
 - **The ledger** records each delivered brief's sections (`brief`: digests per section, and the
   ones only counted) beside `digests` and `counted`, so a brief can be reproduced; a shown-once
   line is recorded as listed and does not repeat.
@@ -1211,10 +1212,42 @@ reads, and the presented answer he reads — so `mailreport` now composes TWO te
   exactly one stored amount, or a recorded payment account. A single-amount order confirmation
   would still pass. *Not* tightened, reported instead: 4 of the 7 dated deadlines on lines were
   already past (a parcel's pickup date, for one) — a model-extracted date keeps an item open as
-  *overdue*; ageing lists such lines on Mondays only.
+  *overdue*; since 2026-11-12 such a Decide is listed the day after its date and then counted
+  (§Dates by kind).
 
 `TestTheBrief` (tests/test_mailreport.py), `TestTheBriefIsWhatHeReads`
 (tests/test_mailreport_chat.py).
+
+### Dates by kind, importance order, grouping (2026-11-12) — replacing the Monday rule
+
+**Amended by the owner's decision of 2026-11-12** (*"Why Mondays only? Importance differs.
+Deadline is contextual."*): nothing is listed, counted or demoted by the calendar's weekday
+(`BRIEF_LISTS_AGED_ON` is gone; `brief_plan`). What a passed date means depends on what the
+line asks — the lead mail's `wanted`:
+
+- **Pay**: overdue is MORE urgent — it stays listed, on top, until settled or closed by him.
+- **Decide** with a date (an offer that expires, a parcel waiting, a subscription lapsing): the
+  day after the date it is listed as `due 3 Nov (date passed)`, then it is only counted — *N whose
+  date passed* in the counts line (the working copy lists them; the ledger records them as
+  `brief.date_passed_counted`). A line is listed at least once before it is counted (one first
+  seen after its date is listed that morning, marked *date passed*), and its last morning in the
+  window is listed with the leaving words whatever its date says. **Never** a line carrying a caution mark, one his preference
+  placed (`important`, `show_first`, shown despite a hide), or one he restored after its date —
+  his word outranks the calendar.
+- **Reply**: dates are rare; treated as Pay (stays).
+
+**Importance, not age** orders *Still open*: cautioned first; then overdue Pay or Reply, oldest
+due first; then dated lines by date; then undated Pay; then Reply; then undated Decide; newest
+first within a tier.
+
+**Old lines with nothing new to say are grouped, every day.** An undated Pay or Reply line open
+longer than `BRIEF_GROUP_DAYS` (14, the spec's choice) folds into one line per kind — *- 3 bills
+open longer than 14 days (oldest from 2 Oct) — ask here to list them* — counted in the headline's
+*still open*, recorded as `brief.grouped`. Dated Pay stays one line each; a cautioned line, one
+his preference placed, and one on its last morning in the window are never grouped. The
+measured reason (spec): without ageing the brief grew from 2 to 14 lines in 14 mornings, and
+most open bills have no amount the bank can match. The 60-day window and its last-morning
+announcement stay. `TestDatesByKind` (including the first-seen-late and last-morning cases), `test_no_weekday_decides_anything_and_an_overdue_bill_stays_listed`.
 
 **Measured (revision 1b, after the final review's fixes, a fresh frozen copy of 2026-11-12,
 counts only).** The brief: 15 lines, 1,645 characters (1,210 visible), 7 item lines, visible
@@ -1328,7 +1361,9 @@ laundering law) — and the report in the payload's `report` field. The server
    licence (`TRIGGERED_SAFE_TOOLS`, "safe because nobody is at the keyboard") is OFF in that chat,
    because its premise is false there. What stays cardless is what is cardless in EVERY chat: a
    mail only he can receive, an opted-in note write (#377, #379). **So "every action goes
-   through its card" is exactly: every action except those that cannot reach past him.**
+   through its card" is exactly: every action except those that cannot reach past him** — and,
+   since the owner's decision of 2026-11-12, his own resolve / restore of an item, which applies
+   with no card when he sent the task and is drawn as a row in the turn (§The verbs).
 2. **as the turn's answer, composed by code — rendering choice (b)** (`Agent.present`): the
    owner reads the report exactly as code wrote it, with the server's provenance line under the
    headline, and the server breaks every markdown link but the Gmail one again
@@ -1647,7 +1682,9 @@ is first read today however old it is (the first real run tied a 2026-09-25 bank
 
 ### Whether an item is open — `Context.state_of`
 
-States `open` | `settled` | `cannot_tell`; sources in a fixed order, **owner > judge > rule**:
+States `open` | `settled` | `cannot_tell`; sources in a fixed order, **owner > judge > rule >
+bank** (the fourth source added by the owner's decision of 2026-11-12, §The bank as a settlement
+source):
 
 1. **His word.** `resolve` / `restore` on the anchor, from `<state>/mail/item-acts.jsonl` (the
    newest act wins; it applies to every item on that anchor), and a **case he closed** that the
@@ -1672,9 +1709,13 @@ States `open` | `settled` | `cannot_tell`; sources in a fixed order, **owner > j
    is not addressed to the counterparty count as aimed at it. The rule is not "revived": what continues the matter is its own new item (on
    the real index, Przemysław's next reply is a your-turn row). `TestTheRule`.
 
-Settled by a judgement or the rule is **probably settled** (option A, the owner's choice of
-2026-11-02): demoted into the report's named line, never removed — only his word removes it, or
-the window.
+4. **A bank payment** (`mailbank`, 2026-11-12) — an outgoing booked transaction matching an open
+   Pay item's recorded amount and tied to it by more than the amount; re-verified on every read.
+   §The bank as a settlement source.
+
+Settled by a judgement, the rule or the bank is **probably settled** (option A, the owner's
+choice of 2026-11-02): demoted into the report's named line, never removed — only his word
+removes it, or the window.
 
 ### His own mail in his other inbox — `own_copies`
 
@@ -1810,6 +1851,118 @@ because aish read the answer late and it asks nothing*), never silently. **This 
 backfill's "older backfilled mail is never assessed": an old answer an open follow-up rests on is.
 `TestTheLateReading` in `tests/test_mailsettle.py`.
 
+### The bank as a settlement source (2026-11-12) — `mailbank.py`
+
+**Why.** The owner's decision of 2026-11-12: *"Paid bills should match in bank history."* His
+bank plugin's ledger (`<state>/bank/bank.db`, the owner's `~/.config/aish/tools/_bank` plugin,
+NOT repository code) was refreshed only when a model happened to call a bank tool — 12 days
+stale that day — and nothing read it for the inbox.
+
+**A fresh ledger, by code.** `aish-mailreport` (never `--dry-run`) runs his `bank_sync` tool
+before the build — once a day (a day's ledger entry with a sync attempt is not repeated:
+`SYNC_DONE_TODAY`) — through `tool_plugins.execute`, the runner a model's call uses, so the
+tool's own secrets, lock and cooldown apply; no model is involved; the timeout is lowered to the
+hard limit `SYNC_LIMIT_S` (120 s, a choice). The repository depends on the plugin **softly**: no
+`bank_sync` tool, no ledger, a failed sync, an expired consent, secrets this process cannot read,
+a locked file and an unexpected schema each end as *could not check the bank*, each with its own
+recorded reason — never "unpaid". The ledger is opened READ-ONLY (`file:…?mode=ro`); the mail
+job writes to it only through the sync tool. **Checked** means the OLDEST last sync among the
+linked accounts (`last_sync_at:<alias>`) is at most `FRESH_DAYS` (2) old — the newest would hide
+one stale account. The brief's counts line, whenever a Pay line exists, says *Bank checked to 10
+Nov.* or *Could not check the bank (last synced 31 Oct).* (*the sync did not finish in 120 s;
+…* when the limit passed). `TestTheLedger`, `TestTheSyncSeam`, `TestThePluginSync`.
+
+**Amounts recorded at ingest.** Amounts used to be recorded only for mail on a trusted case (0
+of the 11 open Pay items had one on 2026-11-12). Now the watcher records, when it reads an
+AUTHENTICATED mail whose reading wants `pay`, the amounts `mailcases.extract_amounts` finds in
+its subject and body, once, keyed to the mail, in `<state>/mail/pay-amounts.jsonl` — none found
+is recorded as none, so nothing is ever re-read from a purgeable body. `aish-mailwatch
+--record-amounts` is the one-time backfill for existing pay-wanted readings whose body is still
+held. The Reader's verdict carries accounts, never an amount; it is not a source.
+`TestAmountsAtIngest`.
+
+**The match** (`mailbank.match`). A transaction settles an open **Pay** item when ALL hold: it is
+outgoing and booked (`direction = out`, `status = BOOK`); its amount equals, exactly and in the
+same currency, ONE of the amounts recorded for the item's mail (the case store's or the ingest
+record — matching any of an invoice's net / tax / total is deliberate, and safe only with the
+tie); it was booked no earlier than `BOOKED_BEFORE_MAIL_DAYS` (7) before the mail arrived and no
+later than today (a standing order may leave before the reminder; last month's payment must not
+settle this month's bill); and something other than the amount ties it — **strong**: the
+description says one of the case keys the correlator stored on the item's trusted cases
+(`mailcases._says_key`), or the creditor account in the transaction's raw record equals, after
+`normalize_coordinate`, an account validated on the item's reading (code-extracted, or the
+Reader's checksum-valid one) or recorded for its case; **named**: the counterparty or description
+contains one of the party's entity tokens (`Context.entity_tokens`, `ENTITY_TOKEN_MIN`), Polish
+diacritics folded on both sides (`mailreport.fold`). An amount alone settles nothing.
+`TestTheMatch`.
+
+**Never by bank**: an item carrying any caution mark (a cautioned mail may impersonate the real
+biller — the real payment must not hide the impostor's line, nor the impostor's mail the real
+one); evidence booked on or before the day he restored the item (his word outranks); a Reply or
+Decide item.
+
+**A payment is spent once** (`mailbank.assign`, `<state>/mail/bank-pairs.jsonl`). If the report
+run cannot record its new pairs (the item acts' lock stays held past its 10 s wait), it rebuilds on
+recorded pairs only, so the brief never presents an unrecorded payment as settling a bill; the
+ledger's `bank` part says `pairs_unrecorded`. The first time a
+transaction is paired with an item, the pair is recorded — by the report run, and by an applied
+`inbox_items` act BEFORE it writes his act — under the item acts' lock. Later reads re-verify
+recorded pairs (the transaction still in the ledger, still matching, the item still eligible). A
+recorded transaction is spent whatever became of its item: restoring bill A never passes A's
+payment to an unpaid bill B of the same amount. Assignment order is fixed: items oldest first,
+each taking the earliest-booked unspent matching transaction; one item, at most one transaction.
+**A stated choice**: a NEW pair needs a checked (fresh) ledger; a recorded pair is re-verified
+whenever the ledger is readable — a booked transaction in the ledger is still the payment, stale
+or not. A recorded pair whose transaction vanished from the ledger settles nothing.
+`TestThePairing`.
+
+**Its place**: the fourth settlement source, **his word > a verified judgement > his own reply >
+the bank** (`Context.state_of`, so the watcher and the report read one answer; a bank-settled
+item is never judged — `TestTheWatcherAgrees`). It gives *probably settled*. The evidence line is
+code's, from the transaction's own date and amount only — *the bank shows a payment of 640,00
+PLN on 10 Nov* — the counterparty and description are text another party chose and are never
+rendered, and no account number is rendered anywhere (`TestWhatHeReads`,
+`test_hostile_bank_text_is_never_rendered`).
+The brief's handled line says *N item(s) look handled (M by a bank payment).*
+
+**What is recorded**: the report ledger's `bank` part — `synced_to`, `checked`, `reason`, `sync`
+and `sync_reason` (how today's sync ended), `matched_strong`, `matched_named`, `pay_no_amount`
+(listed pay-wanted mails with no recorded amount) and `pairs_recorded`. Counts and code's words
+only. The working copy's footer says the same in one *Bank:* line.
+
+**Measured on a frozen copy (2026-11-12, counts only; the mail state, the evidence store and a
+`sqlite3 -readonly .backup` of the ledger; no mailbox, model, server or bank call; the staleness
+limit overridden for the matcher only).** The ledger: 41,791 outgoing booked transactions, 3,282
+of them with a creditor account in the raw record (keys `iban` and `other`), last synced 12 days
+before — so without the override the brief says *Could not check the bank (…)*, and a dry run
+left the copy's tree unchanged. The backfill recorded amounts for 11 pay-wanted mails (1 skipped
+as unauthenticated, 0 without a body); a second frozen copy taken during the review fixes found
+13 pay-wanted readings, all 13 bodies held in the evidence store, and the backfill recorded 12
+(1 unauthenticated). A review reported "recorded 0, no body 12"; that disagrees with both runs
+here, both of which copied the evidence store beside the mail state — aish does not know which
+copy the review read. Of the 11 open Pay items in the window: 1 cautioned, 1
+with exactly one recorded amount, 4 with several, 6 with none; 5 uncautioned items have an
+amount, 2 of them arrived before the ledger's last sync. **Nothing matched** — 0 strong, 0 named
+— and 0 amount-only coincidences were rejected (no transaction of a recorded amount in any
+window), so the false-match probe and the restore check had nothing to act on (0 pairs; 0
+inheritances). Without the override zero is structural: a stale ledger makes no new pair. With
+it, the matcher ran and found no transaction of a recorded amount in any item's window — the
+ledger stops 12 days back, and 3 of the 5 uncautioned items with an amount arrived after it. So
+the first real evidence can only come from new mail and a fresh ledger. The sync, the recorded amounts and the bank line ship; the matcher's first real
+evidence will come from new mail and a fresh ledger. The brief on the same data: before (Monday
+rule, a Thursday) 14 lines / 1,465 characters / 5 *Still open* lines; after 16 / 1,858 / 7 — the
+two overdue Pay lines the Monday rule counted now stay listed (the owner's decision), 0 lines
+grouped (no undated Pay or Reply open over 14 days), 1 Decide counted as date passed. Item lines
+over the 14 mornings before (as-of view, its leaks under *Residuals*): before 14, 14, 14, 14, 12,
+12, 12, 11, 10, 10, 10, 10, 7, 6; after 14, 14, 14, 14, 12, 12, 12, 11, 10, 9, 9, 9, 8, 8.
+
+**Unverified**: whether the installed launchd job can read the tool's Keychain secrets. Both
+items are present in the Keychain (`security find-generic-password` without `-w`, exit 0, from
+an interactive session); the job's own read was not run. The first real run's ledger `bank`
+part says it: `sync` `secrets_unreadable` with the runner's sentence, or `ok`.
+
+**Out of scope, one question for him**: bills kept in Obsidian — the note format is not known.
+
 ### The report
 
 - **Probably settled (N)** — its own section, cut by its own cap (`SETTLED_MAX_CHARS`, whole
@@ -1824,7 +1977,8 @@ backfill's "older backfilled mail is never assessed": an old answer an open foll
   chips are the report's second link shape**: `aish-reply://restore ref <12 hex>` /
   `…resolve ref <12 hex>`, built by code from the anchor alone; `server.presented_report` keeps
   exactly that shape and breaks every other (`mailreport.safe` disarms every `aish-reply:` in mail
-  text first). A tap sends the words as his message; the change is still his card. **Changed by
+  text first). A tap sends the words as his message; since 2026-11-12 the change applies with no
+  card (§The verbs) — except on a cautioned item, whose `[done]` still draws its card. **Changed by
   the design review**: the plan had typed words ("say restore ref …"), which is not the owner's
   "one-tap-restorable". The judge's reason is never rendered. A needs item shown here was shown.
   `TestTheReport`, `TestTheServerKeepsOnlyTheChip`.
@@ -1845,14 +1999,49 @@ backfill's "older backfilled mail is never assessed": an old answer an open foll
 ### The verbs — `inbox_items` (`mailitemtool.py`)
 
 `list` (free, outside content) | `resolve` (this matter is done, no reply needed — on the ITEM,
-not a preference) | `restore` (still open). The case verbs' law, reused whole: refused with no
-card unless a person sent the task (`ITEMS_CHANGE_NOT_FROM_OWNER`); the ref resolves to exactly
-one anchor or the call errs; the card is ONE code-composed sentence stating the consequence and
-the revival (*Mark as done: PAY from … It leaves your inbox reports; new mail in that conversation
-brings it back. Nothing in your mailboxes is changed.*); applied under the item acts' own lock
-against a fresh derivation (an item that changed since the card is refused); SAVED is the only
-confirmation; no cardless licence in any origin; a renderless `item_act` record (§3.25); on the
-report chat's required menu beside `cases` and `inbox_preferences`. **The false-promise rule now
+not a preference) | `restore` (still open). Refused with no card unless a person sent the task
+(`ITEMS_CHANGE_NOT_FROM_OWNER`) — a task nobody sent (schedule, mail, webhook) is still refused
+these verbs outright; the ref resolves to exactly one anchor or the call errs.
+
+**The card law is AMENDED for these two verbs only, by the owner's decision of 2026-11-12**
+(*"If I say something is done there should be no card. I'm ultimate decision maker."*): when a
+person sent the task, `resolve` and `restore` are applied at once with **no card**. The recorded
+law *"the change is still his card"* no longer holds for them; the case verbs, preferences, trust
+and the vouch verbs keep their cards. **The one place "his done needs no card" does not
+apply**: resolving an item that carries a caution mark (`Context.cautioned` on any mail it rests
+on) ALWAYS keeps its card, whatever his message says. Why: a cautioned mail may impersonate the
+real biller, and in a report chat the model has read outside content; a chip tap sends the chip's
+words as his message, and the model can render `[innocent label](aish-reply://resolve ref …)`
+itself, so no message — not even the `[done]` chip's exact text — proves he named that item. A
+first cut waived the card when his message held the ref; the delivery review (2026-11-12) showed
+that forgeable and it was removed. Restore stays cardless on a cautioned item: it only shows
+more. The card, when
+shown, is ONE code-composed sentence (*Mark as done: PAY from … It leaves your inbox reports; new
+mail in that conversation brings it back. Nothing in your mailboxes is changed.*).
+
+- **The result is code's sentence**, with how to undo it: *Marked done: <item in code's words>.
+  Say “restore” to bring it back.* (`Plan.result`), under `ASKED_NOTE`; applied under the item
+  acts' own lock against a fresh derivation (an item that changed since is refused); SAVED is the
+  only confirmation. The act in `item-acts.jsonl` carries `carded`.
+- **What he sees is written by code, not relayed by the model.** Every outcome is an `item_act`
+  step — no longer renderless (trace contract §3.25) — that the client draws as a row in the
+  turn, under the call it belongs to: *Marked done · Pay — club@swim.example (2026-11-02) · no
+  card — you asked for it · say “restore” to bring it back* (`app.js` `itemActView`). The row's
+  fields are code's words and the counterparty's address — never a subject. Live and cold draw it
+  from the same record (`TestTheRowLiveAndCold`, `tests/js/test_item_act_row.js`). **That row
+  sits in the turn's collapsed steps**, which a WebKit drive of the UI showed hides it (review,
+  2026-11-12), so the act is ALSO said on the delivered answer in aish's voice — the cardless
+  vault write's surface (`docs/agent-core.md` §the owner's knowing, `_Cardless.add_line`): one
+  `[aish] Marked done: … Say “restore” to bring it back.` line per act (or *Not marked done —
+  saving was refused …*, or *Not changed: … not a message you sent*), drawn by `[RULE-VERDICT]`
+  outside the steps, live and on a cold reopen (`TestTheActIsSaidOnTheAnswer`).
+- **Stated risk, accepted by the owner's decision**: in a report chat the model has read outside
+  content, so a planted mail could try to make the model mark some other item done while he asked
+  about one. Containment that needs no card: the row names what was marked, in code's words, in
+  the chat he is looking at; the next brief's continuity line counts his resolutions; restore is
+  one message; new mail in the conversation revives the item. The server's origin licence
+  (`server._auto_safe`) still covers none of it.
+- On the report chat's required menu beside `cases` and `inbox_preferences`. **The false-promise rule now
 names resolutions** (`mailprefs.MEMORY_RULE`). The conversation-scoped `not_a_follow_up` is
 retired into `resolve` (review change 7 of 2026-11-01): a new one is refused with that guidance;
 saved ones keep applying (none existed live); the counterparty-standing kind stays a preference.

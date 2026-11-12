@@ -52,6 +52,7 @@ from typing import Any
 
 from . import (
     atomic_write,
+    mailbank,
     mailcases,
     mailgate,
     mailindex,
@@ -592,6 +593,7 @@ def run_once(
     result.new_in_index = len(observed)
     inbox_headers = [index.get(d) for d in dict.fromkeys(inbox_digests)]
     copies = mailitems.own_copies(index)
+    assessed: list[dict[str, Any]] = []
     for header in sorted((h for h in inbox_headers if h is not None), key=lambda h: h.position):
         if header.direction != "in":
             continue
@@ -611,8 +613,12 @@ def run_once(
         except Exception as exc:  # noqa: BLE001 — one mail's failure is its own record
             record = mailverdicts.error_record(header, charter, model_spec, exc, now())
         verdicts.write(record)
+        assessed.append(record)
         result.assessed += 1
         result.endings[record["ending"]] = result.endings.get(record["ending"], 0) + 1
+    # The amounts a pay-wanted mail names, recorded at ingest from the body in
+    # hand — the bank match reads these, never a body that may be purged.
+    mailbank.record_amounts(state_dir, index, assessed, now=now(), by="ingest")
     if model_spec:
         result.reread = reread_blind(state_dir, index=index, store=store, charter=charter,
                                      model_spec=model_spec, chat=chat, now=now(),
@@ -728,6 +734,7 @@ def reread_blind(
                    "evidence store now yields the body",
         }
         verdicts.write(record)
+        mailbank.record_amounts(state_dir, index, [record], now=now, by="ingest")
         done += 1
     if done == len(found):
         # Nothing blind is left as of `now`: later passes check only what is
@@ -776,6 +783,7 @@ def settle(
                 "a later mail tied to an open item had no reading" if digest in unread
                 else "an open follow-up rested on it and it had no reading")
             verdicts.write(record)
+            mailbank.record_amounts(state_dir, index, [record], now=now, by="ingest")
             result.late_read += 1
     settled = mailsettle.settle_pass(state_dir, charter=settler, model_spec=model_spec,
                                      now=now, chat=settle_chat, index=index, store=store,
@@ -1366,6 +1374,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="one-shot: re-read every reading made without its body although "
                         "the evidence store now holds it (oldest first, up to --max); no "
                         "mailbox is read")
+    parser.add_argument("--record-amounts", action="store_true",
+                        help="one-time: record the amounts in every existing reading that wants "
+                        "pay, from the body the index still holds (new mail is recorded at "
+                        "ingest); no mailbox, no Reader")
     parser.add_argument("--account", default=os.environ.get("AISH_MAIL_ACCOUNT", ""),
                         help="the Gmail account (needs ~/.config/gws-accounts/<email>/)")
     parser.add_argument("--owner", action="append", default=[],
@@ -1392,6 +1404,14 @@ def main(argv: list[str] | None = None) -> int:
         return _main_settle(state_dir, args.model, args.since)
     if args.reread_blind:
         return _main_reread(state_dir, args.model, args.max)
+    if args.record_amounts:
+        with pass_lock(state_dir) as held:
+            if not held:
+                log("another pass holds the lock — the amounts backfill does nothing")
+                return 3
+            recorded = mailbank.backfill_amounts(state_dir, now=time.time())
+        print(json.dumps(dataclasses.asdict(recorded), sort_keys=True))
+        return 0
     if args.reobserve:
         with pass_lock(state_dir) as held:
             if not held:

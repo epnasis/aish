@@ -197,6 +197,21 @@ def project_scope(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_bank_sync(monkeypatch):
+    """Never run the owner's bank plugin. `mailbank.plugin_sync` reaches the
+    live Keychain and the bank itself, and `aish-mailreport` calls it on every
+    run that is not a dry run — a guard for the whole suite, not per-test
+    discipline. The tests of the function itself (`TestThePluginSync`) call
+    the real one with its discovery and runner replaced."""
+    from aish import mailbank
+
+    def refuse(_limit_s: float) -> mailbank.SyncOutcome:
+        raise AssertionError("a test reached the real bank sync")
+
+    monkeypatch.setattr(mailbank, "plugin_sync", refuse)
+
+
+@pytest.fixture(autouse=True)
 def no_real_notifications(monkeypatch, no_inherited_aish_env):
     """Never push to the developer's real phone.
 

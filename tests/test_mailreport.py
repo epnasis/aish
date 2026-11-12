@@ -1015,20 +1015,18 @@ class TestTheBrief:
         assert [i.header.subject for i in report.brief_open] == ["Quick question"]
         assert "**Still open**" in brief and "open 2 days" in brief
 
-    def test_an_open_line_with_no_deadline_ahead_even_overdue_is_listed_on_mondays_only(
-        self, tmp_path
-    ):
-        fresh_health(tmp_path)
-        for now in (weekday_now(0), weekday_now(2)):
-            fresh_health(tmp_path, now=now)
-            h = add_mail(tmp_path, "a", frm="a@x.example", subject="Pay this",
-                         at=now - 20 * DAY)
-            add_verdict(tmp_path, h, wanted="pay", deadline="2026-01-01")  # past: none ahead
-            delivered(tmp_path, now - 10 * DAY, [h.digest])
-        report, brief = brief_of(tmp_path, now=weekday_now(2))
-        assert report.brief_open == [] and "1 older open items (listed on Mondays)" in brief
-        report, brief = brief_of(tmp_path, now=weekday_now(0))
-        assert [i.header.subject for i in report.brief_open] == ["Pay this"]
+    def test_no_weekday_decides_anything_and_an_overdue_bill_stays_listed(self, tmp_path):
+        assert not hasattr(mailreport, "BRIEF_LISTS_AGED_ON")
+        for weekday in range(7):
+            now = weekday_now(weekday)
+            state = tmp_path / str(weekday)
+            fresh_health(state, now=now)
+            h = add_mail(state, "a", frm="a@x.example", subject="Pay this", at=now - 20 * DAY)
+            add_verdict(state, h, wanted="pay", deadline="2026-01-01")  # long overdue
+            delivered(state, now - 10 * DAY, [h.digest])
+            report, brief = brief_of(state, now=now)
+            assert [i.header.subject for i in report.brief_open] == ["Pay this"]
+            assert "overdue" in brief and "Monday" not in brief
 
     def test_a_deadline_still_ahead_keeps_an_old_line_listed(self, tmp_path):
         fresh_health(tmp_path)
@@ -1039,7 +1037,7 @@ class TestTheBrief:
         delivered(tmp_path, now - 10 * DAY, [h.digest])
         assert len(build(tmp_path, now=now).brief_open) == 1
 
-    def test_the_last_morning_is_listed_whatever_the_weekday(self, tmp_path):
+    def test_the_last_morning_is_listed_and_never_grouped(self, tmp_path):
         now = weekday_now(2)
         fresh_health(tmp_path, now=now)
         window = mailreport.FOLLOWUP_WINDOW_DAYS * DAY
@@ -1097,6 +1095,138 @@ class TestTheBrief:
         entry = mailreport.read_ledger(tmp_path)[-1]
         # A first-contact sender, only the Reader's word: its own section, once.
         assert entry["brief"]["first_contact"] == [h.digest]
+
+
+def dated(state, gid: str, *, wanted: str, deadline: str = "none", at_days: float = 3,
+          now: float = NOW, listed: bool = True, frm: str = "", **verdict) -> mailindex.Header:
+    """A line from a sender he writes to (so it repeats), listed before."""
+    address = frm or f"{gid}@x.example"
+    known_sender(state, address)
+    h = add_mail(state, gid, frm=address, subject=f"Subject {gid}", at=now - at_days * DAY)
+    add_verdict(state, h, wanted=wanted, deadline=deadline, recorded_at=now - at_days * DAY,
+                **verdict)
+    if listed:
+        delivered(state, now - DAY / 2, [h.digest])
+    return h
+
+
+def iso(days: int, now: float = NOW) -> str:
+    import datetime
+
+    return (datetime.date.fromtimestamp(now) + datetime.timedelta(days=days)).isoformat()
+
+
+class TestDatesByKind:
+    """The owner's decision of 2026-11-12: "Why Mondays only? Importance
+    differs. Deadline is contextual." A passed date means what the line asks."""
+
+    def test_a_decide_is_listed_the_day_after_its_date_then_counted(self, tmp_path):
+        fresh_health(tmp_path)
+        yesterday = dated(tmp_path, "y", wanted="decide", deadline=iso(-1))
+        dated(tmp_path, "o", wanted="decide", deadline=iso(-2))
+        report, brief = brief_of(tmp_path)
+        assert [i.reading.digest for i in report.brief_open] == [yesterday.digest]
+        line = next(t for t in brief.splitlines() if "Subject y" in t)
+        assert "(date passed)" in line and "overdue" not in line
+        assert "Subject o" not in brief and "1 whose date passed" in brief
+        assert report.brief_sections()["date_passed_counted"] == [
+            i.reading.digest for i in report.brief_date_passed]
+
+    def test_a_decide_first_seen_after_its_date_is_listed_once_then_counted(self, tmp_path):
+        fresh_health(tmp_path)
+        late = dated(tmp_path, "late", wanted="decide", deadline=iso(-2), listed=False)
+        report, brief = brief_of(tmp_path)
+        assert [i.reading.digest for i in report.brief_new] == [late.digest]
+        assert "(date passed)" in brief and report.brief_date_passed == []
+        delivered(tmp_path, NOW, [late.digest])
+        report, brief = brief_of(tmp_path, now=NOW + DAY)
+        assert [i.reading.digest for i in report.brief_date_passed] == [late.digest]
+        assert "1 whose date passed" in brief and "Subject late" not in brief
+
+    def test_a_date_passed_decide_on_its_last_morning_is_announced(self, tmp_path):
+        fresh_health(tmp_path)
+        window = mailreport.FOLLOWUP_WINDOW_DAYS
+        last = add_mail(tmp_path, "last", frm="last@x.example", subject="Subject last",
+                        at=NOW - (window - 0.5) * DAY)
+        add_verdict(tmp_path, last, wanted="decide", deadline=iso(-30),
+                    recorded_at=NOW - (window - 0.5) * DAY)
+        delivered(tmp_path, NOW - DAY / 2, [last.digest])
+        report, brief = brief_of(tmp_path)
+        assert [i.reading.digest for i in report.brief_open] == [last.digest]
+        line = next(t for t in brief.splitlines() if "Subject last" in t)
+        assert mailreport.LEAVING_WORDS in line and "(date passed)" in line
+
+    def test_a_cautioned_or_preferred_or_restored_decide_is_never_reduced(self, tmp_path):
+        from aish import mailitems, mailprefs
+
+        fresh_health(tmp_path)
+        dated(tmp_path, "c", wanted="decide", deadline=iso(-5), suspicion="suspicious")
+        pref = dated(tmp_path, "p", wanted="decide", deadline=iso(-5), frm="p@pref.example")
+        planned = mailprefs.plan(tmp_path, {"action": "add", "kind": "show_first",
+                                            "domain": "pref.example"})
+        assert mailprefs.apply(tmp_path, planned, source={"session": "t"},
+                               now=NOW - 9 * DAY).ok
+        back = dated(tmp_path, "r", wanted="decide", deadline=iso(-5))
+        mailitems.append_act(tmp_path, {"at": NOW - DAY, "verb": "restore",
+                                        "anchor": back.digest, "items": [], "by": "owner"})
+        report, brief = brief_of(tmp_path)
+        assert report.brief_date_passed == []
+        assert {i.header.subject for i in report.brief_open} == {
+            "Subject c", "Subject p", "Subject r"}
+        assert pref.digest in {i.reading.digest for i in report.brief_open}
+
+    def test_still_open_is_ordered_by_importance_not_age(self, tmp_path):
+        fresh_health(tmp_path)
+        dated(tmp_path, "decide", wanted="decide", deadline="none", at_days=2,
+              suspicion="none", meaning="x", kind="notice")
+        dated(tmp_path, "reply", wanted="reply", at_days=3)
+        dated(tmp_path, "pay", wanted="pay", at_days=4)
+        dated(tmp_path, "soon", wanted="decide", deadline=iso(9), at_days=5)
+        dated(tmp_path, "sooner", wanted="pay", deadline=iso(3), at_days=6)
+        dated(tmp_path, "late", wanted="pay", deadline=iso(-4), at_days=7)
+        dated(tmp_path, "later", wanted="pay", deadline=iso(-9), at_days=8)
+        dated(tmp_path, "warn", wanted="pay", at_days=9, sender_case="mismatch")
+        report, _brief = brief_of(tmp_path)
+        order = [i.header.subject.split()[-1] for i in report.brief_open]
+        # The undated decide earns its line by its correspondent fact.
+        assert order == ["warn", "later", "late", "sooner", "soon", "pay", "reply", "decide"]
+
+    def test_old_undated_bills_and_replies_fold_into_one_line_per_kind(self, tmp_path):
+        fresh_health(tmp_path)
+        dated(tmp_path, "b1", wanted="pay", at_days=20)
+        dated(tmp_path, "b2", wanted="pay", at_days=30)
+        dated(tmp_path, "r1", wanted="reply", at_days=16)
+        dated(tmp_path, "new", wanted="pay", at_days=5)
+        report, brief = brief_of(tmp_path)
+        assert [i.header.subject for i in report.brief_open] == ["Subject new"]
+        import datetime
+
+        oldest = datetime.date.fromtimestamp(NOW - 30 * DAY)
+        assert (f"- 2 bills open longer than 14 days (oldest from {oldest.day} "
+                f"{oldest.strftime('%b')}) — ask here to list them") in brief
+        assert "- 1 reply open longer than 14 days" in brief
+        assert "Subject b1" not in brief and "Subject r1" not in brief
+        assert brief.splitlines()[0].endswith("0 new, 4 still open.")
+        assert len(report.brief_sections()["grouped"]) == 3
+        # The working copy still lists every line.
+        working = mailreport.render(report, clean=identity)
+        assert "Subject b1" in working and "Subject r1" in working
+
+    def test_dated_cautioned_and_preferred_lines_are_never_grouped(self, tmp_path):
+        from aish import mailprefs
+
+        fresh_health(tmp_path)
+        dated(tmp_path, "dated", wanted="pay", deadline=iso(-20), at_days=25)
+        dated(tmp_path, "warn", wanted="pay", at_days=25, suspicion="suspicious")
+        dated(tmp_path, "pref", wanted="pay", at_days=25, frm="bills@pref.example")
+        planned = mailprefs.plan(tmp_path, {"action": "add", "kind": "show_first",
+                                            "domain": "pref.example"})
+        assert mailprefs.apply(tmp_path, planned, source={"session": "t"},
+                               now=NOW - 40 * DAY).ok
+        report, brief = brief_of(tmp_path)
+        assert report.brief_grouped == {} and "open longer than" not in brief
+        assert {i.header.subject for i in report.brief_open} == {
+            "Subject dated", "Subject warn", "Subject pref"}
 
 
 class TestTheBriefReviewFixes:

@@ -2,11 +2,15 @@
 inbox reports, under the case verbs' law — and the `important` preference with
 its effect preview.
 
-Pins: refused with no card unless a person sent the task; the card is code's
-sentence from the typed ref alone; SAVED only after a save; a resolve takes
+Pins: refused with no card unless a person sent the task; applied with NO
+card when a person sent it (the owner's decision of 2026-11-12) — except
+resolving a cautioned item whose ref his message does not name, which keeps
+the card in code's sentence from the typed ref alone; the vouch verbs keep
+theirs; SAVED only after a save; the act's record says whether a card was
+shown and is drawn as a row in the turn, live and cold alike; a resolve takes
 the item out of the next report and new mail revives it; a restore pulls a
-demoted item back; the tool taints and is on the report chat's menu and is
-never cardless; `important` places mail under Needs by entity AND meaning,
+demoted item back; the tool taints, is on the report chat's menu, and no
+server licence covers it; `important` places mail under Needs by entity AND meaning,
 without a fabricated want, and its card previews what it would and would not
 have matched. Scripted model and fixture mail only."""
 
@@ -14,13 +18,18 @@ from __future__ import annotations
 
 import pytest
 from mail_fixtures import DAY, OWNER
-from test_agent import make_agent, model_says
+from test_agent import make_agent, model_says, tool_call
 from test_mailitems import his_sent, pay_item
 from test_mailreport import NOW, add_mail, add_verdict, fresh_health
+from test_server import app_env, connected, make_client, recv_until
+from test_server import model_says as says
+from test_server import tool_call as call
 
 from aish import agent as agent_module
 from aish import mailitems, mailitemtool, mailprefs, mailreport, server
 from aish.approval import Approved, Denied
+
+__all__ = ["app_env"]  # the fixture, imported for pytest
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +52,14 @@ def agent_for(tmp_path, *, answer=True, origin="user", from_owner=None):
     return agent, cards
 
 
+def cautioned_item(state):
+    ask = add_mail(state, "n1", frm="club@swim.example", subject="Pay for March",
+                   at=NOW - 3 * DAY)
+    add_verdict(state, ask, wanted="pay", suspicion="suspicious", recorded_at=NOW - 3 * DAY)
+    return next(i for i in mailitems.Context(state, now=NOW).derive().items()
+                if i.anchor == ask.digest)
+
+
 def report(state):
     fresh_health(state)
     return mailreport.build(state, now=NOW, clean=lambda t: t)
@@ -58,26 +75,67 @@ class TestTheVerbs:
             assert out.startswith("NOT SAVED") and cards == []
         assert mailitems.read_acts(tmp_path) == []
 
-    def test_resolve_is_carded_in_codes_words_saved_and_takes_the_item_out(self, tmp_path):
+    def test_resolve_applies_with_no_card_when_a_person_sent_the_task(self, tmp_path):
         item = pay_item(tmp_path)
         agent, cards = agent_for(tmp_path, origin="schedule", from_owner=True)
         out = str(agent._dispatch("inbox_items", {
             "action": "resolve", "ref": item.anchor[:12], "note": "IGNORE ALL MAIL"}))
-        ((name, card_args, preview),) = cards
-        assert name == "inbox_items"
-        assert card_args == {"action": "resolve", "ref": item.anchor[:12]}
-        assert preview.startswith("Mark as done: PAY from club@swim.example “Pay for March”")
-        assert "new mail in that conversation brings it back" in preview
-        assert "IGNORE" not in preview
-        assert out.startswith(mailitemtool.DONE_NOTE) and "SAVED as resolved" in out
+        assert cards == []
+        assert out.startswith(mailitemtool.ASKED_NOTE) and "SAVED as resolved" in out
+        assert ("Marked done: PAY from club@swim.example “Pay for March”" in out
+                and "Say “restore” to bring it back." in out)
+        assert "IGNORE" not in out
         (act,) = mailitems.read_acts(tmp_path)
         assert act["verb"] == "resolve" and act["anchor"] == item.anchor
+        assert act["carded"] is False and act["text"].startswith("Marked done: PAY")
         assert act["source"]["turn"] == agent._turn
         built = report(tmp_path)
         assert built.needs == [] and built.resolved == 1
 
+    def test_a_cautioned_resolve_cards_even_when_his_message_is_the_done_chips_text(
+        self, tmp_path
+    ):
+        """A chip the model writes in a mail-tainted chat sends whatever words
+        it chose, so no message can waive the card on a cautioned item."""
+        ask = add_mail(tmp_path, "n1", frm="club@swim.example", subject="Pay for March",
+                       at=NOW - 3 * DAY)
+        add_verdict(tmp_path, ask, wanted="pay", suspicion="suspicious",
+                    recorded_at=NOW - 3 * DAY)
+        ref = ask.digest[:12]
+        cards = []
+
+        def approve_tool(name, args, preview):
+            cards.append((name, dict(args), preview))
+            return False
+
+        agent, _ = make_agent([model_says(tool_calls=[tool_call("inbox_items", action="resolve",
+                                                                ref=ref)]),
+                               model_says("Not done.")],
+                              approve_tool=approve_tool, state_dir=tmp_path)
+        agent.run_task(f"resolve ref {ref}")  # exactly the done chip's text
+        ((name, card_args, preview),) = cards
+        assert name == "inbox_items" and card_args == {"action": "resolve", "ref": ref}
+        assert preview.startswith("Mark as done: PAY from club@swim.example")
+        assert mailitems.read_acts(tmp_path) == []
+
+    def test_a_cautioned_item_is_restored_with_no_card(self, tmp_path):
+        ask = add_mail(tmp_path, "n1", frm="club@swim.example", subject="Pay for March",
+                       at=NOW - 3 * DAY)
+        add_verdict(tmp_path, ask, wanted="pay", sender_case="mismatch",
+                    recorded_at=NOW - 3 * DAY)
+        agent, cards = agent_for(tmp_path)
+        out = str(agent._dispatch("inbox_items", {"action": "restore",
+                                                  "ref": ask.digest[:12]}))
+        assert cards == [] and "SAVED as restored" in out
+
+    def test_the_vouch_verbs_keep_their_card(self, tmp_path):
+        agent, cards = agent_for(tmp_path)
+        out = str(agent._dispatch("inbox_items", {"action": "vouch", "domain": "paczkomaty.pl",
+                                                  "meaning": "delivery"}))
+        assert len(cards) == 1 and "SAVED as vouched" in out
+
     def test_a_denied_card_saves_nothing_and_says_so(self, tmp_path):
-        item = pay_item(tmp_path)
+        item = cautioned_item(tmp_path)
         agent, cards = agent_for(tmp_path, answer=Denied("not that one"))
         out = str(agent._dispatch("inbox_items", {"action": "resolve",
                                                   "ref": item.anchor[:12]}))
@@ -85,7 +143,7 @@ class TestTheVerbs:
         assert mailitems.read_acts(tmp_path) == []
 
     def test_an_approve_with_comment_holds_and_saves_nothing(self, tmp_path):
-        item = pay_item(tmp_path)
+        item = cautioned_item(tmp_path)
         agent, _ = agent_for(tmp_path, answer=Approved("only the March one"))
         out = str(agent._dispatch("inbox_items", {"action": "resolve",
                                                   "ref": item.anchor[:12]}))
@@ -103,7 +161,8 @@ class TestTheVerbs:
         agent, cards = agent_for(tmp_path)
         out = str(agent._dispatch("inbox_items", {"action": "restore",
                                                   "ref": offer.digest[:12]}))
-        assert "SAVED as restored" in out and cards[0][2].startswith("Keep open: DECIDE")
+        assert "SAVED as restored" in out and cards == []
+        assert "Kept open: DECIDE" in out
         built = report(tmp_path)
         assert built.settled == [] and [i.reading.digest for i in built.needs] == [offer.digest]
 
@@ -125,17 +184,34 @@ class TestTheVerbs:
 
 
 class TestTheWiring:
-    def test_an_item_act_record_is_written_and_renderless(self, tmp_path, monkeypatch):
+    def test_the_item_act_is_a_drawn_step_saying_whether_a_card_was_shown(self, tmp_path):
         from aish import session
 
         item = pay_item(tmp_path)
         agent, _ = agent_for(tmp_path)
-        seen = []
-        monkeypatch.setattr(agent, "_emit_record", lambda **kw: seen.append(kw))
+        live: list = []
+        logged: list = []
+        agent.on_step, agent.step_log = live.append, logged.append
         agent._dispatch("inbox_items", {"action": "resolve", "ref": item.anchor[:12]})
-        assert seen[-1]["kind"] == "item_act" and seen[-1]["outcome"] == "applied"
-        assert seen[-1]["anchor"] == item.anchor and seen[-1]["items"] == [item.key]
-        assert "item_act" in session.RENDERLESS_STEPS
+        (step,) = [s for s in live if s.get("kind") == "item_act"]
+        assert [s for s in logged if s.get("kind") == "item_act"] == [step]
+        assert step["outcome"] == "applied" and step["carded"] is False
+        assert step["anchor"] == item.anchor and step["items"] == [item.key]
+        # The row's words: code's, and the counterparty's address — no subject.
+        assert {k: step[k] for k in ("what", "party", "ref")} == {
+            "what": "pay", "party": "club@swim.example", "ref": item.anchor[:12]}
+        assert "Pay for March" not in str(step)
+        assert "item_act" not in session.RENDERLESS_STEPS
+        assert "item_act" in agent_module.TURN_STAMPED_STEPS and step["turn"] == agent._turn
+
+    def test_a_blocked_act_is_drawn_too(self, tmp_path):
+        item = pay_item(tmp_path)
+        agent, _ = agent_for(tmp_path, from_owner=False)
+        live: list = []
+        agent.on_step = live.append
+        agent._dispatch("inbox_items", {"action": "resolve", "ref": item.anchor[:12]})
+        (step,) = [s for s in live if s.get("kind") == "item_act"]
+        assert step["outcome"] == "blocked" and step["carded"] is False
 
     def test_it_taints_as_mail_and_is_outside_content(self):
         agent, _ = make_agent([model_says("ok")])
@@ -272,3 +348,86 @@ class TestSaveTimeRefusals:
         applied = mailitemtool.apply(tmp_path, planned, source={}, now=NOW)
         assert not applied.ok and "changed since the card" in applied.text
         assert mailitems.read_acts(tmp_path) == []
+
+
+class TestTheRowLiveAndCold:
+    """His act is a row in the turn, drawn by the client from the act's record:
+    the step the live socket carried is the step a cold reopen replays."""
+
+    def test_the_same_item_act_step_live_and_cold(self, app_env):
+        from aish.session import SessionLog
+
+        state = app_env["state_dir"]
+        item = pay_item(state)
+        ref = item.anchor[:12]
+        client, _ = make_client(app_env, [
+            says(tool_calls=[call("inbox_items", action="resolve", ref=ref)]),
+            says("Done."),
+        ])
+        with client, connected(client) as (ws, hello, _replay):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": f"the swim club is paid, ref {ref}"})
+            recv_until(ws, "done")
+            server_obj = client.app.state.server
+            live = [e for e in server_obj.sessions[name].bridge.transcript
+                    if e.get("type") == "step" and e.get("kind") == "item_act"]
+            path = server_obj.state_dir / name
+        cold = [e for e in SessionLog.reconstruct_events(path)
+                if e.get("type") == "step" and e.get("kind") == "item_act"]
+        assert len(live) == 1 and live == cold
+        assert live[0]["carded"] is False and live[0]["outcome"] == "applied"
+        assert mailitems.read_acts(state)[0]["verb"] == "resolve"
+
+
+class TestTheActIsSaidOnTheAnswer:
+    """The row lives in the turn's collapsible steps; what changed with no card
+    must ALSO be on the answer itself, in aish's voice (`agent.AISH_LINE`, the
+    owner-opted vault write's precedent) — visible without expanding anything,
+    whatever the model writes, live and cold."""
+
+    def test_the_answer_carries_one_aish_line_per_act(self, tmp_path):
+        first = pay_item(tmp_path)
+        other = add_mail(tmp_path, "n2", frm="gas@utility.example", subject="Gas bill",
+                         at=NOW - 2 * DAY)
+        add_verdict(tmp_path, other, wanted="pay", recorded_at=NOW - 2 * DAY)
+        agent, _ = make_agent([
+            model_says(tool_calls=[call("inbox_items", action="resolve", ref=first.anchor[:12]),
+                                   call("inbox_items", action="restore",
+                                        ref=other.digest[:12])]),
+            model_says("Sure."),
+        ], state_dir=tmp_path)
+        answer = agent.run_task("both of those")
+        lines = [t for t in answer.splitlines() if t.startswith(agent_module.AISH_LINE)]
+        assert lines == [
+            f"{agent_module.AISH_LINE}Marked done: PAY from club@swim.example “Pay for March” "
+            f"({mailitemtool._day(first_header(tmp_path, first).at)}). Say “restore” to bring "
+            "it back.",
+            f"{agent_module.AISH_LINE}Kept open: PAY from gas@utility.example “Gas bill” "
+            f"({mailitemtool._day(other.at)}). Say “done” when it is done."]
+
+    def test_live_and_cold_the_answer_says_it(self, app_env):
+        from aish.session import SessionLog
+
+        state = app_env["state_dir"]
+        item = pay_item(state)
+        ref = item.anchor[:12]
+        client, _ = make_client(app_env, [
+            says(tool_calls=[call("inbox_items", action="resolve", ref=ref)]),
+            says("All good."),  # the model's words say nothing of what was marked
+        ])
+        with client, connected(client) as (ws, hello, _replay):
+            name = hello["session"]
+            ws.send_json({"type": "task", "text": "the swim club is paid"})
+            live = recv_until(ws, "done")["result"]
+            path = client.app.state.server.state_dir / name
+        cold = [e for e in SessionLog.reconstruct_events(path) if e["type"] == "done"][-1]
+        for text in (live, cold["result"]):
+            assert "All good." in text
+            assert ("[aish] Marked done: PAY from club@swim.example “Pay for March”" in text
+                    and "Say “restore” to bring it back." in text)
+
+
+def first_header(state, item):
+    from aish import mailindex
+
+    return mailindex.MailIndex(state).get(item.anchor)

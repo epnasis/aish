@@ -362,6 +362,8 @@ class Item:
     # A cautioned mail that asks nothing: listed once, while news — the caution
     # floor, so removing "May interest you" hides no flagged mail.
     asks_nothing: bool = False
+    # A Decide whose date passed yesterday: listed once more, saying so.
+    date_passed: bool = False
 
     def mails(self) -> list[Item]:
         return [self, *self.folded]
@@ -538,12 +540,22 @@ class Report:
     brief_open: list[Item] = field(default_factory=list)
     brief_first_contact: list[Item] = field(default_factory=list)
     brief_first_contact_counted: list[Item] = field(default_factory=list)
-    brief_aged: list[Item] = field(default_factory=list)
+    # Undated Pay / Reply lines open longer than `BRIEF_GROUP_DAYS`, one line
+    # per kind; dated Decide lines whose date passed before yesterday, counted.
+    brief_grouped: dict[str, list[Item]] = field(default_factory=dict)
+    brief_date_passed: list[Item] = field(default_factory=list)
     brief_yours_new: list[FollowUp] = field(default_factory=list)
     brief_yours_open: list[FollowUp] = field(default_factory=list)
     brief_waiting: list[FollowUp] = field(default_factory=list)
     brief_waiting_old: list[FollowUp] = field(default_factory=list)
     brief_trust_drawn: int = 0  # trust offers the brief drew (`_brief_trust`)
+    # The bank (`mailbank`): the ledger as read, how the sync ended, and the
+    # pairs this build made for the first time (recorded by `run`).
+    bank_ledger: Any = None
+    bank_sync: Any = None
+    bank_new_pairs: dict[str, Any] = field(default_factory=dict)
+    bank_counts: dict[str, int] = field(default_factory=dict)
+    has_pay: bool = False
 
     def brief_sections(self) -> dict[str, list[str]]:
         """Which digests the brief listed, per section, and which it counted —
@@ -557,7 +569,8 @@ class Report:
         return {"new": mails(self.brief_new), "still_open": mails(self.brief_open),
                 "first_contact": mails(self.brief_first_contact),
                 "first_contact_counted": mails(self.brief_first_contact_counted),
-                "older_counted": mails(self.brief_aged),
+                "grouped": mails([i for v in self.brief_grouped.values() for i in v]),
+                "date_passed_counted": mails(self.brief_date_passed),
                 "your_turn_new": rows(self.brief_yours_new),
                 "your_turn_open": rows(self.brief_yours_open),
                 "waiting": rows(self.brief_waiting),
@@ -901,9 +914,14 @@ def build(
     now: float,
     since: float | None = None,
     clean: Clean,
+    bank_sync: Any = None,
+    bank_new_pairs: bool = True,
 ) -> Report:
     """The whole report from the stores. Reads only — the verdict store, the
-    index, the watcher's health file and this report's own ledger."""
+    index, the watcher's health file, this report's own ledger and the bank
+    plugin's ledger (read-only). `bank_sync` is how today's sync ended
+    (`mailbank.SyncOutcome`), None when none ran. `bank_new_pairs` False:
+    only pairs already recorded settle anything."""
     since, since_from, floor, shown = news_window(state_dir, now, since)
     report = Report(now=now, since=since, since_from=since_from)
     report.watcher_warnings = [
@@ -923,6 +941,7 @@ def build(
 
     store = mailcases.CaseStore(state_dir)
     ctx = mailitems.Context(state_dir, now=now, index=index, readings=readings, store=store)
+    ctx.bank_new_pairs = bank_new_pairs
     # His case closures release keeper-clamped mail (`mailcases.Closure`),
     # reading membership as the items do: trusted only.
     closure = ctx.trusted_closure()
@@ -1041,8 +1060,49 @@ def build(
     report.since_acts = acts_since(state_dir, report.since_acts_from)
     report.recent_trusts = recent_trusts(store, report.since_acts_from)
     report.missed = misses(ctx, ledger)
+    _bank(report, ctx, bank_sync)
     brief_plan(report, ctx, ledger_digests(ledger, "followups"))
     return report
+
+
+def _bank(report: Report, ctx: Any, sync: Any) -> None:
+    """Where the bank stands for this build, what it settled and what it
+    could not: counts only (the ledger's `bank` part)."""
+    from . import mailbank, mailitems
+
+    report.bank_ledger = ctx.bank.ledger
+    report.bank_sync = sync
+    pairings = ctx.bank_pairings()
+    report.bank_new_pairs = {k: p for k, p in pairings.items() if not p.recorded}
+    pay = [m for line in report.needs for m in line.mails()
+           if str(m.reading.verdict.get("wanted") or "") == "pay"]
+    settled_pay = [r for r in report.settled if isinstance(r, Item)
+                   and str(r.reading.verdict.get("wanted") or "") == "pay"]
+    report.has_pay = bool(pay or settled_pay)
+    ties = [r.state.evidence.bank_tie for r in report.settled
+            if r.state is not None and r.state.source == mailitems.BANK]
+    report.bank_counts = {
+        "matched_strong": ties.count(mailbank.TIE_STRONG),
+        "matched_named": ties.count(mailbank.TIE_NAMED),
+        "pay_no_amount": sum(1 for m in pay
+                             if not mailbank.item_amounts(ctx, m.reading.digest)),
+    }
+
+
+def bank_entry(report: Report) -> dict[str, Any]:
+    """The report ledger's `bank` part: counts and code's words only."""
+    from . import mailbank
+
+    ledger = report.bank_ledger
+    sync = report.bank_sync
+    return {
+        "synced_to": getattr(ledger, "synced_to", ""),
+        "checked": bool(getattr(ledger, "checked", False)),
+        "reason": getattr(ledger, "reason", ""),
+        "sync": sync.status if sync is not None else mailbank.SYNC_NOT_RUN,
+        "sync_reason": sync.reason if sync is not None else "",
+        **report.bank_counts,
+    }
 
 
 def _as_line(ctx: Any, item: Item, listed_before: frozenset[str], window: float) -> None:
@@ -1519,6 +1579,11 @@ def _evidence(row: Item | FollowUp, clean: Clean) -> str:
 
     state = row.state
     ev = state.evidence
+    if state.source == mailitems.BANK and ev.bank_amount is not None:
+        from . import mailbank
+
+        return safe(clean, mailbank.evidence_words(ev.bank_amount[0], ev.bank_amount[1],
+                                                   ev.bank_date), 120)
     when = _when(ev.when) if ev.when and ev.when != float("inf") else "an unknown time"
     if state.source == mailitems.RULE:
         to = ", ".join(safe(clean, a, ADDRESS_CHARS) for a in ev.to[:3]) or "them"
@@ -1675,6 +1740,23 @@ def _settlement_lines(report: Report, clean: Clean) -> list[str]:
         out.append(f"{len(report.late_closed)} follow-up(s) left Your turn because aish read "
                    f"the answer late and it asks nothing: {named}{more}.")
     return out
+
+
+def bank_clause(report: Report) -> str:
+    """Where the bank stands, in the words both texts use."""
+    from . import mailbank
+
+    ledger = report.bank_ledger if report.bank_ledger is not None else mailbank.Ledger()
+    return mailbank.status_words(ledger, report.bank_sync)
+
+
+def _bank_footer(report: Report) -> str:
+    c = report.bank_counts
+    matched = c.get("matched_strong", 0) + c.get("matched_named", 0)
+    return (f"Bank: {bank_clause(report)} {matched} item(s) settled by a bank payment "
+            f"({c.get('matched_strong', 0)} tied by a reference or account, "
+            f"{c.get('matched_named', 0)} by name); {c.get('pay_no_amount', 0)} listed mail(s) "
+            "asking you to pay have no amount recorded, which the bank cannot match.")
 
 
 def _q_subject(subject: str, clean: Clean) -> str:
@@ -1839,6 +1921,8 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
     lines.append("Not shown: " + (", ".join(f"{n} {what}" for n, what in not_shown if n)
                                   or "nothing else") + ". `/mail` lists every reading.")
     lines += _settlement_lines(report, clean)
+    if report.has_pay:
+        lines.append(_bank_footer(report))
     if report.trust_withheld_shared:
         lines.append(
             f"{report.trust_withheld_shared} sender(s) on your cases at a domain many people "
@@ -1875,10 +1959,13 @@ def render(report: Report, *, clean: Clean, account: str = "") -> str:
 # carries no refs but the done chip's, no settlement tails, no chips but done
 # and the Gmail link, no preference ids — the working copy holds all of it.
 
-#: A still-open line with no deadline ahead, open longer than this, is listed
-#: on Mondays only and counted on other days. A CHOICE.
-BRIEF_AGEING_DAYS = 14
-BRIEF_LISTS_AGED_ON = 0  # Monday, `datetime.weekday()`
+#: An undated Pay or Reply line open longer than this folds, every day, into
+#: one line per kind. The spec's choice (2026-11-12), replacing Mondays.
+BRIEF_GROUP_DAYS = 14
+#: A dated Decide is listed the day after its date as "date passed", and
+#: counted from the day after that.
+DATE_PASSED_LISTED_DAYS = 1
+GROUPED_WORDS = {"pay": ("bill", "bills"), "reply": ("reply", "replies")}
 #: Their-turn rows this old or older are counted, not listed. A CHOICE.
 BRIEF_WAITING_LISTED_DAYS = 30
 BRIEF_SUBJECT_CAP = 60
@@ -1909,6 +1996,38 @@ def _today(now: float) -> datetime.date:
     return datetime.date.fromtimestamp(now)
 
 
+def _lead_wanted(line: Item) -> str:
+    return str(line.reading.verdict.get("wanted") or "")
+
+
+def _cautioned(line: Item) -> bool:
+    from . import mailitems
+
+    return any(mailitems.FACT_CAUTION in m.facts or caution_marks(m.reading.record)
+               for m in line.mails())
+
+
+def _never_reduced(line: Item) -> bool:
+    """A line that is never counted or grouped: one carrying a caution, or one
+    his own preference placed (or kept despite a hide)."""
+    from . import mailitems
+
+    return bool(_cautioned(line) or line.important or line.pinned or line.despite
+                or mailitems.FACT_PREFERENCE in _line_facts(line))
+
+
+def _restored_after(ctx: Any, line: Item, due: str) -> bool:
+    """He restored the line after its date had passed: his word that it is
+    still open outranks the calendar."""
+    from . import mailitems
+
+    end = datetime.datetime.combine(datetime.date.fromisoformat(due)
+                                    + datetime.timedelta(days=1), datetime.time()).timestamp()
+    return any((act := ctx.acts.get(m.reading.digest)) is not None
+               and act.get("verb") == mailitems.RESTORE and _f(act.get("at")) >= end
+               for m in line.mails())
+
+
 def brief_plan(report: Report, ctx: Any, listed_followups: frozenset[str]) -> None:
     """Which of the working copy's lines the brief lists, where, and which it
     only counts:
@@ -1917,38 +2036,60 @@ def brief_plan(report: Report, ctx: Any, listed_followups: frozenset[str]) -> No
       Reader's pay / reply from a first-contact sender: then it is shown once,
       in its own section, and afterwards counted (a cold pitch must not nag
       for 60 days);
-    - a line listed before is Still open, except that one open longer than
-      `BRIEF_AGEING_DAYS` with no deadline still ahead is listed on Mondays
-      only — its last morning in the window is announced whatever the day;
+    - a line listed before is Still open. No weekday decides anything (the
+      owner's decision of 2026-11-12); a passed date means what the line asks:
+      Pay and Reply stay listed, overdue on top; a dated Decide is listed the
+      day after its date as `date passed` and then counted — never one that
+      carries a caution or that his preference placed, nor one he restored
+      after its date;
+    - an undated Pay or Reply line open longer than `BRIEF_GROUP_DAYS` folds
+      into one line per kind, every day — never a cautioned line, one his
+      preference placed, or one on its last morning in the window;
     - their-turn rows are listed under `BRIEF_WAITING_LISTED_DAYS` days old."""
     today = _today(report.now)
-    monday = today.weekday() == BRIEF_LISTS_AGED_ON
     for line in report.needs[:NEEDS_SHOWN]:
         header = line.header
         line.named = bool(header is not None and ctx.correspondent(header))
         soft = (not line.asks_nothing and _line_facts(line) <= set(SOFT_FACTS)
                 and header is not None and not ctx.correspondent(header))
         due = _due(line)
-        ahead = bool(due) and due >= today.isoformat()
+        what = _lead_wanted(line)
+        kept = _never_reduced(line)
         leaving = any(m.leaving for m in line.mails())
-        aged = (report.now - line.reading.when > BRIEF_AGEING_DAYS * 86400 and not ahead)
         if soft:
             (report.brief_first_contact if line.new
              else report.brief_first_contact_counted).append(line)
-        elif line.new:
+            continue
+        if what == "decide" and due and not kept and not _restored_after(ctx, line, due):
+            passed = (today - datetime.date.fromisoformat(due)).days
+            # Every line is listed at least once before it is counted, and its
+            # last morning in the window is announced whatever its date says.
+            if passed > DATE_PASSED_LISTED_DAYS and not line.new and not leaving:
+                report.brief_date_passed.append(line)
+                continue
+            line.date_passed = passed >= DATE_PASSED_LISTED_DAYS
+        if line.new:
             report.brief_new.append(line)
-        elif aged and not monday and not leaving:
-            report.brief_aged.append(line)
+        elif (not due and what in GROUPED_WORDS and not kept and not leaving
+              and report.now - line.reading.when > BRIEF_GROUP_DAYS * 86400):
+            report.brief_grouped.setdefault(what, []).append(line)
         else:
             report.brief_open.append(line)
 
     def still_open_key(line: Item) -> tuple:
+        """Importance, not age: cautioned; overdue Pay or Reply, oldest due
+        first; dated, by date; undated Pay; Reply; undated Decide. Within a
+        tier, newest first."""
         due = _due(line)
-        if due and due < today.isoformat():
-            return (0, due, 0.0)
+        what = _lead_wanted(line)
+        newest = -line.reading.when
+        if _cautioned(line):
+            return (0, "", newest)
+        if due and due < today.isoformat() and what in ("pay", "reply"):
+            return (1, due, newest)
         if due:
-            return (1, due, 0.0)
-        return (2, "", -line.reading.when)
+            return (2, due, newest)
+        return ({"pay": 3, "reply": 4}.get(what, 5), "", newest)
 
     report.brief_open.sort(key=still_open_key)
     for row in report.yours[:FOLLOWUPS_SHOWN]:
@@ -2046,7 +2187,9 @@ def _brief_line(line: Item, clean: Clean, account: str, now: float, still_open: 
         more = len({str(m.reading.verdict.get("deadline")) for m in line.mails()
                     if re.fullmatch(r"\d{4}-\d{2}-\d{2}",
                                     str(m.reading.verdict.get("deadline") or ""))}) - 1
-        parts.append(f"due {_date_words(due, now)}" + (f" (+{more} more dates)" if more else ""))
+        shown = (f"{_date_words(due, now).split(' (')[0]} (date passed)" if line.date_passed
+                 else _date_words(due, now))
+        parts.append(f"due {shown}" + (f" (+{more} more dates)" if more else ""))
     if still_open:
         parts.append(f"open {_n_days(_days(now - line.reading.when))}")
     if any(m.leaving for m in line.mails()):
@@ -2075,7 +2218,8 @@ def brief_followup_line(row: FollowUp, clean: Clean, account: str, now: float) -
 
 def brief_headline(report: Report) -> str:
     new = len(report.brief_new) + len(report.brief_first_contact) + len(report.brief_yours_new)
-    still = len(report.brief_open) + len(report.brief_yours_open)
+    still = (len(report.brief_open) + len(report.brief_yours_open)
+             + sum(len(v) for v in report.brief_grouped.values()))
     head = f"{day_words(report.now)} — {new} new, {still} still open."
     if report.watcher_warnings:
         return "THE MAIL WATCHER IS NOT HEALTHY, this brief may be incomplete. " + head
@@ -2119,7 +2263,7 @@ def brief_counts(report: Report) -> str:
          "that ask nothing"),
         (len(report.counted_asks), "that ask with no date, amount or sender you know"),
         (len(report.brief_first_contact_counted), "unanswered from new senders"),
-        (len(report.brief_aged), "older open items (listed on Mondays)"),
+        (len(report.brief_date_passed), "whose date passed"),
         (len(report.brief_waiting_old),
          f"waiting on others over {BRIEF_WAITING_LISTED_DAYS} days"),
         (max(0, len(report.needs) - NEEDS_SHOWN), "more open items over the cap"),
@@ -2132,8 +2276,31 @@ def brief_counts(report: Report) -> str:
     ]
     listed = ", ".join(f"{n} {what}" for n, what in clauses if n) or "nothing"
     hidden = sum(len(v) for v in report.hidden.values())
+    bank = f" {bank_clause(report)}" if report.has_pay else ""
     return (f"Not listed: {listed}; {hidden} hidden by your preferences, "
-            f"{report.shown_despite} shown despite one. /mail shows everything.")
+            f"{report.shown_despite} shown despite one.{bank} /mail shows everything.")
+
+
+def grouped_line(kind: str, lines: list[Item]) -> str:
+    """`- 3 bills open longer than 14 days (oldest from 2 Oct) — …`: one line
+    for a kind's old lines with nothing new to say, and how to see them."""
+    one, many = GROUPED_WORDS[kind]
+    oldest = min(m.reading.when for line in lines for m in line.mails())
+    day = _today(oldest)
+    return (f"- {len(lines)} {one if len(lines) == 1 else many} open longer than "
+            f"{BRIEF_GROUP_DAYS} days (oldest from {day.day} {day.strftime('%b')}) — ask "
+            f"here to list them")
+
+
+def handled_line(report: Report) -> str:
+    """How many items look handled, and how many of those by a bank payment."""
+    from . import mailitems
+
+    paid = sum(1 for r in report.settled
+               if r.state is not None and r.state.source == mailitems.BANK)
+    if not paid:
+        return f"{len(report.settled)} item(s) look handled by later mail."
+    return f"{len(report.settled)} item(s) look handled ({paid} by a bank payment)."
 
 
 def render_brief(report: Report, *, clean: Clean, account: str = "") -> str:
@@ -2158,19 +2325,21 @@ def render_brief(report: Report, *, clean: Clean, account: str = "") -> str:
             + [brief_followup_line(f, clean, account, now) for f in report.brief_yours_new])
     section("Still open",
             [brief_line(i, clean, account, now, still_open=True) for i in report.brief_open]
+            + [grouped_line(kind, report.brief_grouped[kind])
+               for kind in GROUPED_WORDS if report.brief_grouped.get(kind)]
             + [brief_followup_line(f, clean, account, now) for f in report.brief_yours_open])
     section("New, from senders you have not dealt with",
             [brief_line(i, clean, account, now) for i in report.brief_first_contact])
     section("Waiting on others",
             [brief_followup_line(f, clean, account, now) for f in report.brief_waiting])
     section("Senders on your cases", _brief_trust(report, clean))
-    if not any((report.reminders, report.brief_new, report.brief_open,
+    if not any((report.reminders, report.brief_new, report.brief_open, report.brief_grouped,
                 report.brief_first_contact, report.brief_yours_new,
                 report.brief_yours_open, report.brief_waiting, report.brief_trust_drawn)):
         lines += ["", "Nothing needs you."]
     lines.append("")
     if report.settled:
-        lines.append(f"{len(report.settled)} item(s) look handled by later mail.")
+        lines.append(handled_line(report))
     lines.append(brief_counts(report))
     text = "\n".join(lines)
     if len(text) > REPORT_MAX_CHARS:
@@ -2393,11 +2562,14 @@ def run(
     sleep: Callable[[float], None] = time.sleep,
     out: Callable[[str], None] = print,
     working_copy: bool = False,
+    bank_sync: Callable[[float], Any] | None = None,
 ) -> int:
     """One report. `dry_run` prints it and writes NOTHING — no ledger, no
-    lock, no counters — and sends nothing. A day already delivered is not
-    delivered again (the server's dedup does not survive its restart; this
-    ledger does)."""
+    lock, no counters, no bank sync — and sends nothing. A day already
+    delivered is not delivered again (the server's dedup does not survive its
+    restart; this ledger does). `bank_sync` (`mailbank.plugin_sync`) refreshes
+    the bank ledger first, at most once a day, under `mailbank.SYNC_LIMIT_S`;
+    None runs no sync."""
     day = time.strftime("%Y-%m-%d", time.localtime(now))
     if not dry_run and since is None and any(
         e.get("day") == day and e.get("status") in TODAY_STATUSES
@@ -2405,7 +2577,17 @@ def run(
     ):
         out(f"[mailreport] today's report ({day}) was already delivered — nothing sent")
         return 0
-    report = build(state_dir, now=now, since=since, clean=clean)
+    synced = None if dry_run or bank_sync is None else _sync_bank(state_dir, day, bank_sync)
+    report = build(state_dir, now=now, since=since, clean=clean, bank_sync=synced)
+    pairs_recorded, pairs_unrecorded = 0, ""
+    if not dry_run and report.bank_new_pairs:
+        pairs_recorded = _record_bank_pairs(state_dir, report, now)
+        if not pairs_recorded:
+            # A payment not recorded is not spent, so the brief must not
+            # present it as settling anything: rebuilt on recorded pairs only.
+            pairs_unrecorded = "the item acts' lock was held; new bank pairs were not recorded"
+            report = build(state_dir, now=now, since=since, clean=clean, bank_sync=synced,
+                           bank_new_pairs=False)
     text = render(report, clean=clean, account=account)
     brief_failed = ""
     try:
@@ -2428,7 +2610,11 @@ def run(
                                  "counts": report.counts(), "since": report.since,
                                  "missed": len(report.missed),
                                  "missed_digests": report.missed,
+                                 "bank": bank_entry(report),
                                  **({"brief_failed": brief_failed} if brief_failed else {})}
+        entry["bank"]["pairs_recorded"] = pairs_recorded
+        if pairs_unrecorded:
+            entry["bank"]["pairs_unrecorded"] = pairs_unrecorded
         if not token:
             delivery = Delivery(FAILED, error="no /trigger token (Keychain aish/AISH_WEB_TOKEN "
                                               "or env) — nothing was sent")
@@ -2451,6 +2637,37 @@ def run(
                     if k not in ("digests", "counted", "followups", "missed_digests", "brief")},
                    sort_keys=True))
     return 0 if delivery.status in TODAY_STATUSES else 1
+
+
+def _sync_bank(state_dir: os.PathLike | str, day: str, sync: Callable[[float], Any]) -> Any:
+    """Today's bank sync, at most once a day: an attempt already recorded for
+    today is not repeated (the bank caps unattended access). Any exception
+    in the seam is a failed sync, named by its type."""
+    from . import mailbank
+
+    tried = (mailbank.SYNC_OK, mailbank.SYNC_FAILED, mailbank.SYNC_TIME_LIMIT,
+             mailbank.SYNC_SECRETS)
+    if any(e.get("day") == day and (e.get("bank") or {}).get("sync") in tried
+           for e in read_ledger(state_dir)):
+        return mailbank.SyncOutcome(mailbank.SYNC_DONE_TODAY,
+                                    "a sync was already attempted today")
+    try:
+        return sync(mailbank.SYNC_LIMIT_S)
+    except Exception as exc:  # noqa: BLE001 — the owner's plugin must not cost the morning
+        return mailbank.SyncOutcome(mailbank.SYNC_FAILED, f"the sync raised {type(exc).__name__}")
+
+
+def _record_bank_pairs(state_dir: os.PathLike | str, report: Report, now: float) -> int:
+    """The pairs this build made first, recorded under the item acts' lock —
+    from here on each payment is spent."""
+    from . import mailbank, mailitems
+
+    if not report.bank_new_pairs:
+        return 0
+    with mailitems.acts_lock(state_dir) as held:
+        if not held:
+            return 0
+        return mailbank.record_pairs(state_dir, report.bank_new_pairs, now=now, by="report")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2478,7 +2695,7 @@ def main(argv: list[str] | None = None) -> int:
         for line in mailprefs.seed(paths.state_home(), now=time.time()):
             print(f"[mailreport] {line}")
         return 0
-    from . import email_poll
+    from . import email_poll, mailbank
     from .cli import _mail_cell  # `/mail`'s sanitiser (`cli._plain`): one sanitiser
 
     now = time.time()
@@ -2503,6 +2720,7 @@ def main(argv: list[str] | None = None) -> int:
         working_copy=args.working_copy,
         account=args.account, base=os.environ.get("AISH_WEB_URL", DEFAULT_URL),
         token="" if args.dry_run else email_poll.read_token(), post=email_poll.http_post,
+        bank_sync=None if args.dry_run else mailbank.plugin_sync,
     )
 
 

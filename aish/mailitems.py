@@ -16,7 +16,8 @@ Whether a needs item earns its own line in the brief is `Context.line_facts`
 — recorded facts only — and `mailsettle.showable` reads the same test.
 
 **Whether an item is still open** is `Context.state_of`, from four sources in a
-fixed order — his word, then a verified judgement, then a deterministic rule:
+fixed order — his word, then a verified judgement, then a deterministic rule,
+then the bank:
 
 1. **His acts** (`owner`): `resolve` / `restore` on the anchor (the
    `inbox_items` tool, this module's acts ledger), and a case he CLOSED that
@@ -36,8 +37,14 @@ fixed order — his word, then a verified judgement, then a deterministic rule:
    counterparty in its conversation. Never conversation membership: a stranger
    can join a conversation by naming a Message-ID; only his own header names
    what he answered.
+4. **A bank payment** (`bank`, the owner's decision of 2026-11-12): an
+   outgoing booked transaction in his bank plugin's ledger whose amount is one
+   recorded for an open Pay item's mail, booked in its window, and tied to it
+   by more than the amount (`mailbank.match`); each payment settles at most
+   one item, ever (`mailbank.assign`). Never a Reply or Decide item, never one
+   carrying a caution mark.
 
-Settled by a judgement or the rule is **probably settled**: the report demotes
+Settled by a judgement, the rule or the bank is **probably settled**: the report demotes
 it into a named, restorable line; only his word removes an item (or the
 window). Every clock is aish's FIRST-READ clock (`first_read`), never a
 sender-written date.
@@ -64,6 +71,7 @@ from typing import Any
 
 from . import (
     atomic_write,
+    mailbank,
     mailcases,
     mailgate,
     mailindex,
@@ -77,7 +85,7 @@ NEEDS, YOURS, THEIRS = "needs", "yours", "theirs"
 KINDS = (NEEDS, YOURS, THEIRS)
 
 OPEN, SETTLED, CANNOT_TELL = "open", "settled", "cannot_tell"
-OWNER, JUDGE, RULE = "owner", "judge", "rule"
+OWNER, JUDGE, RULE, BANK = "owner", "judge", "rule", "bank"
 RESOLVE, RESTORE = "resolve", "restore"
 VERBS = (RESOLVE, RESTORE)
 
@@ -157,6 +165,12 @@ class Evidence:
     # (`mailindex.shown_party`): a Bcc-only recipient is `BCC_RECIPIENT`.
     to: tuple[str, ...] = ()
     when: float = 0.0  # the evidence mail's own time, for display (logic reads first_read)
+    # A bank payment (`mailbank`): the transaction's own amount and booking
+    # date — the only parts of it any reader renders — its id and the tie.
+    bank_amount: tuple[str, int] | None = None
+    bank_date: str = ""
+    bank_tx: str = ""
+    bank_tie: str = ""
 
     @classmethod
     def of(cls, ctx: Context, header: mailindex.Header, tier: str) -> Evidence:
@@ -183,8 +197,9 @@ class State:
 
     @property
     def probably(self) -> bool:
-        """Demoted, not removed: a judgement or the rule, never his word."""
-        return self.state == SETTLED and self.source in (JUDGE, RULE)
+        """Demoted, not removed: a judgement, the rule or a bank payment,
+        never his word."""
+        return self.state == SETTLED and self.source in (JUDGE, RULE, BANK)
 
 
 # ---------------------------------------------------------------- his own mail
@@ -418,6 +433,11 @@ class Context:
         for case in self.store.cases.values():
             for _at, digest in case.mails:
                 self._cases_of.setdefault(digest, []).append(case)
+        # The bank (`mailbank`), read only when a Pay item asks for it.
+        self._bank: mailbank.Bank | None = None
+        self._bank_pairings: dict[str, mailbank.Pairing] | None = None
+        # False: only pairs already recorded settle anything (`mailbank.assign`).
+        self.bank_new_pairs = True
         self._passed: dict[str, float] = {}
         for reading in self.readings.values():
             header = self.index.get(reading.digest)
@@ -705,8 +725,58 @@ class Context:
     # -- the state
 
     def state_of(self, item: OpenItem) -> State:
-        """Is this item open? His word, then a verified judgement, then the
-        rule — see the module docstring for each source's law."""
+        """Is this item open? His word, then a verified judgement, then his
+        own reply (the rule), then a bank payment — see the module docstring
+        for each source's law."""
+        state = self._state_before_bank(item)
+        if state.state == SETTLED:
+            return state
+        paired = self.bank_pairings().get(item.key)
+        if paired is None:
+            return state
+        tx = paired.tx
+        return State(SETTLED, BANK, state.at, Evidence(
+            tier="bank", bank_amount=(tx.currency, tx.cents), bank_date=tx.booking_date,
+            bank_tx=tx.id, bank_tie=paired.tie), revived=state.revived,
+            restored_at=state.restored_at)
+
+    @property
+    def bank(self) -> mailbank.Bank:
+        if self._bank is None:
+            self._bank = mailbank.Bank(self.state_dir, self.now)
+        return self._bank
+
+    def pay_item(self, item: OpenItem) -> bool:
+        """A needs item whose reading wants `pay` — the only kind a bank
+        payment may settle (never Reply or Decide)."""
+        reading = self.readings.get(item.anchor)
+        return (item.kind == NEEDS and reading is not None
+                and str(reading.verdict.get("wanted") or "") == "pay")
+
+    def cautioned(self, digest: str) -> bool:
+        """Any caution mark on the mail: on its newest record, or the floor's."""
+        reading = self.readings.get(digest)
+        return bool(self.caution(digest)
+                    or mailreport.caution_marks(reading.record if reading else None))
+
+    def bank_pairings(self) -> dict[str, mailbank.Pairing]:
+        """item key -> the bank payment that settles it (`mailbank.assign`),
+        over the open Pay items of the window — none cautioned, none his
+        word, a judgement or his reply already settled. Computed once."""
+        if self._bank_pairings is None:
+            eligible: list[tuple[OpenItem, float]] = []
+            if self.state_dir is not None and mailbank.ledger_path(self.state_dir).is_file():
+                for row in self.derive().needs:
+                    item = row.open_item
+                    if item is None or not self.pay_item(item) or self.cautioned(item.anchor):
+                        continue
+                    base = self._state_before_bank(item)
+                    if base.state != SETTLED:
+                        eligible.append((item, base.restored_at))
+            self._bank_pairings = mailbank.assign(self, eligible) if eligible else {}
+        return self._bank_pairings
+
+    def _state_before_bank(self, item: OpenItem) -> State:
         state = State()
         act = self.acts.get(item.anchor)
         if act is not None and act.get("verb") == RESTORE:

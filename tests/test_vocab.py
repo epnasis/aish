@@ -135,9 +135,10 @@ class TestTheCountingChangedNoMatching:
         # pressed where `Kup teraz` is refused. Not one other word moved.
         "aish/browse.py:_MUTATING_WORDS": {"added": ["zamawiam"], "removed": []},
         # Not a word list: trace step KINDS stamped with turn and call ids
-        # (contract §2). `outcome` (§3.18) is a rendered step a reader joins
-        # to its turn, so it is stamped like the others.
-        "aish/agent.py:TURN_STAMPED_STEPS": {"added": ["outcome"], "removed": []},
+        # (contract §2). `outcome` (§3.18), already in the baseline, is a
+        # rendered step a reader joins to its turn; so is `item_act` (§3.25)
+        # since it became a drawn row (slice 1c, 2026-11-12).
+        "aish/agent.py:TURN_STAMPED_STEPS": {"added": ["item_act"], "removed": []},
         # `arch -arm64 <cmd>` runs <cmd>, and the `brew` alias expands to it:
         # a saved bare `arch` rule auto-approved `brew install` (agent-core.md,
         # "`arch` is a launcher"). Not a word list either — a command list.
