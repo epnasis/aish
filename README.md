@@ -178,7 +178,7 @@ unless you explicitly *Share* a selection.
 | `inbox_preferences` | your standing feedback on the daily inbox report, said in the report chat in your own words: *hide mail from familysafety@microsoft.com*, *hide mail addressed to my son*, *show my accountant first*, *Hetzner invoices are important* (entity + meaning: money, documents or anything — the card previews which past mails it would and would not have matched), *that's not a follow-up* (a person, standing), *remind me every Monday / on 30 Nov / if they haven't answered in a week*, *this one needed action* or *this was junk*. Each becomes one plain sentence aish composes and you save on its card; the report obeys it from the next morning and always ends with *Using N of your preferences — hid M items*, naming what each one hid. **A hide never hides a mail flagged as a risk** (suspicious, sender not matching its case, a changed payment account, a failed sign-in check from a sender that passed before) — it is shown, marked why. Reminders appear only inside the report; corrections are recorded as your ground truth and not applied. `/mail preferences` lists them in the terminal. aish must not say it will remember something unless the tool answered SAVED | listing is free; **every add, edit or delete is a card**, only in a task you sent |
 | `inbox_items` | the items of the daily inbox report: *the Catherine one is done*, *that offer I already answered*, *no, that is still open*. `resolve` takes an item out of the report (new mail in its conversation brings it back); `restore` keeps it open, out of *Probably settled*. The report's `[done]` and `[restore]` buttons send exactly those words. `vouch` lets mail from ONE exact domain (a courier, a payment provider) settle one kind of item — *delivery* or *payment* — that it otherwise could not; the report offers it as a button on the line that says aish did not weigh that mail, and `revoke` takes it back. aish must not say a matter is done unless the tool answered SAVED | listing is free; **resolve and restore apply with no card** in a task you sent (since 2026-11-12: your word decides) and show up in the chat as a row saying what was marked, written by aish's code — except resolving an item marked CAUTION, which is always a card; `vouch` / `revoke` are cards; never in a task you did not send |
 | `read_docs` | man page → `--help` fallback, full-text topic search | auto |
-| `remember` / `forget_memory` | save or prune one fact in structured memory | auto (echoed) |
+| `remember` / `forget_memory` | save or prune one fact in structured memory; with `about`, the fact goes to that person's, organisation's, account's or interest's file instead | auto (echoed); an `about` save never asks — the file's section says whose word it is |
 | `read_skill` / `recall` | load a playbook; ranked search across skills, memory & past sessions | auto (echoed) |
 | `create_skill` | save or update a **skill** playbook — aish locates and composes the file itself, and a new name too similar to an existing skill is refused with that skill's name | **diff + y/N** |
 | `create_tool` | author a reusable **plugin tool** (validated `TOOL.md` + wrapper) | **diff + y/N**; refuses to write an invalid manifest |
@@ -597,6 +597,22 @@ thousands of entries without bloating the context.
   retires an entry without deleting it. Saving a near-duplicate of an
   existing memory is refused with the existing entry's name, so the corpus
   consolidates instead of accumulating variants.
+- **Files on people, organisations, accounts and interests** — one file each in
+  `~/.local/state/aish/knowledge/` (`people/`, `organisations/`, `accounts/`,
+  `interests/` — the state tree: no git history and no GitHub backup),
+  written when aish saves a fact about one during a chat (`remember` with
+  `about`). Each file keeps two sections: **From him** — what you said in a chat
+  that never read anything from outside this machine — and **Read somewhere** —
+  everything else, including whatever an automated run saved. Only From him is
+  ever put in front of the model unasked: when your message names the person
+  (name or any form of it in `aliases:`, Polish inflections and missing
+  diacritics included), their From him lines ride along, and the Read somewhere
+  lines are only counted, with a pointer to look them up — which marks the
+  task as having read outside content. A name or alias that came from outside
+  matches nothing until you say it yourself or edit the file. Account files
+  never hold a full account or card number (the save is refused; keep it with
+  `aish secret set`). aish's file tools and shell never touch these files; you
+  can edit them in your own editor. `/who [words]` lists them, or opens one.
 - **Rules** — the one artifact class that is **binding**. A skill *may* be
   consulted, a memory *may* be recalled, a tool *may* be invoked; a rule is
   enforced by aish itself, whatever the model concludes. One markdown file per
@@ -1180,7 +1196,11 @@ detaches it into a background job that survives aish exiting (`/jobs` lists them
 older `/session` still works), `/help`, `/quit`.
 
 **Other commands**: `aish trash <list|restore NAME|delete NAME>` (see below),
-`aish secret`, `aish skill`, `aish explain`, `aish usage`, `aish personal`.
+`aish secret`, `aish skill`, `aish explain`, `aish usage`, `aish personal`,
+`aish paynotes` (the payment notes index aish-web builds from the vault's
+`Payments/` folder: counts, age and last outcome only; it reads the index and
+cannot refresh it — only aish-web can open the vault; `AISH_PAYNOTES=0` stops
+aish-web building it).
 
 **Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
 `vi_mode`, and an `[aliases]` table (aish-level aliases, since commands run

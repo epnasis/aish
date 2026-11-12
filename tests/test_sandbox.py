@@ -611,7 +611,7 @@ class BlockingSandbox(PassThroughSandbox):
         self.release = threading.Event()
         self.reading = threading.Event()
 
-    def prepare(self, roots, scratch, protected=(), path_env=None):
+    def prepare(self, roots, scratch, protected=(), path_env=None, sealed=()):
         confinement = super().prepare(roots, scratch, protected, path_env)
         owner = self
 
@@ -762,7 +762,7 @@ class LateLogSandbox(PassThroughSandbox):
         super().__init__()
         self.calls = 0
 
-    def prepare(self, roots, scratch, protected=(), path_env=None):
+    def prepare(self, roots, scratch, protected=(), path_env=None, sealed=()):
         confinement = super().prepare(roots, scratch, protected, path_env)
         owner = self
 

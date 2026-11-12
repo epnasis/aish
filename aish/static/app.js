@@ -1653,6 +1653,7 @@ function handle(event) {
     case "model_list": renderModels(event); break;
     case "model_changed": onModelChanged(event); break;
     case "cwd_changed": renderWorkspace(event); break;
+    case "who_list": $("who-text").textContent = event.text || "—"; break;
     case "job_list":
       $("ws-jobs").textContent = event.text || "—";
       // Long enough to read how to end it (⌘Q, or /browser close).
@@ -3459,6 +3460,12 @@ function traceStep(step) {
     const parts = [];
     if (nSkill) parts.push(`${nSkill} skill${nSkill === 1 ? "" : "s"}`);
     if (nMem) parts.push(`${nMem} ${nMem === 1 ? "memory" : "memories"}`);
+    // The name rail (slice 2): files named in his message — counted by name,
+    // since one file can be both preloaded and pointed at.
+    const rail = step.entities || {};
+    const named = new Set([...(rail.preloaded || []), ...(rail.pointers || [])]
+      .map((f) => f.label).concat((rail.ambiguous || []).flatMap((a) => a.labels || [])));
+    if (named.size) parts.push(`${named.size} named file${named.size === 1 ? "" : "s"}`);
     const { main, row } = traceRow(
       t, traceSvg("knowledge", "var(--yellow)"), "Recalled knowledge",
       `${parts.join(" · ") || items.length} from past work`
@@ -9509,6 +9516,7 @@ const SLASH_COMMANDS = [
   ["/objective edit", "set the objective in your own words"],
   ["/plan", "aish's own plan for the objective — drop a task or ask for a replan"],
   ["/tasks", "your automations — pause, resume, run now or delete one"],
+  ["/who", "aish's files on people, organisations, accounts and interests"],
   ["/run-now", "run this chat's automation now (or /run-now <id>) — its schedule is unchanged"],
   ["/help", "about aish web"],
 ];
@@ -9992,6 +10000,12 @@ function handleSlash(text) {
     // toggle and shredder. Typed only, like every slash ([CHIP-NEVER-COMMANDS]);
     // the sheet's own buttons are DOM, never model output.
     case "/tasks": openAutomationsSheet(); return true;
+    // The owner's own search of the entity files (slice 2): the answer is
+    // painted into a sheet for him and never reaches a model. Typed only,
+    // like every slash ([CHIP-NEVER-COMMANDS]).
+    case "/who":
+      openSheet("who-sheet");
+      return send({ type: "who", query: arg });
     // The run history (#5 S4) and the inbox assistant's shadow results (#142
     // W5 S1.5) are the terminal's. Said, not "unknown": the command exists,
     // and saying where it lives is the answer.

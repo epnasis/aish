@@ -510,6 +510,16 @@ The preflight record is the template #197's abstention requirement generalises f
 2. **By position** (`located: "brief_position"`) only when the record has NO stamp — a log older than this key: the one system part not at position 0, on the writer's word that it keeps exactly one per-task system message beside the standing prompt (#386). A brief of another shape is `not_located`.
 3. **A stamp that matches no part is `not_on_brief`**, a state of its own — the writer said which message it made and the brief has no part with that digest. It is NOT `not_located` (that one means *the reader cannot tell*; this one means *the two records disagree*), and it is never a fallback to rule 2: the brief may well have the positional shape, so position would FIND a text, and showing it would be a guess wearing the stamp's authority. The renderer says the two records disagree and names no cause — *why* they disagree is not on record, and "aish does not know why" is the sayable ending (`docs/agent-core.md` L8).
 
+**`entities` (slice 2, 2026-11-12)** — what the name rail selected (`docs/knowledge-layer.md`, "Files on people, organisations, accounts and interests"), present only when it selected something: `{"preloaded": [{label, kind}], "pointers": [{label, kind, lines}], "ambiguous": [{labels, kinds}]}`. `label` is the file's name (or its slug while unconfirmed), `kind` one of `person`/`org`/`account`/`interest`, `lines` the COUNT of *Read somewhere* lines a pointer stands for — names and counts only, never a fact, per the names-only rule. Additive key; `items[]` keeps preflight's entries alone, so `curate.scan_ledger` (§8.8) is untouched. The step is now also emitted when the rail selected something and preflight admitted nothing (then `items: []`), so absent-key on a step means the rail matched nothing; absent step still means nothing was preloaded by either.
+
+```json
+{"kind": "knowledge", "turn": 3, "mode": "semantic", "items": [],
+ "entities": {"preloaded": [{"label": "Anna Kowalska", "kind": "person"}],
+              "pointers": [{"label": "Anna Kowalska", "kind": "person", "lines": 2}],
+              "ambiguous": []},
+ "reminder": "9f86d0…"}
+```
+
 The three refusal states #386 shipped (`not_recorded` with its two `why`s, `purged`, `not_located`) are unchanged in meaning; `not_on_brief` is a fifth beside them. `TestTheKnowledgeStep` (`tests/test_explain.py`) drives the real seed path and pins `reminder == digest_of(<the system message the fake backend received>)` and `located == "brief_digest"`, an unstamped fixture resolving positionally, the disagreeing fixture refusing, and a three-part brief resolving by digest where position could not; `tests/js/test_knowledge_step.js` pins the wording of each join and the causeless wording of `not_on_brief`.
 
 ### 3.9 · `incident` — the #197 unit itself

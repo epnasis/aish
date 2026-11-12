@@ -608,3 +608,4 @@ So a wire test whose SUBJECT is whether a card appears reads events into a list 
 - **The Agent's own gates** — origin-scoped egress and knowledge writes, approval verdicts, session scope: `docs/agent-core.md`.
 - **The log format and replay** — `reconstruct_events`, activity stamps, redaction records: `docs/session-log.md`.
 - **Trace record shapes** — `docs/trace-contract.md` (binding) and `docs/trace-records.md` (rationale).
+- **The payment notes index** — the refresher `startup` launches beside the scheduler, on its own thread, because only this process can open the vault: `docs/payments.md`.

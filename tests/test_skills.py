@@ -837,6 +837,26 @@ class TestPreflight:
             f"---\nname: {name}\ndescription: playbook for {name}\n{kw}---\n{body}\n",
         )
 
+    def test_a_long_remembered_fact_cannot_take_the_total_past_the_budget(self, tmp_path):
+        """A remembered fact's description IS the fact and rides in the block
+        header, which was never capped: a 5,000-character one took a 1,000
+        budget to 5,000 (found by the entity rail's budget test, slice 2)."""
+        save_memory("kettle " + "x" * 5000, skills_module.GLOBAL_MEMORY_DIR, name="kettle")
+        preload = preflight(
+            str(tmp_path), None, "kettle", char_budget=1000,
+            semantic=lambda _q, entries: {id(e): 0.9 for e in entries},
+        )
+        assert preload.names == ["kettle"]
+        assert len(preload.text) <= 1000 and preload.text.endswith("…")
+
+    def test_slots_narrow_what_may_be_injected(self, tmp_path):
+        for n in range(4):
+            save_memory(f"kettle fact {n}", skills_module.GLOBAL_MEMORY_DIR,
+                        name=f"kettle-{n}", force=True)
+        everything = {"semantic": lambda _q, entries: {id(e): 0.9 for e in entries}}
+        assert len(preflight(str(tmp_path), None, "kettle", **everything).names) == 4
+        assert len(preflight(str(tmp_path), None, "kettle", slots=2, **everything).names) == 2
+
     def test_reverse_match_on_keyword_in_long_task(self, tmp_path, monkeypatch):
         # A multi-sentence task never satisfies the forward all-words tiers;
         # the entry's keyword appearing IN the task must be enough.
@@ -2126,6 +2146,29 @@ def test_suite_never_reaches_the_real_knowledge_store():
     save_memory("a probe from the test suite", skills_module.GLOBAL_MEMORY_DIR, name="pin-probe")
     assert (skills_module.GLOBAL_MEMORY_DIR / "pin-probe.md").exists()
     assert not (DEFAULT_CONFIG_HOME / "memory" / "pin-probe.md").exists()
+
+
+def test_suite_never_reaches_the_real_entity_files():
+    """The entity files (slice 2) hold personal data, live in the STATE tree
+    and are written with no card, so they get the same pin: the tree resolves
+    inside this test's isolated state dir, the session guard watches the real
+    one, and a real write lands in the tmp tree."""
+    from pathlib import Path
+
+    from aish import entities
+    from aish.paths import DEFAULT_STATE_HOME
+    from tests.conftest import REAL_ENTITY_TREES
+
+    isolated = Path(os.environ["AISH_STATE_DIR"])
+    root = entities.knowledge_root()
+    assert root == isolated / "knowledge"
+    assert not root.is_relative_to(DEFAULT_STATE_HOME)
+    assert DEFAULT_STATE_HOME / "knowledge" in REAL_ENTITY_TREES
+    assert set(entities.entity_dirs()) == {"person", "org", "account", "interest"}
+
+    entities.save_fact("person", "Probe Person", "a probe", from_him=True, chat="t")
+    assert (entities.entity_dirs()["person"] / "probe-person.md").exists()
+    assert not (DEFAULT_STATE_HOME / "knowledge" / "people" / "probe-person.md").exists()
 
 
 class TestPlanSkill:

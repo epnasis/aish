@@ -77,7 +77,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `session.py` | `docs/session-log.md` |
 | `server.py`, `pty_session.py`, `email_poll.py`, `schedule.py`, `scheduler.py`, `schedule_task` | `docs/web-server.md` |
 | `aish/static/` (`app.js`, `style.css`, `sw.js`) | `docs/web-frontend.md` |
-| `skills.py`, `embeddings.py`, `curate.py`, `skill_import.py`, `skill_runner.py`, `skill_env.py`, `skill_grants.py`, `use_skill` | `docs/knowledge-layer.md` (+ `docs/sandbox.md` "Tier S" for the runner's profile) |
+| `skills.py`, `embeddings.py`, `curate.py`, `skill_import.py`, `skill_runner.py`, `skill_env.py`, `skill_grants.py`, `use_skill`, `entities.py` | `docs/knowledge-layer.md` (+ `docs/sandbox.md` "Tier S" for the runner's profile) |
 | `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
 | `roles.py`, `aish/charters/`, `web_search`'s rendering, anything a role reads or a charter declares | `docs/roles.md` |
 | `objective.py`, the tracker charter, the `objective` record, the objective strip, anything that reads or writes what a chat is FOR | `docs/objective.md` |
@@ -90,6 +90,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `usage.py`, `aish usage`, anything that reports or attributes token spend | `docs/token-accounting.md` |
 | `vocab.py`, `aish vocab`, **any list of words matched against page text, a control label, error text or a command name** | `docs/vocabularies.md` |
 | `export.py` | `docs/export-pdf.md` |
+| `paynotes.py`, `aish paynotes`, anything that reads the owner's bill notes | `docs/payments.md` |
 | `replay.py`, `replay_driver.py`, `replay_checks.py`, `evals/`, `aish-replay` | `docs/replay.md` |
 | `mailbank.py` (the bank as a settlement source: the daily `bank_sync` run, the read-only ledger, amounts recorded at ingest, the match and the pairing ledger) | `docs/mail-assistant.md` §The bank as a settlement source |
 | `mailindex.py`, `mailgate.py`, `mailcases.py`, `mailreader.py`, `mailverdicts.py`, `mailwatch.py`, `mailsource.py`, `mailtuta.py`, `mailview.py` (`/mail`), `mailbacktest.py`, `mailcasetool.py` (the `cases` tool), `mailprefs.py` (the `inbox_preferences` tool), `mailitems.py` (open items and their settlement), `mailsettle.py` (the settlement judge), `mailitemtool.py` (the `inbox_items` tool), `mailvouch.py` (his settler vouches), the mail-reader and item-settler charters, the `mail_verdict`, `case_act`, `preference_act` and `item_act` records | `docs/mail-assistant.md` |
@@ -149,6 +150,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`mailbank.py`** — the bank closes paid bills (2026-11-12): the owner's `bank_sync` plugin run once a day by code, his ledger read READ-ONLY (absent, foreign or locked = "could not check", never "unpaid"), amounts recorded at ingest, and a match that needs the amount AND a tie; each payment is spent once. → `docs/mail-assistant.md`
 - **`schedule.py` + `scheduler.py`** — the owner's one-shot automations: inert JSON files written only through `schedule_task`'s card (never from a triggered session; other model writes are fenced, with a named open gap for writes made inside approved scripts/plugins), fired by a loop inside aish-web through the SAME guarded seam `/trigger` uses. The fired ledger in the state tree is the one authority on what ran. → `docs/web-server.md`
 - **`skills.py`** — the knowledge store (skills + memory): progressive disclosure, pre-flight injection, lifecycle. → `docs/knowledge-layer.md`
+- **`entities.py`** — the files on people, organisations, accounts and interests: two sections (*From him* / *Read somewhere*) that only its writer chooses, by whether the CHAT ever read outside content; the name rail preloads *From him* alone, and recall's rendering of the rest taints. → `docs/knowledge-layer.md`
 - **`embeddings.py`** — the semantic layer over retrieval. Lexical word-matching is the guaranteed floor; embeddings are an upgrade, never a dependency. → `docs/knowledge-layer.md`
 - **`curate.py`** — the retrieval self-curation loop; the orchestration lives in the script, not in a model session. → `docs/knowledge-layer.md`
 - **`skill_import.py` + `import_skill`** — import a skill from a git repo or local path under ONE consolidated review. Safety is enforced in code, not by asking the model. → `docs/knowledge-layer.md`
@@ -201,6 +203,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`usage.py`** — what was spent and what filled the context that made it cost that. A pure
   scan over the logs, under the same reader law as `explain`; it reports what was RECORDED
   and says plainly what it cannot know. → `docs/token-accounting.md`
+- **`paynotes.py`** — the payment notes index: aish-web, the only process that can open the vault, lists and reads `Payments/` through the owner's obsidian plugin tools (never a vault path) and writes a typed, 0600 index to the state tree; disagreements are recorded, never resolved; no index is never zero bills. → `docs/payments.md`
 - **`export.py`** — local Markdown → PDF for the web UI; the text never leaves the machine. → `docs/export-pdf.md`
 - **`atomic_write.py`** — the ONE write-through-temp helper: scratch name unique per CALL, removed on every failure path, yields to a concurrent winner for content-addressed stores. A PID-named scratch is unique per process only, and aish-web is one process (#395). → `docs/diagnostics.md`
 - **`dir_ignore.py`** — the configurable gitignore-style ignore list shared by the web folder browser and @-file completion. Name-level `fnmatch` on basenames only — it must never add a per-subfolder stat. → `docs/cli.md`

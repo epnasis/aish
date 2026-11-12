@@ -743,6 +743,22 @@ TOOL_SCHEMAS: list[dict] = [
                             "duplicate."
                         ),
                     },
+                    "about": {
+                        "type": "string",
+                        "description": (
+                            "You MUST set it when the fact is about a person, "
+                            "organisation, account or a topic he follows: "
+                            "'<kind>:<name>', kind person|org|account|interest, e.g. "
+                            "'person:Anna Kowalska'. Never a full account or card number."
+                        ),
+                    },
+                    "aliases": {
+                        "type": "string",
+                        "description": (
+                            "With about: other forms of the name, comma-separated, "
+                            "Polish inflections included (e.g. 'Ania, Ani, Anią')."
+                        ),
+                    },
                 },
                 "required": ["note"],
             },

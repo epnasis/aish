@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from aish import browser as browser_module
+from aish import entities as entities_module
 from aish import notify as notify_module
 from aish import ratelimit as ratelimit_module
 from aish import rule_compiler as rule_compiler_module
@@ -19,7 +20,7 @@ from aish import signin as signin_module
 from aish import skills as skills_module
 from aish import token_ratio as token_ratio_module
 from aish import tool_plugins as tool_plugins_module
-from aish.paths import DEFAULT_CONFIG_HOME, config_home
+from aish.paths import DEFAULT_CONFIG_HOME, DEFAULT_STATE_HOME, config_home, state_home
 
 # Resolved HERE, at conftest import, and not inside the guard below: this is the
 # last moment that is definitively before any fixture has moved AISH_CONFIG_HOME,
@@ -36,6 +37,23 @@ REAL_CORPUS_DIRS = tuple(
         *(root / name for name in ("memory", "skills", "vendor-skills", "rules", "tools")),
     )
 )
+
+# The entity files (slice 2) live in the STATE tree, which the guard above
+# deliberately leaves alone (the owner's server writes there constantly). This
+# one subtree is guarded on its own: nothing else writes it but `remember`,
+# and it is personal data. Read here, at conftest import, for the reason given
+# for `_CORPUS_ROOTS`: before any fixture moved AISH_STATE_DIR.
+_STATE_ROOTS = dict.fromkeys((state_home(), DEFAULT_STATE_HOME))
+REAL_ENTITY_TREES = tuple(root / "knowledge" for root in _STATE_ROOTS)
+
+
+def _tree_listing(root: Path) -> set[str]:
+    """Every path under `root`, relative, or nothing when it is not there.
+    Never creates it."""
+    try:
+        return {str(path.relative_to(root)) for path in root.rglob("*")}
+    except OSError:
+        return set()
 
 
 def _corpus_listing(directory: Path) -> set[str]:
@@ -299,6 +317,17 @@ def no_background_objective(monkeypatch, no_inherited_aish_env):
 
 
 @pytest.fixture(autouse=True)
+def no_background_paynotes(monkeypatch, no_inherited_aish_env):
+    """No server started by a test refreshes the payment notes index.
+
+    The tools dir is already the suite's empty one, so a refresh would only
+    write a "no tool" index — but it would write it into every test's state
+    dir from a thread no test controls. Tests of the refresher clear the
+    variable; see test_paynotes.py."""
+    monkeypatch.setenv("AISH_PAYNOTES", "0")
+
+
+@pytest.fixture(autouse=True)
 def no_real_secrets(tmp_path_factory, monkeypatch):
     """Never read the developer's real login Keychain.
 
@@ -355,6 +384,36 @@ def no_real_secrets(tmp_path_factory, monkeypatch):
     yield
     secrets_module._invalidate()
     secrets_module._invalidate_personal()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def no_writes_to_the_real_entity_tree():
+    """The suite must leave the owner's real `<state>/knowledge` untouched
+    (slice 2). The state guard above is deliberately absent, so this subtree
+    gets its own: a full listing at session start and end. The scar it is
+    for: a test once undid the suite's isolation mid-run and wrote a fixture
+    into the owner's real memory folder."""
+    before = {root: _tree_listing(root) for root in REAL_ENTITY_TREES}
+    yield
+    changed = []
+    for root, names in before.items():
+        now = _tree_listing(root)
+        changed += [f"{root / n} (added)" for n in sorted(now - names)]
+        changed += [f"{root / n} (deleted)" for n in sorted(names - now)]
+    assert not changed, (
+        "the test suite changed the owner's real entity files:\n  " + "\n  ".join(changed)
+    )
+
+
+@pytest.fixture(autouse=True)
+def isolated_entity_tree(no_real_browser):
+    """Every test's entity tree is the tmp state dir `no_real_browser` set,
+    asserted BEFORE the test body — so a writer can never run first."""
+    tree = entities_module.knowledge_root()
+    for real in REAL_ENTITY_TREES:
+        assert not tree.is_relative_to(real.parent), (
+            f"the entity tree {tree} resolves into the real state dir {real.parent}"
+        )
 
 
 @pytest.fixture(autouse=True)

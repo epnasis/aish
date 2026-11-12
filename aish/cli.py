@@ -20,6 +20,7 @@ from . import (
     automation_admin,
     backends,
     browser,
+    entities,
     learning,
     mailexport,
     mailprefs,
@@ -221,7 +222,7 @@ SLASH_COMMANDS = (
     "/add-dir", "/aliases", "/browser", "/cd", "/chat", "/clear", "/delete",
     "/dir-add", "/exit", "/feedback", "/help", "/jobs", "/learn", "/mail", "/model",
     "/new", "/objective", "/plan", "/quit", "/rename", "/resume", "/runs", "/session",
-    "/tasks",
+    "/tasks", "/who",
 )
 
 SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res = /resume):{RESET}
@@ -256,6 +257,11 @@ SLASH_HELP = f"""{BOLD}commands{RESET} {DIM}(Tab completes; prefixes work, /res 
                  changes; what an automation DOES changes only on a new card
   {CYAN}/tasks delete <id>{RESET} remove one, after a y/N confirm; there is no way
                  back short of a new automation on its own card
+  {CYAN}/who [words]{RESET}   aish's files on people, organisations, accounts and
+                 interests: every file matching the words (name, the other
+                 forms of it, or any line), or all of them; one match opens
+                 whole, what you told aish apart from what it read elsewhere.
+                 Shown to you only — nothing is sent to the model
   {CYAN}/runs{RESET}          recent scheduled runs, newest first — what each did or
                  why it did not happen — marking chats you have not opened
   {CYAN}/mail [n]{RESET}      the inbox assistant's shadow results, newest first (n of
@@ -1785,6 +1791,9 @@ def handle_slash(
     if command == "/runs":
         show_runs(state_dir)
         return "handled"
+    if command == "/who":
+        print(entities.who_text(task.partition(" ")[2].strip()))
+        return "handled"
     if command == "/mail":
         show_mail(task, state_dir)
         return "handled"
@@ -2836,6 +2845,20 @@ def _tooluse_cli(args: list[str]) -> int:
     return 0
 
 
+def _paynotes_cli(args: list[str]) -> int:
+    """`aish paynotes` — the payment notes index's counts, age and outcome.
+
+    Reads the index aish-web writes; never refreshes it, because this process
+    cannot open the vault (docs/payments.md). Counts only: no note content."""
+    from . import paynotes as paynotes_mod
+
+    if args:
+        print("usage: aish paynotes")
+        return 2
+    print(paynotes_mod.summary(state_home()))
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "secret":
         return _secret_cli(sys.argv[2:])
@@ -2853,6 +2876,8 @@ def main() -> int:
         return _vocab_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "tooluse":
         return _tooluse_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "paynotes":
+        return _paynotes_cli(sys.argv[2:])
 
     config_path = Path(
         os.environ.get("AISH_CONFIG", str(config_home() / "config.toml"))

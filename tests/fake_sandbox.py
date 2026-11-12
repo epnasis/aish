@@ -63,7 +63,7 @@ class PassThroughSandbox:
         self.skill_prepared: list[dict] = []
         self.report = report if report is not None else sandbox.RefusalReport()
 
-    def prepare(self, roots, scratch, protected=(), path_env=None):
+    def prepare(self, roots, scratch, protected=(), path_env=None, sealed=()):
         self.prepared.append(
             {"roots": list(roots), "scratch": scratch, "protected": list(protected)}
         )
@@ -92,7 +92,7 @@ class UnavailableSandbox:
         self.observed = observed
         self.prepared = 0
 
-    def prepare(self, roots, scratch, protected=(), path_env=None):
+    def prepare(self, roots, scratch, protected=(), path_env=None, sealed=()):
         self.prepared += 1
         return sandbox.Unavailable(self.observed)
 

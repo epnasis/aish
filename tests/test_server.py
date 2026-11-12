@@ -12116,3 +12116,22 @@ class TestEvidenceEndpoint:
             ws.send_json({"type": "delete_session", "name": first})
             recv_until(ws, "session_deleted")
         assert not turns.chat_dir(app_env["state_dir"], first).exists()
+
+
+class TestWhoSlash:
+    """`/who` (slice 2) on the web: a VIEW message answered with the entity
+    files' text for the owner's sheet. Nothing is sent to a model."""
+
+    def test_who_answers_with_the_files_text(self, app_env):
+        from aish import entities
+
+        # After the app exists: create_app exports AISH_STATE_DIR (#290), so
+        # the entity tree is the server's state dir's from here on.
+        client, chat = make_client(app_env, [])
+        assert entities.knowledge_root() == app_env["state_dir"] / "knowledge"
+        entities.save_fact("person", "Anna", "his word", from_him=True, chat="c")
+        with client, connected(client) as (ws, _, _):
+            ws.send_json({"type": "who", "query": "anna"})
+            answer = recv_until(ws, "who_list")
+            assert "From you:\n- his word" in answer["text"]
+        assert chat.calls == []

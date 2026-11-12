@@ -196,6 +196,9 @@ class ProfilePaths:
     roots: tuple[str, ...]
     scratch: str
     protected: tuple[str, ...]  # aish's own trees: closed even under a root
+    # Closed after every reopen, so no root can hand them out — the entity
+    # files (slice 2), which a root reopening the whole state dir would.
+    sealed: tuple[str, ...] = ()
 
 
 def _real(path: os.PathLike | str) -> str:
@@ -206,11 +209,13 @@ def profile_paths(
     roots: Iterable[os.PathLike | str],
     scratch: os.PathLike | str,
     protected: Iterable[os.PathLike | str] = (),
+    sealed: Iterable[os.PathLike | str] = (),
 ) -> ProfilePaths:
     return ProfilePaths(
         roots=tuple(dict.fromkeys(_real(r) for r in roots)),
         scratch=_real(scratch),
         protected=tuple(dict.fromkeys(_real(p) for p in protected)),
+        sealed=tuple(dict.fromkeys(_real(p) for p in sealed)),
     )
 
 
@@ -360,6 +365,12 @@ def render_profile(paths: ProfilePaths, exec_list: Iterable[str]) -> str:
             lines.append(
                 "(allow file-read* " + " ".join(f"(subpath {s(p)})" for p in inside) + ")"
             )
+    if paths.sealed:
+        # After every reopen: last match wins, so nothing above can open them.
+        lines.append(
+            "(deny file-read* " + " ".join(f"(subpath {s(p)})" for p in paths.sealed)
+            + f" {tag})"
+        )
     lines.append(
         "(deny file-read* "
         + " ".join(f'(regex #"{r}")' for r in sensitive_regexes())
@@ -678,12 +689,13 @@ class SeatbeltSandbox:
         scratch: os.PathLike | str,
         protected: Iterable[os.PathLike | str] = (),
         path_env: str | None = None,
+        sealed: Iterable[os.PathLike | str] = (),
     ) -> Confinement | Unavailable:
         problem = self._platform_problem()
         if problem:
             return Unavailable(problem)
         try:
-            paths = profile_paths(roots, scratch, protected)
+            paths = profile_paths(roots, scratch, protected, sealed)
             exec_list = exec_allow_list(
                 self.names(), path_env if path_env is not None else os.environ.get("PATH", "")
             )

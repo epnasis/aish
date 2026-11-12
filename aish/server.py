@@ -65,6 +65,7 @@ from . import (
     backends,
     browser,
     dir_ignore,
+    entities,
     explain,
     export,
     files,
@@ -75,6 +76,7 @@ from . import (
     notify,
     objective,
     owner_ua,
+    paynotes,
     recipients,
     roles,
     sandbox,
@@ -2141,6 +2143,10 @@ class WebServer:
         # which knows the deny list and the state dir, and run from startup.
         self.scheduler: scheduling.Scheduler | None = None
         self.scheduler_task: asyncio.Task | None = None
+        # The payment notes index (docs/payments.md): this process is the only
+        # one that can open the vault, so it exports what the bill notes say.
+        self.paynotes: paynotes.Refresher | None = None
+        self.paynotes_task: asyncio.Task | None = None
         self.sessions: dict[str, Session] = {}
         # Per-name in-flight cold opens (#178 P1-5): concurrent callers racing
         # on the same name await ONE build instead of each constructing a
@@ -2246,6 +2252,15 @@ class WebServer:
         # daemon was down (every `make ship` restarts it) fires on start.
         if self.scheduler is not None:
             self.scheduler_task = asyncio.ensure_future(self.scheduler.run())
+        # The payment notes index, off the startup path and on its own thread:
+        # a refresh is a chain of plugin subprocesses, and nothing it does may
+        # delay startup or a request (docs/payments.md).
+        if paynotes.enabled():
+            cwd = self.base_cwd or str(self.state_dir)
+            self.paynotes = paynotes.Refresher(
+                self.state_dir, make_runner=lambda: paynotes.plugin_runner(cwd)
+            )
+            self.paynotes_task = asyncio.ensure_future(self.paynotes.run())
 
     def _sweep_turns(self) -> None:
         """Evict whole chats' evidence, oldest first, when the store exceeds
@@ -2372,6 +2387,10 @@ class WebServer:
             # Nothing is lost: what fired is in the ledger, what has not is
             # still due on the next start.
             self.scheduler_task.cancel()
+        if self.paynotes_task is not None and not self.paynotes_task.done():
+            # A read in flight finishes on its own thread; the next start
+            # re-reads whatever this run did not get to.
+            self.paynotes_task.cancel()
         for session in self.sessions.values():
             for uid in list(session.bridge.pending):
                 session.bridge.answer(uid, {"action": "deny"})
@@ -2994,6 +3013,13 @@ class WebServer:
             await self._add_dir(client, str(message.get("path", "")).strip())
         elif kind == "jobs":
             await client.ws.send_json({"type": "job_list", "text": tools.jobs_table()})
+        elif kind == "who":
+            # VIEW message: the owner's own search of the entity files (slice
+            # 2). Shown to him, never sent to a model, and it claims nothing.
+            await client.ws.send_json({
+                "type": "who_list",
+                "text": entities.who_text(str(message.get("query", "")).strip()),
+            })
         elif kind == "browser":
             await self._browser(client, str(message.get("arg", "")).strip())
         elif kind == "browser_view":

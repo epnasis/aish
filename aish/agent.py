@@ -44,6 +44,7 @@ from . import (
     browse,
     browser,
     documents,
+    entities,
     evidence,
     export,
     files,
@@ -1034,6 +1035,33 @@ def _writes(command: str) -> bool:
 
 
 _CD_TARGET = re.compile(r"(?<![A-Za-z0-9_])cd\s+([^\s;|&<>]+)")
+# `git -C <dir>`, `tar -C <dir>`, `make -C <dir>`: a directory every relative
+# operand after it is relative to, exactly as after a `cd` — the entity fence's.
+def _entity_source(name: str, args: dict, cwd: str) -> str | None:
+    """The `source` of a local-file tool when it lands in the entity tree
+    (slice 2), else None. These three read a file by path as readily as
+    read_file does, so they are fenced off the tree the same way."""
+    if name not in ("show_image", "read_pdf", "read_media"):  # aish's own tool names
+        return None
+    source = str(args.get("source", "") or "")
+    if not source or source.lower().startswith(("http://", "https://")):
+        return None
+    return source if entities.in_entity_tree(source, cwd) else None
+
+
+def _shell_spelling_collapsed(command: str) -> str:
+    """`command` with the spellings the shell erases before anything sees a
+    path erased here too: quote characters (`know''ledge`, `"<state>"/x`,
+    `'knowledge'`), backslash escapes (`know\\ledge`) and the data volume's
+    firmlink prefix. Refuse-only: it can merge words, never hide one."""
+    collapsed = re.sub(r"\\(.)", r"\1", command)
+    collapsed = collapsed.replace("'", "").replace('"', "")
+    return re.sub(r"(?i)(?<![^\s=:])/System/Volumes/Data(?=/)", "", collapsed)
+
+
+# `file:///…` names a path to git, curl and browsers alike.
+_FILE_URL = re.compile(r"(?i)file://")
+_DASH_C_TARGET = re.compile(r"(?<!\S)-C\s*([^\s;|&<>]+)")
 
 
 def _cd_bases(command: str, cwd: str) -> list[str]:
@@ -1132,6 +1160,43 @@ def _expand_home(text: str) -> str:
     home = str(Path.home())
     text = _TILDE_SLASH.sub(home, text)
     return text.replace("${HOME}", home).replace("$HOME", home)
+
+
+def _comparable(path: os.PathLike | str) -> str:
+    """A path as the case-insensitive disk sees it: resolved where it exists,
+    normalised where it does not, lowered."""
+    try:
+        return str(Path(path).resolve()).lower()
+    except OSError:
+        return os.path.normpath(str(path)).lower()
+
+
+def _same_path(a: os.PathLike | str, b: os.PathLike | str) -> bool:
+    return _comparable(a) == _comparable(b)
+
+
+def _same_or_under(path: os.PathLike | str, root: os.PathLike | str) -> bool:
+    here, top = _comparable(path), _comparable(root)
+    return here == top or here.startswith(top.rstrip(os.sep) + os.sep)
+
+
+def _containers_of(stores: list[Path], top: Path) -> list[Path]:
+    """The directories that contain a store, from its parent up to and
+    including `top` — never above it, so `~` and `/` are never among them.
+    Ordered with `top` last; empty when no store sits under `top`."""
+    found: list[Path] = []
+    for store in stores:
+        if not _same_or_under(store, top) or _same_path(store, top):
+            continue
+        parent = store.parent
+        while True:
+            if not any(_same_path(parent, seen) for seen in found):
+                found.append(parent)
+            if _same_path(parent, top) or parent == parent.parent:
+                break
+            parent = parent.parent
+    found.sort(key=lambda p: -len(_comparable(p)))
+    return found
 
 
 def _display_path(path: Path) -> str:
@@ -1297,6 +1362,31 @@ THIRD_PARTY_NOT_WRITABLE = (
     "importing it again), changing the approved sources and changing his "
     "standing skill approvals are the owner's own edits. There is nothing to "
     "approve here — if something there should change, tell the user what and why."
+)
+
+# The files on people, organisations, accounts and interests (slice 2): the
+# section-aware writer behind `remember(about=...)` is the only model path in,
+# which is what keeps a line read elsewhere from ever moving under From him.
+ENTITY_FILE_REFUSED = (
+    "NOT EXECUTED: {path} is one of aish's files on people, organisations, "
+    "accounts or interests. aish's file tools never read or write them: save a "
+    "fact with remember(about=\"<kind>:<name>\") and look one up with recall. "
+    "There is nothing to approve here."
+)
+ENTITY_TREE_COMMAND_REFUSED = (
+    "NOT EXECUTED: this command operates on {where} as a whole, which holds "
+    "aish's files on people, organisations, accounts and interests — copying, "
+    "searching or archiving the whole tree would read or rewrite them like any "
+    "other operand. Name the subfolder you mean instead (e.g. mail/, sessions/); "
+    "for those files use recall, or the owner's /who. There is nothing to "
+    "approve here."
+)
+ENTITY_COMMAND_REFUSED = (
+    "NOT EXECUTED: this command names aish's files on people, organisations, "
+    "accounts or interests ({where}). A command touching them is refused whether "
+    "it would read or write, because that cannot be told apart from the command "
+    "text: save a fact with remember(about=...) and look one up with recall "
+    "(the owner has /who). There is nothing to approve here."
 )
 
 THIRD_PARTY_COMMAND_REFUSED = (
@@ -4153,6 +4243,17 @@ class Agent:
         # batch — create_skill of that name — would by then make the name
         # resolve to the owner's own skill; the read's answer is what counts.
         self._third_party_skill_reads: set[str] = set()
+        # Has this CHAT ever read outside content? Set wherever the task is
+        # marked tainted, never cleared by the per-task reset, re-derived from
+        # the log on a reopen (`load_history`). The per-task mark is not
+        # enough for what a save means: a page read in one task stays in the
+        # conversation and can steer a `remember(about=...)` in the next, after
+        # the task's mark was reset. Decides *From him* vs *Read somewhere*.
+        self._chat_read_outside = False
+        # recall calls whose result rendered an entity's *Read somewhere*
+        # line, keyed by (query, name), recorded AT the read like
+        # `_third_party_skill_reads`: True/False as the read found it.
+        self._entity_recall_reads: dict[tuple[str, str], bool] = {}
         # Outside content aish delivered before the next task with no tool
         # call to raise the taint for it (`add_outside_note`, #5 S3): the next
         # task starts tainted. Survives `_reset_task_state` exactly once.
@@ -4518,6 +4619,7 @@ class Agent:
         self._menu: tool_menu.Selection | None = None
         self._menu_full_names: frozenset[str] = frozenset()
         self._tool_index: Any = None
+        self._entity_index: Any = None
         # Arm C's `load_tool` schema, built once per task (catalog mode only).
         self._catalog_schema: dict | None = None
         # (command-prefix, tool-name) for exposed tools that declare
@@ -4698,6 +4800,8 @@ class Agent:
         """Drop the conversation, keep the system prompt."""
         del self.messages[1:]
         self._kept_outside = False  # the kept note went with the conversation
+        # The next conversation is a new chat; what this one read leaves with it.
+        self._chat_read_outside = False
         # A note held for the next task belongs to the conversation just
         # dropped: drawn in the next chat it would be a row for words that
         # chat's model never received (found in delivery review).
@@ -4752,6 +4856,43 @@ class Agent:
                 and not synthetic_kind(content)
             ):
                 self.note_owner_hosts(content)
+        if self._history_read_outside(messages):
+            self._chat_read_outside = True
+
+    def _history_read_outside(self, messages: list[dict]) -> bool:
+        """Did the conversation being adopted ever read outside content? The
+        chat's mark re-derived on a reopen, through the predicate the live
+        capture uses: every tool call the log kept, with the model's own
+        arguments — a tool that is neither native nor a plugin today counts as
+        outside, since silence must not read as clean — and any message
+        carrying an outside-content banner (a note aish delivered, a kept
+        report) whatever role it came in. Restrict-only: a false yes labels
+        a later save *Read somewhere*, never the other way."""
+        banners = (
+            web.UNTRUSTED_NOTE, skills.THIRD_PARTY_NOTE, entities.READ_SOMEWHERE_NOTE,
+        )
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, str) and any(banner in content for banner in banners):
+                return True
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") if isinstance(call, dict) else None
+                if not isinstance(function, dict):
+                    continue
+                name = str(function.get("name") or "")
+                args = function.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except ValueError:
+                        args = None
+                if not isinstance(args, dict):
+                    args = None
+                if (
+                    name not in NATIVE_TOOL_NAMES and name != tool_menu.LOAD_TOOL
+                ) or self._brings_outside_content(name, args):
+                    return True
+        return False
 
     @property
     def uploads_dir(self) -> Path | None:
@@ -5531,6 +5672,7 @@ class Agent:
         self._tainted = False
         self._taint_reads = set()
         self._third_party_skill_reads = set()
+        self._entity_recall_reads = {}
         if self._outside_note_pending:
             # Delivered for THIS task by add_outside_note: it is in the context
             # the first model call sees, so the task is tainted from its start.
@@ -5895,17 +6037,29 @@ class Agent:
         # preloaded a Gmail Pub/Sub watcher made of nothing but `gws gmail`
         # commands, in a turn where a rule forbade exactly those.
         rules_text = self.seed_rules(seed, seed_images, seed_documents)
+        preload_budget = min(
+            skills.PREFLIGHT_TOTAL_CHARS,
+            self.num_ctx * CHARS_PER_TOKEN_BUDGET // 8,
+        )
+        # The name rail (slice 2), ahead of pre-flight and inside its budget:
+        # the files on people, organisations, accounts and interests named in
+        # HIS message — a task no person sent gets none, its text is not his.
+        # At most half the characters and half the slots, so a message full of
+        # names cannot push out the how-to the task needs.
+        rail = (
+            entities.name_rail(seed, preload_budget // 2, skills.PREFLIGHT_TOP // 2)
+            if self.task_from_owner
+            else entities.Rail()
+        )
         preload = skills.preflight(
             self.cwd,
             self.lessons_path,
             seed,
-            char_budget=min(
-                skills.PREFLIGHT_TOTAL_CHARS,
-                self.num_ctx * CHARS_PER_TOKEN_BUDGET // 8,
-            ),
+            char_budget=preload_budget - rail.chars,
             semantic=self.semantic.scores if self.semantic is not None else None,
             context=prior_user_text[-skills.PREFLIGHT_CONTEXT_CHARS :],
             forbidden_command=self._rule_forbidding,
+            slots=skills.PREFLIGHT_TOP - rail.slots,
         )
         if self.semantic is not None and self.semantic.error and not self._semantic_warned:
             self._semantic_warned = True
@@ -5915,7 +6069,8 @@ class Agent:
             )
         self._pending_skill_reads = {n: GATE_MAX_REFUSALS for n in preload.unread}
         knowledge_text, rules_prose = reminder_delta(
-            earlier_reminders, preload.blocks, preload.names, rules_text
+            earlier_reminders, rail.blocks + preload.blocks, rail.names + preload.names,
+            rules_text,
         )
         objective_revision = self._current_objective()
         objective_text, objective_shown = objective_delta(
@@ -6021,8 +6176,11 @@ class Agent:
             self._note("⚑ not preloaded, every command in it is forbidden: " + ", ".join(
                 f"{item['name']} ({item['rule']})" for item in preload.withheld
             ))
-        if preload.names:
-            self._note("⚑ preloaded knowledge: " + ", ".join(preload.names))
+        if rail.names:
+            self._note("⚑ files named in the message: " + ", ".join(rail.names))
+        if preload.names or rail.record:
+            if preload.names:
+                self._note("⚑ preloaded knowledge: " + ", ".join(preload.names))
             # sim/rail/score diagnostics persist to the session log via the
             # trace sink, so retrieval precision stays auditable from logs
             # alone (#183); the frontend chips read only label/kind.
@@ -6034,6 +6192,7 @@ class Agent:
                 mode=preload.mode,
                 items=[{"label": it.pop("name"), **it} for it in preload.items],
                 reminder=evidence.digest_of(reminder),
+                **({"entities": rail.record} if rail.record else {}),
             )
         # `task` is the guidance form — the sentences telling this backend what
         # it may do with each attached file. The LOG gets the record form (#231),
@@ -8832,8 +8991,10 @@ class Agent:
             self._mark_tainted(name, args)
 
     def _mark_tainted(self, name: str, args: dict | None) -> None:
-        """Raise the taint, and record what kind of source raised it."""
+        """Raise the taint, and record what kind of source raised it. The
+        chat's own mark rises with it and only ever rises."""
         self._tainted = True
+        self._chat_read_outside = True
         self._taint_reads.add(self._what_a_source_is(name, args))
 
     def _what_a_source_is(self, name: str, args: dict | None) -> str:
@@ -8916,6 +9077,18 @@ class Agent:
                 return True
             entry = skills.resolve_skill(skill, self.cwd)
             return entry is None or entry.third_party
+        if name == "recall":
+            # Outside content only where an entity's *Read somewhere* line was
+            # rendered — recorded at the read, which is the answer when this
+            # task made the call. A call this process did not see (a trim with
+            # its args gone, a continuation, a reopen) asks whether any such
+            # line exists at all: the wide answer, and none when no entity
+            # file holds one, which keeps every chat without them as before.
+            if args is not None:
+                key = (str(args.get("query", "") or ""), str(args.get("name", "") or "").strip())
+                if key in self._entity_recall_reads:
+                    return self._entity_recall_reads[key]
+            return entities.any_read_somewhere()
         # Asked LAST, so this can only ever add. A local read used to raise
         # nothing, which is exactly how a caption track or a fetched PDF crossed
         # the fence wearing a local path (#319). The stores are on disk and
@@ -8969,7 +9142,7 @@ class Agent:
         if name in ("read_file", "write_file", "edit_file"):
             return str(a.get("path", ""))
         if name in ("remember", "forget_memory"):
-            return str(a.get("name") or "memory")
+            return str(a.get("about") or a.get("name") or "memory")
         if name == "create_skill":
             return str(a.get("name") or "skill")
         if name == "use_skill":
@@ -9848,7 +10021,7 @@ class Agent:
             )
             # Recall quotes past sessions, whose genuine notes are history, not
             # aish speaking now.
-            return label, lambda: provenance.disarm_markers(self._recall(query, entry))
+            return label, partial(self._recall_marked, query, entry)
         if name == "read_tool_output":
             key = str(args.get("continuation", "") or "")
             page = args.get("page", 2)
@@ -10134,7 +10307,80 @@ class Agent:
             bytes=len(text),
         )
 
+    def _recall_marked(self, query: str, name: str | None) -> str:
+        """Serve a recall, noting at the read whether it rendered a line aish
+        read elsewhere — the banner `entities` puts above every such line is
+        the evidence, and the taint is committed after the batch from it,
+        exactly as `_read_skill` records a third-party read."""
+        served = provenance.disarm_markers(self._recall(query, name))
+        key = (query, (name or "").strip())
+        read_outside = entities.READ_SOMEWHERE_NOTE in served
+        self._entity_recall_reads[key] = (
+            self._entity_recall_reads.get(key, False) or read_outside
+        )
+        return served
+
+    def _entity_scorer(self) -> Callable | None:
+        """Similarity over entity identity lines, in its own cache file for
+        the reason `_tool_scorer` gives; None when no real index is wired."""
+        if self._entity_index is None:
+            sibling = getattr(self.semantic, "sibling", None)
+            if not callable(sibling):
+                return None
+            self._entity_index = sibling(entities.EMBEDDINGS_FILE)
+        index = self._entity_index
+
+        def scores(query: str, entries: list) -> dict | None:
+            try:
+                return index.scores(query, entries)
+            except Exception as exc:  # noqa: BLE001 — the lexical floor must hold (L2)
+                index.error = str(exc) or exc.__class__.__name__
+                return None
+
+        return scores
+
+    def _recall_entities(self, query: str, name: str | None) -> str:
+        """The new kinds' half of recall (slice 2): one file by name, or a
+        ranked section. "" when there is nothing to add, so a corpus with no
+        entity files answers exactly as before."""
+        if name:
+            entity = entities.find(name)
+            return entities.detail(entity)[: skills.RECALL_DETAIL_CHARS] if entity else ""
+        found = entities.all_entities()
+        if not found:
+            return ""
+        lines = entities.ranked_lines(found, query, self._entity_scorer())
+        if not lines:
+            return ""
+        return (
+            "\nFiles on people, organisations, accounts and interests (best first; "
+            "call recall with name=\"<kind>:<name>\" for one whole):\n"
+            + "\n".join(lines)
+        )
+
     def _recall(self, query: str, name: str | None) -> str:
+        if name:
+            # `<kind>:<name>` is the entity's own form; any other name is asked
+            # of skills, memory and sessions first, as before, and of the
+            # entity files only when nothing there carries it.
+            kind = name.partition(":")[0].strip()
+            if kind in entities.KIND_DIRS:
+                return self._recall_entities(query, name) or (
+                    f"ERROR: no file named {name!r}. Use a name from a recall result."
+                )
+            found = self._recall_knowledge(query, name)
+            if found.startswith("ERROR: nothing named"):
+                return self._recall_entities(query, name) or found
+            return found
+        found = self._recall_knowledge(query, None)
+        extra = self._recall_entities(query, None)
+        if not extra:
+            return found
+        if found.startswith("Nothing saved matches"):
+            found = "No skill or memory" + found[len("Nothing saved"):]
+        return found + "\n" + extra
+
+    def _recall_knowledge(self, query: str, name: str | None) -> str:
         # Embedding similarity reaches the deliberate-search path too (#178
         # P1-9), not only preflight — same fallback discipline: scores()
         # failing → None → recall_text is byte-identical to pure lexical.
@@ -11280,8 +11526,11 @@ class Agent:
             return (
                 self._is_tool_output_cache(path)
                 or self._is_evidence_frame(path)
+                or entities.in_entity_tree(path, self.cwd)
                 or self._read_prompt_reason(path) is not None
             )
+        if _entity_source(name, args, self.cwd) is not None:
+            return True  # refused in _dispatch; the parallel path has no gate
         # Egress calls needing an approval card (#178 P0-2) must run through
         # _dispatch sequentially — the parallel thunks would bypass the gate.
         # Same for a read that would use a signed-in session (#221): the
@@ -13168,6 +13417,35 @@ class Agent:
             return _gate_outcome(denial, decision="denied")
         return None
 
+    def _remember_about(self, args: dict) -> str:
+        """`remember(about="<kind>:<name>")` (slice 2): one line into that
+        entity's file, under *From him* only when a person sent this task and
+        the chat has never read outside content — otherwise under *Read
+        somewhere*, with no card. Which section is decided here and in
+        `entities.save_fact`, never by the model."""
+        kind, _, entity_name = str(args.get("about", "")).partition(":")
+        from_him = (
+            self.task_from_owner and not self._tainted and not self._chat_read_outside
+        )
+        chat = ""
+        if self.current_session is not None:
+            try:
+                chat = Path(self.current_session()).stem
+            except Exception:  # noqa: BLE001 — a name is a label, never worth a call
+                chat = ""
+        result = entities.save_fact(
+            kind,
+            entity_name,
+            str(args.get("note", "") or ""),
+            str(args.get("aliases", "") or ""),
+            from_him=from_him,
+            chat=chat,
+        )
+        self._note(f"→ {result}")
+        if result.startswith(("ERROR", "NOT saved")):
+            return _gate_outcome(result, decision="rejected")
+        return result
+
     def _knowledge_gate(self, name: str, args: dict) -> str | None:
         """Gate for remember/forget_memory (#196): None = proceed, else the
         refusal/hold text for the model. An UNTAINTED attended turn returns on
@@ -13390,6 +13668,7 @@ class Agent:
         *,
         contains: Callable[[Path, str, str], bool] | None = None,
         casefold: bool = False,
+        loose: bool | None = None,
     ) -> str:
         """The fenced store `command` names, or "" — the four nets described
         on `_command_touches_a_charter`, for any list of stores and the words
@@ -13441,7 +13720,8 @@ class Agent:
         # characters a tokeniser splits on (`$(echo /a/b)/char*/x.md`) becomes
         # one token instead of three. Home expansion runs before masking, so the
         # two spellings this code can resolve exactly stay exact.
-        loose = _writes(command)
+        if loose is None:
+            loose = _writes(command)
         for raw in set(_PATHISH.findall(_SUBSTITUTION.sub("*", expanded))):
             candidate = _as_pattern(_after_assignment(raw.strip("\"'`,;()")))
             if not candidate or not _is_dynamic(candidate):
@@ -13464,6 +13744,66 @@ class Agent:
                     rf"(?<![A-Za-z0-9_]){re.escape(word)}(?![A-Za-z0-9_])", command, flags
                 ):
                     return _display_path(stores[0])
+        return ""
+
+    def _command_touches_entities(self, command: str) -> str:
+        """The refusal for a shell command that reaches the entity tree
+        (`entities.knowledge_root()`, slice 2), or "".
+
+        The tree lives in the state dir, which is not a git repository, so the
+        question is about paths alone and is asked of EVERY path-shaped word
+        in the command text — wrappers (`env`, `xargs`, `nohup`, `sh -c '…'`)
+        are just more words and cannot hide one. A word is refused when,
+        resolved against cwd and every `cd`/`-C` base, case-folded, with a
+        `file://` prefix stripped, it is inside the tree or the tree itself,
+        or it IS a directory containing the tree, up to and including the
+        state dir (`cp -r <state> …`, `grep -r x <state>`). A command run FROM
+        inside the tree (a `cd`/`-C` there) is refused too. Another subfolder
+        of the state dir (`ls <state>/mail`) is untouched. The pattern net of
+        `_command_names_a_store` adds what the shell would expand into it."""
+        tree = entities.knowledge_root()
+        command = _shell_spelling_collapsed(command)
+        if where := self._command_names_a_store(
+            command, [tree], (),
+            contains=lambda store, candidate, base: skills.path_in_tree(store, candidate, base),
+            casefold=True,
+            # For this store a READ is the harm, so a wildcard is judged as
+            # strictly for `grep -r x <state>/{knowledge,mail}` as for a write.
+            loose=True,
+        ):
+            return ENTITY_COMMAND_REFUSED.format(where=where)
+        containers = _containers_of([tree], paths.state_home())
+        expanded = _FILE_URL.sub("", _expand_home(command))
+        # `-C <dir>` (git, tar, make) moves the operands after it like a cd;
+        # added here only, so the shared nets stay exactly main's.
+        bases = _cd_bases(expanded, self.cwd) + [
+            target if os.path.isabs(target) else os.path.join(self.cwd, target)
+            for target in (t.strip("\"'") for t in _DASH_C_TARGET.findall(expanded))
+            if target
+        ]
+        base_tokens = {
+            t.strip("\"'") for t in _CD_TARGET.findall(expanded) + _DASH_C_TARGET.findall(expanded)
+        }
+        for base in bases:
+            if skills.path_in_tree(tree, base):
+                return ENTITY_COMMAND_REFUSED.format(where=_display_path(tree))
+        for raw in _PATHISH.findall(expanded):
+            token = _after_assignment(raw.strip("\"'`,;()"))
+            if token.startswith("-") and "=" in token:
+                token = token.split("=", 1)[1]  # --option=<path>
+            if not token or _is_dynamic(token):
+                continue
+            places = [token] if os.path.isabs(token) else [os.path.join(b, token) for b in bases]
+            for here in places:
+                if skills.path_in_tree(tree, here):
+                    return ENTITY_COMMAND_REFUSED.format(where=_display_path(tree))
+                if token in base_tokens:
+                    continue
+                for container in containers:
+                    if _same_path(here, container):
+                        return ENTITY_TREE_COMMAND_REFUSED.format(
+                            where=_display_path(container)
+                        )
         return ""
 
     def _outside_populated_stores(self) -> list[Path]:
@@ -14435,6 +14775,9 @@ class Agent:
             self.scratch_dir,
             protected=[state, paths.config_home()],
             path_env=os.environ.get("PATH", ""),
+            # The entity tree stays closed even where a root reopens the state
+            # dir around it (an owner who trusted the whole state tree).
+            sealed=[entities.knowledge_root()],
         )
 
     def _defer_refusal_read(self, confinement: Any, command: str) -> None:
@@ -15434,12 +15777,17 @@ class Agent:
                 return _gate_outcome(
                     EVIDENCE_FRAME_NOT_A_FILE.format(path=path), decision="blocked"
                 )
+            if entities.in_entity_tree(path, self.cwd):
+                return _gate_outcome(ENTITY_FILE_REFUSED.format(path=path), decision="blocked")
             label, thunk = self._read_file_call(args)
             self._note(label)
             reason = self._read_prompt_reason(path)
             if reason is not None and not self.approve_read(path, reason):
                 return _gate_outcome(READ_DENIED, decision="denied")
             return thunk()
+
+        if (source := _entity_source(name, args, self.cwd)) is not None:
+            return _gate_outcome(ENTITY_FILE_REFUSED.format(path=source), decision="blocked")
 
         if name in BROWSE_TOOLS:
             # Not a read-only tool and deliberately not on the parallel path:
@@ -15501,6 +15849,12 @@ class Agent:
                 return thunk()
             finally:
                 self.status.stop()
+
+        if name == "remember" and str(args.get("about", "") or "").strip():
+            # Before the knowledge gate, and without its card (owner decision
+            # 2026-11-11): the section the line lands in carries what the card
+            # used to ask. Plain `remember` keeps the card below.
+            return self._remember_about(args)
 
         # Knowledge writes auto-approve only while a human is watching (#196):
         # unattended, deletion is refused and a save holds for review.
@@ -15629,6 +15983,13 @@ class Agent:
             if where := self._command_touches_automations(command):
                 result = AUTOMATION_COMMAND_REFUSED.format(where=where)
                 self._note("✕ command names aish's automations folder")
+                self._run_meta = {"command": command, "decision": "blocked", "output": result}
+                return _gate_outcome(result, decision="blocked")
+            # And for the entity files (slice 2), card or no card: a shell that
+            # could edit one could move a line read elsewhere under From him.
+            if refusal_text := self._command_touches_entities(command):
+                result = refusal_text
+                self._note("✕ command names aish's files on people and accounts")
                 self._run_meta = {"command": command, "decision": "blocked", "output": result}
                 return _gate_outcome(result, decision="blocked")
             # The third-party tree and the approved-sources file (#467 slice
@@ -16998,6 +17359,10 @@ class Agent:
             return _gate_outcome(
                 THIRD_PARTY_NOT_WRITABLE.format(path=str(args.get("path", "")), what=fenced),
                 decision="blocked",
+            )
+        if entities.in_entity_tree(str(args.get("path", "")), self.cwd):
+            return _gate_outcome(
+                ENTITY_FILE_REFUSED.format(path=str(args.get("path", ""))), decision="blocked"
             )
         if name == "write_file":
             plan = files.plan_write(

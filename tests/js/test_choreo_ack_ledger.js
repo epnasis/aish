@@ -186,7 +186,7 @@ function ledgerWorld({ socket = "open" } = {}) {
     // READS. A lost query paints nothing and asking again is free — there is
     // no claim to be wrong about, and receipting them would buy toasts nobody
     // needs (`sessions` and `files` fire on every keystroke).
-    sessions: "read", files: "read", models: "read", jobs: "read",
+    sessions: "read", files: "read", models: "read", jobs: "read", who: "read",
     peek: "read", client_debug: "read",
     // Also a read (#177): asking what is in Recently deleted paints a section
     // and claims nothing. The two things that CHANGE the trash — restore and

@@ -419,6 +419,7 @@ class ClaudeMaxAgent:
         self._recorded_unsent.clear()
         self.messages.clear()
         self.inner._kept_outside = False  # the SDK session holding it is gone
+        self.inner._chat_read_outside = False  # and so is what it read
 
     def load_history(self, _messages: list[dict]) -> None:
         self.echo(

@@ -284,23 +284,27 @@ def _casefold_under(root: Path | None, target: Path | None) -> bool:
     return [part.casefold() for part in target.parts[: len(head)]] == head
 
 
-def in_third_party_tree(path: os.PathLike | str, cwd: str | None = None) -> bool:
-    """Does `path` land in VENDOR_SKILLS_DIR? `files.contains`, and also two
-    readings it does not make. Case-insensitively: the owner's disk is
-    case-insensitive, where `Vendor-Skills/x` IS the tree's folder and a plain
-    containment test calls it outside. And as WRITTEN, before links are
-    followed: a folder in the tree that links elsewhere resolves outside it,
-    and its skill was served as the owner's. Every caller uses the answer to
-    restrict (fence a write, taint and check a read), so the wider answer is
-    the safe one."""
-    if files.contains(VENDOR_SKILLS_DIR, path, cwd):
+def path_in_tree(tree: Path, path: os.PathLike | str, cwd: str | None = None) -> bool:
+    """Does `path` land in `tree`? `files.contains`, and also two readings it
+    does not make. Case-insensitively: the owner's disk is case-insensitive,
+    where `Vendor-Skills/x` IS the tree's folder and a plain containment test
+    calls it outside. And as WRITTEN, before links are followed: a folder in
+    the tree that links elsewhere resolves outside it, and its skill was served
+    as the owner's. Every caller uses the answer to restrict (fence a write,
+    taint and check a read), so the wider answer is the safe one."""
+    if files.contains(tree, path, cwd):
         return True
     written = Path(os.path.abspath(files.resolve(os.fspath(path), cwd or os.getcwd())))
     return any(
-        _casefold_under(tree, target)
-        for tree in (VENDOR_SKILLS_DIR, files.resolved(VENDOR_SKILLS_DIR))
+        _casefold_under(root, target)
+        for root in (tree, files.resolved(tree))
         for target in (written, files.resolved(path, cwd))
     )
+
+
+def in_third_party_tree(path: os.PathLike | str, cwd: str | None = None) -> bool:
+    """Does `path` land in VENDOR_SKILLS_DIR (`path_in_tree`)?"""
+    return path_in_tree(VENDOR_SKILLS_DIR, path, cwd)
 
 
 def third_party_skill_of(path: os.PathLike | str, cwd: str | None = None) -> str:
@@ -1337,6 +1341,7 @@ def preflight(
     semantic=None,
     context: str = "",
     forbidden_command=None,
+    slots: int = PREFLIGHT_TOP,
 ) -> Preload:
     """Pre-flight retrieval: the top skills/memories matching a task,
     rendered as blocks the agent injects directly — the model wakes up with
@@ -1371,6 +1376,9 @@ def preflight(
     NAMING it, for the reason a name hit is unconditional everywhere else. It
     stays in the index and read_skill still loads it. Only a skill that would
     otherwise have taken a slot is reported in `withheld`.
+
+    `slots` is how many entries may be injected — PREFLIGHT_TOP less what the
+    entity name rail already took for this task (`entities.name_rail`).
 
     `near_misses` records what scored within PRELOAD_NEAR_MISS_BAND under the
     floor that applied to it, so the floors can be judged on live data. It is
@@ -1438,7 +1446,7 @@ def preflight(
     if forbidden_command is not None:
         kept: list[tuple[Entry, dict]] = []
         for entry, diag in chosen:
-            if len(kept) >= PREFLIGHT_TOP:
+            if len(kept) >= slots:
                 break
             rule = None if diag.get("rail", 0) >= 4 else _forbids_all(entry, forbidden_command)
             if rule:
@@ -1451,7 +1459,7 @@ def preflight(
     unread: list[str] = []
     items: list[dict] = []
     remaining = char_budget
-    for entry, diag in chosen[:PREFLIGHT_TOP]:
+    for entry, diag in chosen[:max(0, slots)]:
         if remaining < 200:  # no room left for anything useful
             break
         if entry.kind == "memory" or len(entry.body) <= PREFLIGHT_ENTRY_CHARS:
@@ -1460,6 +1468,12 @@ def preflight(
             body = entry.body[:room]
             cut = "…" if len(body) < len(entry.body) else ""
             block = f"{header}{body}{cut}".rstrip()
+            if len(block) > remaining:
+                # The header carries the description, which for a remembered
+                # fact IS the fact and was never capped: one long description
+                # took the total past the budget the caller set (found by the
+                # entity rail's budget test, slice 2).
+                block = block[: remaining - 1].rstrip() + "…"
         else:  # oversized skill: teaser now, full body via read_skill
             head = entry.body[:PREFLIGHT_HEAD_CHARS]
             # Whether this may BLOCK is a separate question from whether it may

@@ -95,7 +95,12 @@ from aish import tools
 # measured, 41,282 -> 41,865; epic #467 slice 2b). It replaces reading a
 # third-party skill, which the acting model may no longer do at all: without it
 # an installed skill would be listed with no way to use it.
-MAX_MENU_CHARS = 41_900
+# Raised 41,900 -> 42,300 on 2026-11-12 for remember's `about` and `aliases`
+# (+410 chars; measured 42,275 with use_skill merged in; slice 2 of
+# assistant-next): no new tool — the files on people, organisations, accounts
+# and interests are written through remember, and `about` is what tells the
+# writer which file and section.
+MAX_MENU_CHARS = 42_300
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.

@@ -4243,3 +4243,6 @@ body.console-open #backdrop { z-index: 63; }
 
 /* aish's own words to the model (contract §3.17): enforcement reads amber. */
 .step-harness-enforce .step-title { color: var(--orange); }
+
+/* /who (slice 2): a file can hold long lines; wrap them rather than scroll sideways. */
+#who-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; max-height: 60vh; overflow-y: auto; }
