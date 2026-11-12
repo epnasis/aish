@@ -8597,6 +8597,13 @@ function buildToolCard(card, event) {
   card.appendChild(argsWrap);
   card.appendChild(intentBlock(event));
 
+  // "Always for this skill" (#467 slice 2c). Shown ONLY when the server sent
+  // an offer — the agent composed it from the skill's reviewed hashes, so the
+  // card can choose it and never invent one. The sentence says what the
+  // grant covers and how it ends; the skill name goes in via textContent.
+  const always = event.always && event.always.skill ? event.always : null;
+  if (always) card.appendChild(skillAlwaysNote(always));
+
   const feedback = feedbackField();
   card.appendChild(feedback);
 
@@ -8612,8 +8619,36 @@ function buildToolCard(card, event) {
   denyBtn.className = "deny";
   denyBtn.textContent = "Deny";
   denyBtn.onclick = () => answerCard(event.id, "deny", feedbackExtra(feedback));
-  actionsRow.append(approveBtn, denyBtn);
+  actionsRow.append(approveBtn);
+  if (always) {
+    // Its own class, NOT `approve`: the A shortcut must keep meaning "this
+    // run, this time", never a standing grant.
+    const alwaysBtn = document.createElement("button");
+    alwaysBtn.type = "button";
+    alwaysBtn.className = "always-skill";
+    alwaysBtn.textContent = "Always for this skill";
+    alwaysBtn.onclick = () =>
+      answerCard(event.id, "approve_always_skill", feedbackExtra(feedback));
+    actionsRow.append(alwaysBtn);
+  }
+  actionsRow.append(denyBtn);
   card.appendChild(actionsRow);
+}
+
+function skillAlwaysNote(always) {
+  const note = document.createElement("div");
+  note.className = "scope-explain skill-always";
+  const name = document.createElement("span");
+  name.className = "mono";
+  name.textContent = String(always.skill);
+  const count = Number(always.files) || 0;
+  note.append(
+    "Always for this skill: approve this run, and run ", name,
+    ` with no card from now on while its ${count} reviewed file(s) are unchanged.` +
+    " A reinstall with different files asks again. `aish skill revoke` withdraws it." +
+    " With a comment, the run is held and nothing is remembered."
+  );
+  return note;
 }
 
 // One tool argument as a labeled field. A string is shown RAW (real line breaks,

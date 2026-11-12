@@ -150,6 +150,10 @@ def isolated_global_dirs(tmp_path_factory, monkeypatch, no_inherited_aish_env):
     # clone, and fenced from every writer. Not created — a missing file is
     # "no source approved", which is what an unconfigured suite should see.
     monkeypatch.setattr(skills_module, "SKILL_SOURCES_FILE", home / "skill-sources")
+    # The owner's standing "Always for this skill" grants (#467 slice 2c):
+    # read before every use_skill card and written on his answer, so an
+    # unredirected suite would grant itself cardless runs in his real file.
+    monkeypatch.setattr(skills_module, "SKILL_GRANTS_FILE", home / "skill-grants")
 
 
 @pytest.fixture

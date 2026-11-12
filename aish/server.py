@@ -104,6 +104,7 @@ from .agent import (
     surface_slot,
 )
 from .approval import (
+    AlwaysForSkill,
     Approved,
     AutoApproved,
     Blocked,
@@ -1511,7 +1512,8 @@ def card_latency(answer: dict) -> dict:
 
 def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope, trust_dir,
                        get_origin=None, get_session_prefixes=None, get_intent=None,
-                       get_gate=None, get_card_reason=None, get_kept_outside=None):
+                       get_gate=None, get_card_reason=None, get_kept_outside=None,
+                       get_offer=None):
     """The three approval callbacks, backed by browser round trips. Mirrors
     cli.make_approver semantics exactly: denylist first (also on edited
     commands), then auto-approval scoped to the live session roots, then a
@@ -1534,6 +1536,10 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
     neither can compute the other's half. Empty for the cards raised HERE —
     shell, read, write, import — which label themselves, since no agent gate
     raised them.
+    get_offer() -> what the tool card being drawn offers to remember (#467
+    slice 2c: "Always for this skill" on a `use_skill` card), late-bound off
+    the agent because the agent composed it; None for every other card. The
+    card can CHOOSE the offer and never supply one.
     get_card_reason() -> why the agent needs a CARD for a shell command that
     would otherwise run with none (epic #462: aish's sandbox is unavailable,
     or refused this very command earlier in the chat); shown on the card as
@@ -1788,7 +1794,7 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
 
     def approve_tool(
         name: str, args: dict, preview: "str | None" = None
-    ) -> "bool | Approved | Denied | Licensed":
+    ) -> "bool | Approved | Denied | Licensed | AlwaysForSkill":
         # Reuses the command card verbatim (issue #141): same approve/deny +
         # comment verdicts, no denylist. Comment semantics match commands:
         # deny+comment = STOP, approve+comment = HOLD-and-adjust. A ground-truth
@@ -1821,11 +1827,25 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         }
         if preview:
             request["preview"] = preview
+        offer = get_offer() if get_offer is not None else None
+        offered = offer.skill if offer is not None else ""
+        if offer is not None:
+            request["always"] = offer.wire()
         carry_intent(request)
         answer = bridge.ask(request)
-        approved = answer.get("action") == "approve"
+        action = answer.get("action")
+        always = offer is not None and action == "approve_always_skill"
+        approved = action == "approve" or always
         comment = str(answer.get("comment") or "").strip()
         decision = "approved" if approved else "denied"
+        if always and not comment:
+            decision = "approved+always-skill"
+        elif always:
+            # A comment HOLDS the run (`Approved(comment)`), and a grant for a
+            # run that never ran is not one he gave (#346): nothing recorded.
+            bridge.emit({"type": "echo", "text": (
+                f"Always for {offered} was not recorded: a comment holds the run"
+            )})
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         record(
             f"tool {name}({shown})",
@@ -1838,7 +1858,10 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             # this returns, and `bridge.ask` above is the blocking half.
             asked_by=gate(),
         )
-        resolve(request["id"], decision, comment)
+        resolve(request["id"], "approved" if approved else "denied", comment)
+        if always and not comment:
+            # Whether it was RECORDED is the agent's to say: it writes it.
+            return AlwaysForSkill("web card")
         if approved:
             return Approved(comment) if comment else True
         return Denied(comment) if comment else False
@@ -7612,6 +7635,7 @@ def create_app(
             ),
             get_intent=lambda: agent_holder[0].turn_intent() if agent_holder else "",
             get_gate=lambda: agent_holder[0].asking_gate() if agent_holder else "",
+            get_offer=lambda: agent_holder[0].card_offer() if agent_holder else None,
             get_card_reason=(
                 lambda: agent_holder[0].shell_card_reason() if agent_holder else ""
             ),

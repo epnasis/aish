@@ -535,7 +535,14 @@ thousands of entries without bloating the context.
   and the model never reads one — `read_skill`, `read_file`, `read_pdf`,
   `show_image` and `read_media` all refuse them. Instead the model calls
   `use_skill(name, brief, inputs)`, and you approve each run on a card that
-  names the skill, the brief and the files. The skill then runs in an
+  names the skill, the brief and the files — or choose **Always for this
+  skill** on that card (`a` in the terminal), after which runs of that skill
+  draw no card while its files are byte-for-byte the ones whose hashes were
+  recorded at import (a skill with no recorded hashes never offers it; a
+  reinstall with different files asks again; a comment typed on the card holds
+  the run and records nothing). Each such run is announced on the answer, and
+  `aish skill revoke NAME` (or editing `~/.config/aish/skill-grants`, which
+  aish's own tools refuse to write) withdraws it. The skill then runs in an
   **isolated runner**: a separate conversation holding only the skill, the
   brief and the input paths, whose every command runs in aish's skill sandbox
   (of your files it can read only those, the skill and its packages — your
@@ -562,7 +569,7 @@ thousands of entries without bloating the context.
   files changed after install is refused, naming the files (delete its folder
   and import it again). aish's file and skill tools never write into
   `vendor-skills/`, and a shell command the model proposes whose text names
-  `vendor-skills/` or `skill-sources` is refused outright, with no card —
+  `vendor-skills/`, `skill-sources` or `skill-grants` is refused outright, with no card —
   reads included, and including spellings that differ only in case; your own
   `!` commands are not affected. A command that reaches them through a path
   its text does not show (a script that computes it) is not caught. Retiring or removing a third-party skill is

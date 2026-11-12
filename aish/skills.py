@@ -64,6 +64,10 @@ VENDOR_SKILLS_DIR = config_home() / "vendor-skills"
 # by `skill_import.check_source` before anything is fetched. Outside the tree,
 # so the write fence names it separately (`third_party_write_refusal`).
 SKILL_SOURCES_FILE = config_home() / "skill-sources"
+# The owner's standing "Always for this skill" grants (#467 slice 2c,
+# `skill_grants`). Written only by the agent on his card answer; fenced from
+# every model-driven writer for the same reason the sources file is.
+SKILL_GRANTS_FILE = config_home() / "skill-grants"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # The inline index is capped so the prompt stays small no matter how many
@@ -319,24 +323,37 @@ def third_party_skill_of(path: os.PathLike | str, cwd: str | None = None) -> str
 
 def third_party_write_refusal(path: os.PathLike | str, cwd: str | None = None) -> str:
     """What `path` is, when aish's own writers may not write it (#467 P3):
-    the third-party tree — the lock included — or the approved-sources file,
-    each compared case-insensitively as `in_third_party_tree` says why.
+    the third-party tree — the lock included — the approved-sources file or
+    the standing-grants file (slice 2c), each compared case-insensitively as
+    `in_third_party_tree` says why.
     "" otherwise. Asked by each writer itself, never by `files.plan_write`,
     which the import's own install goes through."""
     if in_third_party_tree(path, cwd):
         return "inside the third-party skills tree"
     if is_sources_file(path, cwd):
         return "the owner's approved skill sources file"
+    if is_grants_file(path, cwd):
+        return "the owner's standing skill grants file"
     return ""
 
 
 def is_sources_file(path: os.PathLike | str, cwd: str | None = None) -> bool:
     """Is `path` the owner's approved-sources file? Resolved, then compared
     case-insensitively, for the reason `in_third_party_tree` gives."""
+    return _is_the_file(SKILL_SOURCES_FILE, path, cwd)
+
+
+def is_grants_file(path: os.PathLike | str, cwd: str | None = None) -> bool:
+    """Is `path` the owner's standing skill grants file (#467 slice 2c)?
+    Compared the way `is_sources_file` compares."""
+    return _is_the_file(SKILL_GRANTS_FILE, path, cwd)
+
+
+def _is_the_file(owned: Path, path: os.PathLike | str, cwd: str | None) -> bool:
     target = files.resolved(path, cwd)
-    sources = files.resolved(SKILL_SOURCES_FILE)
-    return target is not None and sources is not None and (
-        str(target).casefold() == str(sources).casefold()
+    wanted = files.resolved(owned)
+    return target is not None and wanted is not None and (
+        str(target).casefold() == str(wanted).casefold()
     )
 
 

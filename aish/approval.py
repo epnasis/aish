@@ -83,6 +83,23 @@ class Approved:
         self.command = command
 
 
+class AlwaysForSkill:
+    """Tool-card verdict for "Always for this skill" on a `use_skill` card
+    (#467 slice 2c): the owner approved THIS run and asked that later runs of
+    the same reviewed skill draw no card.
+
+    Its own class rather than a flag on `Approved`, because the two must never
+    be confused: `Approved` with a comment HOLDS the action, and an "Always"
+    that carried a comment is answered as exactly that hold, with nothing
+    recorded (#346: no grant for a run that never ran). It carries no content
+    of its own — only which surface the owner answered on. What is granted is
+    the offer the AGENT composed for the card (`skill_grants.Offer`), so a
+    client can choose an offer and never author one."""
+
+    def __init__(self, how: str):
+        self.how = how
+
+
 class Licensed:
     """Approver verdict for a tool call that ran with NO card, because a named
     policy licensed it (#377, #379). Truthy, so every gate that proceeds on an

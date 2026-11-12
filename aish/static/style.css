@@ -1483,6 +1483,10 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; font: inheri
 /* read-card "Trust dir" — a secondary approve, tied to the orange accent */
 .card-actions .trust { flex: 1; background: var(--orange-glow); color: var(--orange); }
 .card-actions.even .approve, .card-actions.even .deny { flex: 1; }
+/* use_skill's "Always for this skill" (#467 slice 2c): a secondary approve
+   that grants more than this run, so it never borrows the green. */
+.card-actions .always-skill { flex: 1; background: var(--orange-glow); color: var(--orange); }
+.skill-always { padding: 0 14px; }
 /* Visible single-key hint on verdict buttons (desktop only — see app.js). The
    neutral translucent chip reads on green/red/orange button backgrounds while
    inheriting the button's own text color. */

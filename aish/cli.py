@@ -53,6 +53,7 @@ from .agent import (
     surface_slot,
 )
 from .approval import (
+    AlwaysForSkill,
     AutoApproved,
     Blocked,
     Licensed,
@@ -842,7 +843,7 @@ def make_import_approver(log, get_intent=None):
     return approve_import
 
 
-def make_tool_approver(log, get_intent=None, get_gate=None):
+def make_tool_approver(log, get_intent=None, get_gate=None, get_offer=None):
     """Gate a mutating plugin tool call (issue #141). Reuses the command
     prompt's shape — the tool name + its structured args stand in for a shell
     string — and there is no denylist. CLI stays y/N (the comment/adjust
@@ -859,11 +860,15 @@ def make_tool_approver(log, get_intent=None, get_gate=None):
     identical action must not need an approval here and none there, or the
     terminal simply inherits the asymmetry the web one shed. The CLI has no
     unattended origin, so the origin-scoped half of that policy has nothing
-    to say here."""
+    to say here.
+
+    `get_offer` is the agent's own offer for the card being drawn (#467 slice
+    2c: "Always for this skill" on a `use_skill` card); with one, the prompt
+    gains an `a` answer that chooses it — the terminal cannot supply one."""
 
     def approve_tool(
         name: str, args: dict, preview: "str | None" = None
-    ) -> "bool | Licensed":
+    ) -> "bool | Licensed | AlwaysForSkill":
         shown = ", ".join(f"{k}={v!r}" for k, v in args.items())
         said = (get_intent() if get_intent else "") or ""
         # A rule holding the call for the owner is asking HIM: no policy may
@@ -888,16 +893,26 @@ def make_tool_approver(log, get_intent=None, get_gate=None):
         if preview:
             # A plugin wrapper's raw preview stdout, on a mutating tool's card.
             print(f"{DIM}  {_plain(preview)}{RESET}")
+        offer = get_offer() if get_offer else None
+        if offer is not None:
+            print(f"{DIM}  a = approve, and run {_plain(offer.skill)} with no card from now "
+                  f"on while its {offer.wire()['files']} reviewed file(s) are unchanged{RESET}")
+        options = "[y/N/a(lways for this skill)]" if offer is not None else "[y/N]"
         try:
-            answer = input(f"{YELLOW}[y/N]{RESET} ").strip().lower()
+            answer = input(f"{YELLOW}{options}{RESET} ").strip().lower()
         except EOFError:
             answer = ""
-        approved = answer in ("y", "yes")
+        always = offer is not None and answer == "a"
+        approved = answer in ("y", "yes") or always
         if log:
             log.command(
-                f"tool {name}({shown})", "approved" if approved else "denied", said,
+                f"tool {name}({shown})",
+                "approved+always-skill" if always else "approved" if approved else "denied",
+                said,
                 asked_by=(get_gate() if get_gate else "") or "",
             )
+        if always:
+            return AlwaysForSkill("terminal card")
         return approved
 
     return approve_tool
@@ -2487,17 +2502,20 @@ def _audit_staged(name: str, dest: Path):
 
 
 def _skill_cli(args: list[str]) -> int:
-    """`aish skill <import|approve|list|discard>` — the review-in-your-editor
+    """`aish skill <import|approve|list|discard|revoke>` — the review-in-your-editor
     path for skill imports (#139). `import` STAGES to a quarantine dir (nothing
     installed); you review the files with your own tools, then `approve` installs.
     For in-session import with an inline review card, just ask aish to import.
     `import` takes the same sources as the tool — an approved GitHub URL, never
-    a local path (#467) — because `stage` decides, and both paths reach it."""
-    from . import skill_import
+    a local path (#467) — because `stage` decides, and both paths reach it.
+    `revoke` withdraws an "Always for this skill" grant (slice 2c): it can only
+    take a permission away, so it is the one write here the model may also
+    reach (through a carded command) without that mattering."""
+    from . import skill_grants, skill_import
 
     usage = (
         "usage: aish skill <import https://github.com/OWNER/REPO [PATH] | approve NAME "
-        "| list | discard NAME>"
+        "| list | discard NAME | revoke NAME>"
     )
     if not args:
         print(usage)
@@ -2539,6 +2557,19 @@ def _skill_cli(args: list[str]) -> int:
         ok = skill_import.discard(rest[0])
         print(f"discarded {rest[0]}" if ok else f"{rest[0]}: not staged")
         return 0 if ok else 1
+    if cmd == "revoke" and rest:
+        before = skill_grants.last_act(rest[0])
+        if not skill_grants.revoke(rest[0], "aish skill revoke"):
+            print(f"error: could not write {skill_grants.skills.SKILL_GRANTS_FILE}")
+            return 1
+        if before == skill_grants.GRANTED:
+            print(f"revoked: {rest[0]} asks on a card again from its next run")
+        elif before == "unreadable":
+            print(f"recorded a revocation for {rest[0]}; the grants file has lines aish "
+                  "cannot read, so no grant in it is honoured until it is fixed")
+        else:
+            print(f"recorded a revocation for {rest[0]}; it had no standing grant")
+        return 0
     print(usage)
     return 2
 
@@ -3005,6 +3036,10 @@ def main() -> int:
         # on the agent, the log lives here.
         return agent_holder[0].asking_gate() if agent_holder else ""
 
+    def get_offer():
+        # What the card offers to remember (#467 slice 2c) — the agent's own.
+        return agent_holder[0].card_offer() if agent_holder else None
+
     agent: Agent | ClaudeMaxAgent
     if provider == "claude-max":
         # aliased so the annotation above binds the TYPE_CHECKING import,
@@ -3026,7 +3061,7 @@ def main() -> int:
             approve_read=make_read_approver(
                 logref, trust_dir=trust_dir, get_intent=get_intent
             ),
-            approve_tool=make_tool_approver(logref, get_intent, get_gate),
+            approve_tool=make_tool_approver(logref, get_intent, get_gate, get_offer),
             approve_import=make_import_approver(logref, get_intent),
             echo=echo,
             stream=stream_line,
@@ -3063,7 +3098,7 @@ def main() -> int:
             approve_read=make_read_approver(
                 logref, trust_dir=trust_dir, get_intent=get_intent
             ),
-            approve_tool=make_tool_approver(logref, get_intent, get_gate),
+            approve_tool=make_tool_approver(logref, get_intent, get_gate, get_offer),
             approve_import=make_import_approver(logref, get_intent),
             echo=echo,
             stream=stream_line,

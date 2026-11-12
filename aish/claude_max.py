@@ -292,6 +292,13 @@ class ClaudeMaxAgent:
         # approval this backend ever shows.
         return self.inner.turn_intent()
 
+    def card_offer(self):
+        # Hand-forwarded like `asking_gate` (#467 slice 2c). Missing, every
+        # tool card on this backend would raise inside the approver; the
+        # backend never reaches the one card that offers anything, because
+        # use_skill is refused on claude-max before its card.
+        return self.inner.card_offer()
+
     def asking_gate(self) -> str:
         # Same seam, same hazard, one line lower (#295 M3): the gates run on
         # the inner agent because `_locked_dispatch` routes through it, so that

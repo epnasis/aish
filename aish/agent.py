@@ -68,6 +68,7 @@ from . import (
     schedule,
     secrets,
     skill_env,
+    skill_grants,
     skill_import,
     skill_runner,
     skillaudit,
@@ -84,6 +85,7 @@ from . import (
 )
 from . import plan as checklist
 from .approval import (
+    AlwaysForSkill,
     Approved,
     AutoApproved,
     Blocked,
@@ -773,6 +775,12 @@ def _cardless_line(name: str, args: dict, policy: str, *, ran_ok: bool) -> str:
         sentence = vault_writes.announce(args, ran_ok=ran_ok)
     elif policy == recipients.OWNER_ONLY:
         sentence = recipients.announce(args, ran_ok=ran_ok)
+    elif policy == skill_grants.STANDING_GRANT:
+        sentence = (
+            f"Ran the third-party skill {args.get('skill')!r} without a card, on your "
+            f"standing approval of {args.get('at')} (\"Always for this skill\"): "
+            f"{args.get('ended')}. `aish skill revoke {args.get('skill')}` withdraws it."
+        )
     else:
         return _generic_cardless_line(name, _shown_args(args), 1, ran_ok=ran_ok)
     return AISH_LINE + " ".join(sentence.split())
@@ -798,7 +806,8 @@ class _Cardless:
         self._entries: list[dict] = []
 
     def add(self, name: str, args: dict, policy: str, *, ran_ok: bool) -> None:
-        if policy in (vault_writes.OWNER_OPTED, recipients.OWNER_ONLY):
+        if policy in (vault_writes.OWNER_OPTED, recipients.OWNER_ONLY,
+                      skill_grants.STANDING_GRANT):
             self._entries.append(
                 {"line": _cardless_line(name, args, policy, ran_ok=ran_ok)}
             )
@@ -957,7 +966,7 @@ _CHARTER_WORDS = ("charters", "roles", "AISH_CONFIG_HOME")
 _AUTOMATION_WORDS = ("automations", "AISH_CONFIG_HOME")
 # The same, for the third-party skills tree and the owner's approved-sources
 # file (#467 slice 3). Matched case-insensitively: the owner's disk is.
-_THIRD_PARTY_WORDS = ("vendor-skills", "skill-sources", "AISH_CONFIG_HOME")
+_THIRD_PARTY_WORDS = ("vendor-skills", "skill-sources", "skill-grants", "AISH_CONFIG_HOME")
 
 
 def _is_dynamic(text: str) -> bool:
@@ -1279,16 +1288,17 @@ AUTOMATION_NOT_WRITABLE = (
 THIRD_PARTY_NOT_WRITABLE = (
     "NOT EXECUTED: {path} is {what}. aish's file and skill tools never write "
     "there. Changing a third-party skill (retiring it, or deleting it and "
-    "importing it again) and changing the approved sources are the owner's own "
-    "edits. There is nothing to approve here — if something there should "
-    "change, tell the user what and why."
+    "importing it again), changing the approved sources and changing his "
+    "standing skill approvals are the owner's own edits. There is nothing to "
+    "approve here — if something there should change, tell the user what and why."
 )
 
 THIRD_PARTY_COMMAND_REFUSED = (
     "NOT EXECUTED: this command names {where} — the third-party skills aish "
-    "imported, or the owner's list of the sources they may come from. A command "
-    "naming either is refused whether it would read or write, because that "
-    "cannot be told apart from the command text. To use a third-party skill, "
+    "imported, the owner's list of the sources they may come from, or his "
+    "standing approvals for them. A command naming any of these is refused "
+    "whether it would read or write, because that cannot be told apart from "
+    "the command text. To use a third-party skill, "
     "call use_skill. There is nothing to approve here — if something there "
     "should change, tell the user what and why."
 )
@@ -4452,6 +4462,10 @@ class Agent:
         # cleared around a single blocking call by `_ask_owner`, which is the
         # only thing that may write it.
         self._gate_asking = ""
+        # What the card being drawn RIGHT NOW offers to remember, beside the
+        # gate label and with the same lifetime: set and cleared by
+        # `_ask_owner` (#467 slice 2c — "Always for this skill").
+        self._card_offer: skill_grants.Offer | None = None
         # Tokens withheld from the client while a bound turn's answer is still
         # unverified. `None` means stream normally.
         self._held_answer: list[str] | None = None
@@ -13335,8 +13349,9 @@ class Agent:
         )
 
     def _command_touches_third_party(self, command: str) -> str:
-        """The third-party skills tree or the approved-sources file this shell
-        command names, or "" (#467 slice 3) — the charter fence's four nets,
+        """The third-party skills tree, the approved-sources file or the
+        standing-grants file (slice 2c) this shell command names, or ""
+        (#467 slice 3) — the charter fence's four nets,
         with containment asked the case-folding way `skills.in_third_party_tree`
         and `skills.is_sources_file` ask it, because on the owner's disk
         `VENDOR-SKILLS/x` IS the tree. The file and skill tools already refuse
@@ -13345,7 +13360,7 @@ class Agent:
         — for any spelling the command TEXT shows."""
         return self._command_names_a_store(
             command,
-            [skills.VENDOR_SKILLS_DIR, skills.SKILL_SOURCES_FILE],
+            [skills.VENDOR_SKILLS_DIR, skills.SKILL_SOURCES_FILE, skills.SKILL_GRANTS_FILE],
             _THIRD_PARTY_WORDS,
             contains=self._in_third_party_store,
             casefold=True,
@@ -13355,6 +13370,10 @@ class Agent:
     def _in_third_party_store(store: Path, candidate: str, base: str) -> bool:
         if store == skills.SKILL_SOURCES_FILE:
             return skills.is_sources_file(candidate, base)
+        if store == skills.SKILL_GRANTS_FILE:
+            # The owner's standing grants (#467 slice 2c): a command that could
+            # append one would be the model granting itself cardless runs.
+            return skills.is_grants_file(candidate, base)
         return skills.in_third_party_tree(candidate, base)
 
     def _command_names_a_store(
@@ -14473,7 +14492,18 @@ class Agent:
             hint = " " + SANDBOX_WHICH_HINT
         return SANDBOX_REFUSED_NOTE.format(allowed=allowed, refused=refused, hint=hint)
 
-    def _ask_owner(self, gate: str, name: str, args: dict, preview: "str | None"):
+    def card_offer(self) -> "skill_grants.Offer | None":
+        """What the card being drawn offers to remember, for the approver
+        (#467 slice 2c). Late-bound like `asking_gate`, and for a sharper
+        reason: the offer's content is composed HERE, from what the gate read
+        for this card, so an approver can show it and choose it but never
+        supply one. None for every card that offers nothing."""
+        return self._card_offer
+
+    def _ask_owner(
+        self, gate: str, name: str, args: dict, preview: "str | None",
+        offer: "skill_grants.Offer | None" = None,
+    ):
         """Draw one approval card and say WHICH GATE drew it.
 
         Every `approve_tool` call in this file goes through here. That is the
@@ -14486,10 +14516,12 @@ class Agent:
         round trip to a phone that may never answer — and a label left standing
         would be stamped on whatever decision came next."""
         self._gate_asking = gate
+        self._card_offer = offer
         try:
             return self.approve_tool(name, args, preview)  # type: ignore[misc]
         finally:
             self._gate_asking = ""
+            self._card_offer = None
 
     def turn_intent(self) -> str:
         """What the model said before proposing this step's actions — the
@@ -16740,8 +16772,10 @@ class Agent:
         """Run a third-party skill in quarantine (#467 slice 2b,
         `skill_runner`). Refused before any card unless a person started
         this chat, the backend has a stateless seam, the inputs check out and
-        the Tier S sandbox is available; then carded, every call; then run
-        with nothing of this conversation. The result is outside content."""
+        the Tier S sandbox is available; then carded — unless the owner's
+        standing grant covers this exact reviewed skill (slice 2c), which
+        replaces the card and nothing else; then run with nothing of this
+        conversation. The result is outside content."""
         name = str(args.get("name", "") or "").strip()
         brief = str(args.get("brief", "") or "").strip()
         if self.origin != "user":
@@ -16800,13 +16834,43 @@ class Agent:
             "the skill's own folder and its packages; every command runs in aish's sandbox "
             "with no network, and it writes only to its own scratch folder."
         )
-        if skill_import.recorded_hashes(skills.VENDOR_SKILLS_DIR, skill_dir.name) is None:
+        # ONE read of the lock's hashes feeds the card's warning, the standing
+        # grant check and the grant an "Always" records (#467 slice 2c), so
+        # the three can never describe different reviews.
+        recorded = skill_import.recorded_hashes(skills.VENDOR_SKILLS_DIR, skill_dir.name)
+        if recorded is None:
             preview += (
                 " Its files have NO recorded review hashes, so aish did not check "
                 "whether they changed since import."
             )
         card_args = dict(skill=entry.name, brief=brief, inputs=inputs)
-        decision = self._ask_owner(ASKED_BY_SKILL, "use_skill", card_args, preview)
+        # The grant check sits HERE — after every refusal above, the
+        # no-approver one included — and replaces only the card.
+        grant = self._standing_skill_grant(entry.name, recorded, skill_dir)
+        approved_by = skill_grants.STANDING_GRANT if grant else "card"
+        decision: Any
+        if grant is not None:
+            decision = True
+        else:
+            offer = (
+                skill_grants.Offer(entry.name, recorded)
+                if recorded and skill_grants.readable()
+                else None
+            )
+            decision = self._ask_owner(ASKED_BY_SKILL, "use_skill", card_args, preview, offer)
+            if isinstance(decision, AlwaysForSkill) and offer is not None:
+                # The owner's own act, for exactly what this card offered. A
+                # verdict naming no offer (none was made) is a plain approval.
+                grant = skill_grants.record(offer, decision.how)
+                # echo, not _note: the web owner must see this line too.
+                self.echo(
+                    f"✓ always for this skill: {entry.name!r} runs with no card while "
+                    f"its {len(recorded or {})} reviewed file(s) are unchanged — "
+                    f"`aish skill revoke {entry.name}` withdraws it"
+                    if grant else
+                    f"✗ Always for {entry.name!r} was NOT recorded: the grants file could "
+                    "not be read or written; this run is approved once"
+                )
         if isinstance(decision, Denied):
             shutil.rmtree(run_dir, ignore_errors=True)
             self._arm_stop_gate(decision.comment)
@@ -16823,7 +16887,10 @@ class Agent:
         if decision is None or decision is False:
             shutil.rmtree(run_dir, ignore_errors=True)
             return _gate_outcome(USE_SKILL_DENIED, decision="denied")
-        self._note(f"→ use_skill: running {entry.name!r} in an isolated runner")
+        if approved_by == skill_grants.STANDING_GRANT:
+            self._note(f"→ use_skill: running {entry.name!r} with no card (standing grant)")
+        else:
+            self._note(f"→ use_skill: running {entry.name!r} in an isolated runner")
         self.status.start("use_skill")
         try:
             outcome = skill_runner.run(skill_runner.Request(
@@ -16836,10 +16903,42 @@ class Agent:
         finally:
             self.status.stop()
         self._emit_record(
-            kind="skill_run", call=getattr(self._call_ids, "current", 0), **outcome.record()
+            kind="skill_run", call=getattr(self._call_ids, "current", 0), **outcome.record(),
+            inputs=inputs, approved=approved_by,
+            **({"grant": {"at": grant.at, "how": grant.how}} if grant else {}),
         )
         self._note(f"→ use_skill: {outcome.ended_sentence()}; {len(outcome.files)} file(s)")
+        if approved_by == skill_grants.STANDING_GRANT:
+            # Told to the OWNER, never the model: the envelope below is the
+            # same bytes a carded run returns (slice 2c, review F4).
+            assert grant is not None
+            self._cardless.add(
+                "use_skill",
+                {"skill": entry.name, "at": grant.at,
+                 "ended": skill_runner.flatten(outcome.ended_sentence(), 300)},
+                skill_grants.STANDING_GRANT,
+                ran_ok=outcome.ended == skill_runner.ENDED_ANSWERED,
+            )
+            self.cardless_this_task += 1
         return outcome.envelope()
+
+    def _standing_skill_grant(
+        self, skill: str, recorded: dict[str, str] | None, skill_dir: Path
+    ) -> "skill_grants.Grant | None":
+        """The owner's standing grant for this run, or None (#467 slice 2c).
+
+        Bound to `recorded` — the lock's hashes as read for this card — and
+        the skill's folder is checked against those same hashes once more, so
+        the grant, the lock entry and the files on disk agree at the moment a
+        card would have been drawn. The SKILL.md body the runner gets was read
+        a moment earlier by `load_skill`, verified against the lock as read
+        then; a lock rewritten in between is the named residual."""
+        grant = skill_grants.standing(skill, recorded)
+        if grant is None or recorded is None:
+            return None
+        if skill_dir.is_symlink() or skill_import.check_folder(skill_dir, recorded, {}):
+            return None
+        return grant
 
     def _dispatch_write(self, name: str, args: dict) -> str:
         # Before the plan, because planning an edit reads the file. A write
