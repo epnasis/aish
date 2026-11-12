@@ -35,7 +35,9 @@ __all__ = ["app_env"]  # the fixture, imported for pytest
 
 class TestTheReportFindings:
     def test_a_copy_in_the_other_inbox_does_not_come_back_the_next_day(self, tmp_path):
-        """B1: the dropped copy is recorded as shown with the one that was."""
+        """B1: the dropped copy is recorded as shown with the one that was. The
+        open line itself is listed again next morning — once, as the Gmail
+        copy, no longer new — and the copy never becomes a line of its own."""
         fresh_health(tmp_path)
         tuta = add_mail(tmp_path, "t", frm="a@x.example", subject="twice", at=NOW - DAY,
                         mid="same@x.example", mailbox="tuta")
@@ -46,7 +48,8 @@ class TestTheReportFindings:
         run(tmp_path, FakePost([ok()]))
         assert sorted(mailreport.read_ledger(tmp_path)[-1]["digests"]) == sorted(
             [tuta.digest, gm.digest])
-        assert build(tmp_path, now=NOW + DAY).needs == []
+        again = build(tmp_path, now=NOW + DAY).needs
+        assert [(i.header.mailbox, i.new) for i in again] == [("gmail", False)]
 
     def test_one_message_id_from_two_senders_is_two_mails(self, tmp_path):
         """M4: a squatted Message-ID never merges a stranger's mail with a real one."""

@@ -325,17 +325,17 @@ def charter_digest() -> str:
 def showable(ctx: mailitems.Context, since: float | None = None) -> list[mailitems.OpenItem]:
     """The items the next report could show — the only ones worth a call:
     every follow-up (they are state, recomputed each morning), and the needs
-    items that are news by the report's own window (`mailreport.news_window`)
-    or that he restored; none his hide preferences take out of the report."""
-    from . import mailprefs, mailreport
+    items that earn a line (`Context.line_facts`) inside the window — the
+    report shows such an item every morning while it is open, so its state
+    and not its news decides; none his hide preferences take out of the
+    report. `since` is accepted for the callers' signature and no longer
+    narrows anything: a line is not news-gated."""
+    from . import mailprefs
 
-    window = ctx.now - mailreport.FOLLOWUP_WINDOW_DAYS * 86400
-    floor, shown, hides = window, None, []
-    if ctx.state_dir is not None:
-        _since, _from, floor, shown = mailreport.news_window(ctx.state_dir, ctx.now, since)
-        hides = mailprefs.Store.load(ctx.state_dir).of(mailprefs.HIDE)
-    restored = {a for a, act in ctx.acts.items() if act.get("verb") == mailitems.RESTORE}
-    derived = ctx.derive(needs_since=min(floor, window))
+    del since
+    hides = (mailprefs.Store.load(ctx.state_dir).of(mailprefs.HIDE)
+             if ctx.state_dir is not None else [])
+    derived = ctx.derive()
 
     def hidden(header: mailindex.Header | None, reading: Any, party: str) -> bool:
         kind = str((reading.verdict if reading else {}).get("kind") or "")
@@ -347,7 +347,7 @@ def showable(ctx: mailitems.Context, since: float | None = None) -> list[mailite
     for item in derived.needs:
         if item.open_item is None or hidden(item.header, item.reading, ""):
             continue
-        if mailreport._eligible(item.reading, floor, shown) or item.reading.digest in restored:
+        if ctx.line_facts(item):
             out.append(item.open_item)
     for row in (*derived.yours, *derived.theirs):
         if row.open_item is not None and not hidden(row.latest, row.reading, row.counterparty):

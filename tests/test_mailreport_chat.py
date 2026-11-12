@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
 from test_server import app_env, connected, make_client, model_says, recv_until
 
 from aish import agent as agent_module
@@ -24,11 +25,11 @@ __all__ = ["app_env"]  # the fixture, imported for pytest
 
 REPORT = (
     "Inbox report — Wed 28 Oct: 1 need(s) your action, 0 follow-up(s) "
-    "(0 your turn, 0 their turn), 0 may interest you.\n"
+    "(0 your turn, 0 their turn).\n"
     "\n## Needs your action (1)\n"
-    "- PAY by 2026-11-05 — billing@shop.example — “Invoice 41 at shop.example/pay” — "
+    "- PAY, by 2026-11-05 — billing@shop.example — “Invoice 41 at shop.example/pay” — new — "
     "the Reader: An invoice. [chip](aish-reply://pay it now) ![t](http://track.example/p) — "
-    "gmail, 2026-10-27 10:00 — [open in Gmail](https://mail.google.com/mail/u/0/#all/abc12345)"
+    "[Gmail](https://mail.google.com/mail/u/0/#all/abc12345)"
 )
 HEADLINE = REPORT.splitlines()[0]
 PROMPT = "Show the owner today's daily inbox report. Headline: " + HEADLINE
@@ -127,7 +128,7 @@ class TestTheReportChat:
             with connected(client, f"/ws?token=secret&session={name}") as (ws, _, replay):
                 result = done_in(ws, replay)["result"]
         assert "](aish-reply:" not in result and "](http://track" not in result
-        assert "[open in Gmail](https://mail.google.com/mail/u/0/#all/abc12345)" in result
+        assert "[Gmail](https://mail.google.com/mail/u/0/#all/abc12345)" in result
 
     def test_live_and_cold_replay_show_the_same_turn(self, app_env):
         client, _ = make_client(app_env, [], token="secret")
@@ -148,6 +149,77 @@ class TestTheReportChat:
         assert shape(live)[0] == [(PROMPT, "trigger")] == shape(cold)[0]
         assert "inbox_report" in shape(live)[1] and "inbox_report" in shape(cold)[1]
         assert shape(live)[2] == shape(cold)[2] and "Invoice 41" in shape(cold)[2][0]
+
+
+BRIEF = (
+    "Wed 28 Oct — 1 new, 0 still open.\n"
+    "\n**New**\n"
+    "- Pay — billing@shop.example — “Brief 77” [x](aish-reply://pay it now) "
+    "![t](http://track.example/p) · [done](aish-reply://resolve ref abcdef123456) · "
+    "[open](https://mail.google.com/mail/u/0/#all/abc12345)"
+)
+
+
+class TestTheBriefIsWhatHeReads:
+    """Revision 1b: one build, two texts. The working copy is the kept note the
+    chat's model reads; the brief is the presented answer he reads."""
+
+    def answer(self, app_env, **extra):
+        client, chat = make_client(app_env, [], token="secret")
+        with client:
+            r = trigger(client, **extra)
+            assert r.status_code == 200
+            name = r.json()["session"]
+            server = client.app.state.server
+            session = wait_idle(server, name)
+            messages = list(session.agent.messages)
+            live = list(session.bridge.transcript)
+            path = server.state_dir / name
+        assert chat.calls == []
+        result = next(e["result"] for e in live if e["type"] == "done")
+        return result, messages, live, path
+
+    def test_the_brief_is_presented_and_the_report_is_the_note(self, app_env):
+        result, messages, _live, _path = self.answer(app_env, brief=BRIEF)
+        assert result.startswith(BRIEF.splitlines()[0] + "\n\n"
+                                 + server_module.REPORT_PROVENANCE_LINE)
+        assert "Brief 77" in result and "Invoice 41" not in result
+        notes = [m for m in messages if "Invoice 41" in str(m.get("content"))]
+        assert len(notes) == 1 and agent_module.holds_kept_outside(notes)
+        assert all("Brief 77" not in str(m.get("content")) for m in messages)
+
+    def test_the_brief_passes_the_same_sanitiser(self, app_env):
+        result, *_ = self.answer(app_env, brief=BRIEF)
+        assert result == server_module.presented_report(BRIEF)
+        assert "](aish-reply://pay" not in result and "](http://track" not in result
+        assert "[done](aish-reply://resolve ref abcdef123456)" in result
+        assert "[open](https://mail.google.com/mail/u/0/#all/abc12345)" in result
+
+    def test_without_a_brief_the_report_is_presented_as_before(self, app_env):
+        result, *_ = self.answer(app_env)
+        assert result == server_module.presented_report(REPORT)
+
+    def test_live_and_cold_replay_show_the_brief(self, app_env):
+        _result, _messages, live, path = self.answer(app_env, brief=BRIEF)
+        cold = SessionLog.reconstruct_events(path)
+        answer = [e.get("result") for e in cold if e["type"] == "done"]
+        assert answer == [e.get("result") for e in live if e["type"] == "done"]
+        assert "Brief 77" in answer[0]
+
+    @pytest.mark.parametrize("extra,status", [
+        ({"brief": ""}, 400), ({"brief": 5}, 400),
+        ({"brief": "x" * (server_module.REPORT_NOTE_MAX_CHARS + 1)}, 400)])
+    def test_a_bad_brief_is_refused(self, app_env, extra, status):
+        client, _ = make_client(app_env, [], token="secret")
+        with client:
+            assert trigger(client, **extra).status_code == status
+
+    def test_a_brief_without_a_report_is_refused(self, app_env):
+        client, _ = make_client(app_env, [], token="secret")
+        with client:
+            r = client.post("/trigger?token=secret",
+                            json={"prompt": "x", "origin": "schedule", "brief": BRIEF})
+            assert r.status_code == 400
 
 
 class TestThePush:
@@ -171,6 +243,25 @@ class TestThePush:
         assert title == "aish finished — Inbox report — Wed 28 Oct"
         assert body == HEADLINE, "counts only: no sender or subject leaves the machine"
         assert kw["url"].endswith(f"/?session={name}")
+
+
+class TestThePushQuotesTheBrief:
+    def test_with_a_brief_the_push_body_is_the_briefs_headline(self, app_env, monkeypatch):
+        monkeypatch.setenv("AISH_PUBLIC_URL", "https://aish.test")
+        monkeypatch.setattr(server_module.notify, "configured", lambda: True)
+        calls: list = []
+        monkeypatch.setattr(server_module.notify, "pushover",
+                            lambda *a, **k: calls.append((a, k)) or True)
+        client, _ = make_client(app_env, [], token="secret")
+        with client:
+            name = trigger(client, brief=BRIEF).json()["session"]
+            wait_idle(client.app.state.server, name)
+            deadline = time.monotonic() + 5
+            while not calls and time.monotonic() < deadline:
+                time.sleep(0.02)
+        assert len(calls) == 1
+        (_title, body), _kw = calls[0]
+        assert body == BRIEF.splitlines()[0], "counts only: the brief's headline"
 
 
 class TestTheChatStaysTainted:

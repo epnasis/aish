@@ -64,7 +64,8 @@ def mail(state, gid, *, frm, wanted="pay", subject="", to=OWNER, at=NOW - DAY, *
 
 
 def shown(report) -> list[str]:
-    return [i.header.subject for i in (*report.needs, *report.interest)]
+    """Every mail the report lists, folded ones included."""
+    return [m.header.subject for line in report.needs for m in line.mails()]
 
 
 def text(report) -> str:
@@ -193,14 +194,14 @@ class TestEachKindsEffect:
         assert f"[first: your preference {pref_id}]" in text(report)
 
     def test_not_a_follow_up_counterparty_and_conversation(self, tmp_path):
-        # Older than the report's 7-day news window, so the answers are not
-        # also under Needs your action (which Follow-ups does not repeat).
+        # Answers the Reader could not tell about, so they are not also lines
+        # under Needs your action (which Follow-ups does not repeat).
         fresh_health(tmp_path)
         his = add_mail(tmp_path, "o1", frm=OWNER, to="catherine@x.example", subject="Invoice",
                        sent=True, at=NOW - 12 * DAY, mid="o1@m")
         ans = add_mail(tmp_path, "i1", frm="catherine@x.example", subject="Re: Invoice",
                        at=NOW - 11 * DAY, in_reply_to="o1@m", references="o1@m")
-        add_verdict(tmp_path, ans, wanted="reply")
+        add_verdict(tmp_path, ans, wanted="cannot_tell")
         add_mail(tmp_path, "o2", frm=OWNER, to="bob@y.example", subject="Question",
                  sent=True, at=NOW - 8 * DAY)
         report = build(tmp_path)
@@ -215,7 +216,7 @@ class TestEachKindsEffect:
         later = add_mail(tmp_path, "i2", frm="catherine@x.example", subject="Re: Invoice",
                          at=NOW - 9 * DAY, in_reply_to="i1@mail.example",
                          references="o1@m i1@mail.example")
-        add_verdict(tmp_path, later, wanted="decide")
+        add_verdict(tmp_path, later, wanted="cannot_tell")
         assert [f.counterparty for f in build(tmp_path).yours] == ["catherine@x.example"]
 
     def test_reminders_are_shown_in_follow_ups_when_due(self, tmp_path):
@@ -320,10 +321,10 @@ class TestTheSafetyFloor:
                  at=NOW - 14 * DAY, mid="o1@m")
         first = add_mail(tmp_path, "i1", frm="c@x.example", subject="Re: Invoice",
                          at=NOW - 13 * DAY, in_reply_to="o1@m")
-        add_verdict(tmp_path, first, wanted="reply", suspicion="suspicious")
+        add_verdict(tmp_path, first, wanted="cannot_tell", suspicion="suspicious")
         second = add_mail(tmp_path, "i2", frm="c@x.example", subject="Re: Invoice",
                           at=NOW - 12 * DAY, in_reply_to="i1@mail.example")
-        add_verdict(tmp_path, second, wanted="reply")  # the newest asking mail, clean
+        add_verdict(tmp_path, second, wanted="cannot_tell")  # the newest asking mail, clean
         save(tmp_path, kind="not_a_follow_up", counterparty="c@x.example")
         report = build(tmp_path)
         assert [f.counterparty for f in report.yours] == ["c@x.example"]
@@ -367,7 +368,8 @@ class TestTheSafetyFloor:
                  at=NOW - 12 * DAY, mid="o1@m")
         ans = add_mail(tmp_path, "i1", frm="c@x.example", subject="Re: Invoice",
                        at=NOW - 11 * DAY, in_reply_to="o1@m")
-        add_verdict(tmp_path, ans, wanted="pay", case_flags={"coordinates_changed": ["c"]})
+        add_verdict(tmp_path, ans, wanted="cannot_tell",
+                    case_flags={"coordinates_changed": ["c"]})
         save(tmp_path, kind="not_a_follow_up", counterparty="c@x.example")
         report = build(tmp_path)
         assert [f.counterparty for f in report.yours] == ["c@x.example"]
@@ -395,7 +397,9 @@ class TestTheFooter:
         assert "3 (familysafety@microsoft.com)" in hidden_line
         assert b in hidden_line and "1 (shop@superduo.example)" in hidden_line
 
-    def test_the_size_cap_never_cuts_the_footer(self, tmp_path):
+    def test_the_size_cap_never_cuts_the_footer(self, tmp_path, monkeypatch):
+        # Lines are short now; a smaller cap exercises the same law.
+        monkeypatch.setattr(mailreport, "REPORT_MAX_CHARS", 6_000)
         fresh_health(tmp_path)
         for n in range(30):
             mail(tmp_path, f"m{n}", frm=f"s{n}@shop.example", subject="x" * 120,

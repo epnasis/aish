@@ -6147,10 +6147,23 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
             return JSONResponse(
                 {"error": f"report over the {REPORT_NOTE_MAX_CHARS}-char cap"}, status_code=400
             )
+        # The owner's brief: a second, shorter text of the SAME build, presented
+        # as the turn's answer while `report` stays the kept note the chat's
+        # model works from. Only beside a report — alone it would present text
+        # the model in that chat has never seen.
+        brief = body.get("brief")
+        if brief is not None and (not isinstance(brief, str) or not brief.strip()):
+            return JSONResponse({"error": "brief must be a non-empty string"}, status_code=400)
+        if brief is not None and report is None:
+            return JSONResponse({"error": "brief needs a report"}, status_code=400)
+        if brief is not None and len(brief) > REPORT_NOTE_MAX_CHARS:
+            return JSONResponse(
+                {"error": f"brief over the {REPORT_NOTE_MAX_CHARS}-char cap"}, status_code=400
+            )
 
         outcome = await self.launch_triggered(
             prompt, origin, meta, title=title, model_override=model_override,
-            report=report or "",
+            report=report or "", brief=brief or "",
         )
         if outcome.status == scheduling.DEDUPED:
             return JSONResponse(
@@ -6185,6 +6198,7 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
         monitor: scheduling.MonitorSpec | None = None,
         psu_ua: str = "",
         report: str = "",
+        brief: str = "",
     ) -> scheduling.TriggerOutcome:
         """THE ingress for a non-user session, past the token/origin gates.
         `POST /trigger` and the scheduler both come through here, so a
@@ -6263,8 +6277,9 @@ except Exception as ex:  # noqa: BLE001 - report any listing failure as 500
                 REPORT_NOTE_HEADING, report, source=REPORT_NOTE_SOURCE, kept=True
             )
             # And the turn's answer, composed by code: the owner reads the
-            # report as written, with no model between (`Agent.present`).
-            present = presented_report(report)
+            # brief (else, from an older sender, the report) as written, with
+            # no model between (`Agent.present`), through the same sanitiser.
+            present = presented_report(brief or report)
         session.runner = asyncio.ensure_future(
             self._run_task(session, prompt, monitor=monitor, present=present)
         )

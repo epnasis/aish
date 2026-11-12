@@ -1355,8 +1355,9 @@ def main(argv: list[str] | None = None) -> int:
                         "the answers open follow-ups rest on, then judge tied later mail; no "
                         "mailbox is read")
     parser.add_argument("--since", default="",
-                        help="with --settle: YYYY-MM-DD or <N>d — weigh the needs items the "
-                        "report would show with the same --since (default: its own window)")
+                        help="with --settle: YYYY-MM-DD or <N>d — accepted, and no longer "
+                        "changes what is weighed: the report lists an open item every "
+                        "morning inside its window, whatever --since says")
     parser.add_argument("--reobserve", action="store_true",
                         help="one-shot: fold every indexed mail on no case through the case "
                         "store under today's laws (the backfill's observe loop); no mailbox, no "

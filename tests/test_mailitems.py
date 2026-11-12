@@ -440,9 +440,10 @@ class TestNearDuplicates:
         b = add_mail(tmp_path, "d2", frm="admin@school.example", subject="New message",
                      at=NOW - DAY, body="same")
         for h in (a, b):
-            add_verdict(tmp_path, h, recorded_at=NOW - DAY + 60)
+            add_verdict(tmp_path, h, wanted="pay", recorded_at=NOW - DAY + 60)
         report = mailreport.build(tmp_path, now=NOW, clean=lambda t: t)
-        (item,) = report.interest
+        (item,) = report.needs
+        assert item.folded == []  # a near-duplicate is a twin, not a folded mail
         assert len(item.twins) == 1 and not item.twins_differ
         assert set(report.shown_digests()) == {a.digest, b.digest}
         text = mailreport.render(report, clean=lambda t: t)

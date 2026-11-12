@@ -235,8 +235,8 @@ class TestTheReport:
         for n in range(40):
             h = add_mail(tmp_path, f"x{n}", frm=f"s{n}@shop.example", subject="x" * 100,
                          at=NOW - DAY + n)
-            add_verdict(tmp_path, h, meaning="m" * 190)
-        monkeypatch.setattr(mailreport, "REPORT_MAX_CHARS", 9_000)
+            add_verdict(tmp_path, h, wanted="pay", meaning="m" * 190)
+        monkeypatch.setattr(mailreport, "REPORT_MAX_CHARS", 6_000)
         text = mailreport.render(self.build(tmp_path), clean=lambda t: t)
         assert "(the report was cut here, at its size cap)" in text
         assert "## Probably settled (1)" in text and "probably settled:" in text

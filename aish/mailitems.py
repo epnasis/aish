@@ -12,6 +12,8 @@ An **item** is one thing the daily report would put in front of the owner:
 
 `derive` is the ONE derivation, called by the watcher's settlement pass and by
 the 07:30 report alike, so the two can never disagree about what is open.
+Whether a needs item earns its own line in the brief is `Context.line_facts`
+— recorded facts only — and `mailsettle.showable` reads the same test.
 
 **Whether an item is still open** is `Context.state_of`, from four sources in a
 fixed order — his word, then a verified judgement, then a deterministic rule:
@@ -94,6 +96,18 @@ ENTITY_TOKEN_MIN = 4
 #: candidate. Both CHOICES, from the design (2026-11-02, change 1).
 THIRD_PARTY_MIN_CASES = 2
 THIRD_PARTY_MIN_AGE_DAYS = 30
+
+#: The recorded facts that earn a needs item its own line in the brief
+#: (`Context.line_facts`). The Reader's `decide` is not one: alone it was the
+#: measured over-call (190 of 637 readings); with any of these it keeps its word.
+FACT_DEADLINE = "dated deadline"
+FACT_MONEY = "money recorded"
+FACT_CORRESPONDENT = "a sender you write to"
+FACT_PREFERENCE = "your preference"
+FACT_CAUTION = "caution"
+FACT_RESTORED = "you restored it"
+LINE_FACTS = (FACT_DEADLINE, FACT_MONEY, "pay", "reply", FACT_CORRESPONDENT, FACT_PREFERENCE,
+              FACT_CAUTION, FACT_RESTORED)
 
 #: The case-key kinds (`mailcases._KEY_KINDS`) that make an item a delivery.
 DELIVERY_KEY_KINDS = ("order", "tracking")
@@ -385,9 +399,12 @@ class Context:
         self.copies = own_copies(self.index)
         # His settler vouches: exact (domain, meaning) pairs (`mailvouch`).
         self.vouched = mailvouch.current(state_dir)
-        # His `important` preferences: entity + meaning, placing mail under Needs.
-        self.important = (mailprefs.Store.load(state_dir).of(mailprefs.IMPORTANT)
-                          if state_dir is not None else [])
+        # His `important` preferences: entity + meaning, placing mail under Needs;
+        # and his `show_first` ones, which earn an item its line (`line_facts`).
+        prefs = mailprefs.Store.load(state_dir) if state_dir is not None else None
+        self.important = prefs.of(mailprefs.IMPORTANT) if prefs is not None else []
+        self.show_first = prefs.of(mailprefs.SHOW_FIRST) if prefs is not None else []
+        self._correspondent: dict[str, bool] = {}
         self.mine = mailreport.owner_addresses(self.index)
         self._read: dict[str, float] = {}
         self._keys: dict[str, frozenset[str]] = {}
@@ -556,11 +573,8 @@ class Context:
         header = self.index.get(digest)
         reading = self.readings.get(digest)
         out = {"anything"}
-        records = reading.records if reading is not None else ()
         wanted = str((reading.verdict if reading else {}).get("wanted") or "")
-        accounts = any((r.get("code_coordinates") or (r.get("verdict") or {}).get(
-            "payment_coordinates")) for r in records if isinstance(r, dict))
-        if wanted == "pay" or self.stored_amounts(digest) or accounts:
+        if wanted == "pay" or self.stored_amounts(digest) or self.payment_account(digest):
             out.add("money")
         if header is not None and mailreader.has_document(header.attachments):
             out.add("documents")
@@ -612,6 +626,58 @@ class Context:
             if mailprefs.matches_important(pref, header, meanings):
                 return pref.id
         return ""
+
+    def correspondent(self, header: mailindex.Header) -> bool:
+        """He writes to this sender: the mail is authenticated AND its exact
+        From address is one his own outbound mail addressed before it
+        (`mailgate.grade` known or established, owner mail only). Never bare
+        `owner_acts`: an unauthenticated From is a claim and inherits nothing."""
+        if header.digest not in self._correspondent:
+            auth = mailgate.authenticate_header(header)
+            self._correspondent[header.digest] = auth.authenticated and mailgate.grade(
+                self.index, header, auth).grade in (mailgate.KNOWN, mailgate.ESTABLISHED)
+        return self._correspondent[header.digest]
+
+    def line_facts(self, item: mailreport.Item) -> tuple[str, ...]:
+        """The recorded facts that earn a needs item its own line in the brief
+        (`LINE_FACTS`); none means it is counted, not listed. Each is a record
+        or his own act — never a model's opinion of importance: the Reader's
+        `decide` alone earns nothing (the measured over-call)."""
+        header = item.header
+        if header is None:
+            return ()
+        digest = header.digest
+        verdict = item.reading.verdict
+        facts = []
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(verdict.get("deadline") or "")):
+            facts.append(FACT_DEADLINE)
+        # One stored amount, not several: an order confirmation's price list
+        # is no sum he owes (measured on the frozen copy, revision 1b).
+        if len(self.stored_amounts(digest)) == 1 or self.payment_account(digest):
+            facts.append(FACT_MONEY)
+        wanted = str(verdict.get("wanted") or "")
+        if wanted in ("pay", "reply"):
+            facts.append(wanted)
+        if self.correspondent(header):
+            facts.append(FACT_CORRESPONDENT)
+        kind = self._reader_kind(digest)
+        if item.important or any(mailprefs.matches_mail(p, header, kind)
+                                 for p in self.show_first):
+            facts.append(FACT_PREFERENCE)
+        if self.caution(digest) or mailreport.caution_marks(item.reading.record):
+            facts.append(FACT_CAUTION)
+        act = self.acts.get(digest)
+        if act is not None and act.get("verb") == RESTORE:
+            facts.append(FACT_RESTORED)
+        return tuple(facts)
+
+    def payment_account(self, digest: str) -> bool:
+        """A payment account recorded for this mail (the recorded-account half
+        of `meanings`)."""
+        reading = self.readings.get(digest)
+        records = reading.records if reading is not None else ()
+        return any((r.get("code_coordinates") or (r.get("verdict") or {}).get(
+            "payment_coordinates")) for r in records if isinstance(r, dict))
 
     def caution(self, digest: str) -> list[str]:
         """Why this mail may never settle anything: a caution on any model's

@@ -219,7 +219,7 @@ class TestClosureReleasesTheKeeperClamp:
         assert "released: you closed its case" in csv_text
         report = mailreport.build(tmp_path, now=T0 + 3 * DAY, since=T0 - DAY,
                                   clean=lambda s: s)
-        assert all(i.reading.digest != record["mail"] for i in report.interest)
+        assert all(i.reading.digest != record["mail"] for i in report.counted_visible)
 
 
 def agent_for(tmp_path, *, answer=True, origin="user", from_owner=None):
@@ -506,14 +506,14 @@ class TestTheThreeSurfacesAgree:
         view, csv_text, report = self.surfaces(tmp_path)
         assert "RELEASED" not in view
         assert "released: you closed its case" not in csv_text
-        assert any(i.reading.digest == record["mail"] for i in report.interest)
+        assert any(i.reading.digest == record["mail"] for i in report.counted_visible)
 
     def test_a_trusted_member_is_released_on_every_surface(self, tmp_path):
         case, record = seed(tmp_path)
         act(tmp_path, "close", case=case.id, now=record["recorded_at"] + 60)
         view, csv_text, report = self.surfaces(tmp_path)
         assert "RELEASED" in view and "released: you closed its case" in csv_text
-        assert all(i.reading.digest != record["mail"] for i in report.interest)
+        assert all(i.reading.digest != record["mail"] for i in report.counted_visible)
 
 
 class TestTheVerdictsKindReachesTheKeys:

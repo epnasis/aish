@@ -2952,8 +2952,9 @@ KEPT_OUTSIDE = "outside content kept in this chat — "
 # The model's copy of a code-composed answer (`Agent.present`): the owner saw
 # the report itself; the model already holds it as the kept note.
 PRESENTED_POINTER = (
-    "(aish's code showed the owner the report in the note above, exactly as written; "
-    "no model composed it.)"
+    "(aish's code showed the owner the report in the note above — the note itself, or a "
+    "shorter brief composed by code from the same build, without its refs and settlement "
+    "detail — exactly as code wrote it; no model composed it.)"
 )
 
 

@@ -97,15 +97,18 @@ def subjects(items) -> list[str]:
 
 
 class TestNeedsYourAction:
-    def test_pay_reply_and_decide_are_in_and_wait_and_nothing_are_not(self, tmp_path):
+    def test_pay_and_reply_earn_a_line_decide_alone_is_counted_wait_and_nothing_are_not(
+        self, tmp_path
+    ):
         fresh_health(tmp_path)
         for n, wanted in enumerate(("pay", "reply", "decide", "wait", "nothing")):
             h = add_mail(tmp_path, f"m{n}", frm=f"s{n}@shop.example", subject=wanted,
                          at=NOW - DAY + n)
             add_verdict(tmp_path, h, wanted=wanted, disposition="hold")
         report = build(tmp_path)
-        assert sorted(subjects(report.needs)) == ["decide", "pay", "reply"]
-        assert report.interest == []  # wanted nothing, but held — not "surface"
+        assert sorted(subjects(report.needs)) == ["pay", "reply"]
+        assert subjects(report.counted_asks) == ["decide"]
+        assert report.counted_visible == []  # wanted nothing, but held — not "surface"
 
     def test_order_is_dated_deadlines_soonest_then_pay_reply_decide(self, tmp_path):
         fresh_health(tmp_path)
@@ -116,12 +119,24 @@ class TestNeedsYourAction:
             h = add_mail(tmp_path, f"m{n}", frm=f"s{n}@shop.example", subject=subject,
                          at=NOW - DAY + n)
             add_verdict(tmp_path, h, wanted=wanted, deadline=deadline, disposition="hold")
-        assert subjects(build(tmp_path).needs) == [
-            "soon", "late", "pay-undated", "reply-undated", "decide-undated"]
+        report = build(tmp_path)
+        # A dated `decide` keeps its line and its word; an undated one is counted.
+        assert subjects(report.needs) == ["soon", "late", "pay-undated", "reply-undated"]
+        assert subjects(report.counted_asks) == ["decide-undated"]
 
-    def test_each_item_names_date_sender_subject_meaning_wanted_deadline_and_inbox(
-        self, tmp_path
-    ):
+    def test_within_one_deadline_rank_new_lines_come_first(self, tmp_path):
+        fresh_health(tmp_path)
+        old = add_mail(tmp_path, "old", frm="a@shop.example", subject="old", at=NOW - 3 * DAY)
+        add_verdict(tmp_path, old, wanted="pay")
+        mailreport.append_ledger(tmp_path, {"at": NOW - DAY, "as_of": NOW - DAY,
+                                            "status": "delivered", "digests": [old.digest]})
+        new = add_mail(tmp_path, "new", frm="b@shop.example", subject="new", at=NOW - 2 * DAY)
+        add_verdict(tmp_path, new, wanted="reply")
+        report = build(tmp_path)
+        assert subjects(report.needs) == ["new", "old"]
+        assert [i.new for i in report.needs] == [True, False]
+
+    def test_a_line_is_short_and_names_what_by_when_who_subject_and_ref(self, tmp_path):
         fresh_health(tmp_path)
         h = add_mail(tmp_path, "abc123def0", frm="Faktury <billing@shop.example>",
                      subject="Faktura 2026/41", at=NOW - DAY)
@@ -129,16 +144,150 @@ class TestNeedsYourAction:
                     meaning="An invoice for the October order.")
         text = mailreport.render(build(tmp_path), clean=identity, account="me@example.org")
         line = next(t for t in text.splitlines() if t.startswith("- PAY"))
-        assert "PAY by 2026-11-05" in line
-        assert "Faktury <billing@shop.example>" in line and "“Faktura 2026/41”" in line
+        assert line.startswith("- PAY, by 2026-11-05 — billing@shop.example — “Faktura 2026/41”")
+        assert "Faktury" not in line  # a display name is the sender's own words
+        assert " — new" in line and f"ref {h.digest[:12]}" in line
+        # The subject says little ("Faktura" alone), so the Reader's sentence adds.
         assert "the Reader: An invoice for the October order." in line
-        assert "gmail, " in line and mailreport._when(h.at) in line
-        assert ("[open in Gmail](https://mail.google.com/mail/u/0/?authuser=me%40example.org"
+        assert "gmail, " not in line and mailreport._when(h.at) not in line
+        assert ("[Gmail](https://mail.google.com/mail/u/0/?authuser=me%40example.org"
                 "#all/abc123def0)") in line
 
+    def test_the_readers_sentence_is_left_out_when_the_subject_says_it(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="billing@shop.example",
+                     subject="Your October invoice is ready to pay", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="pay", meaning="An invoice to pay.")
+        line = next(t for t in mailreport.render(build(tmp_path), clean=identity).splitlines()
+                    if t.startswith("- PAY"))
+        assert "the Reader:" not in line
+        assert len(line) <= 160
 
-class TestMayInterestYou:
-    def test_effective_surface_with_nothing_wanted_is_in_and_filed_mail_is_not(self, tmp_path):
+
+def facts_of(state, digest: str) -> tuple[str, ...]:
+    report = build(state)
+    found = [i for line in report.needs for i in line.mails() if i.reading.digest == digest]
+    return found[0].facts if found else ()
+
+
+class TestTheLineTest:
+    """Change 1: a recorded fact earns a line; `decide` alone is counted."""
+
+    def test_decide_alone_is_counted_not_listed(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "d", frm="a@shop.example", subject="choose", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="decide")
+        report = build(tmp_path)
+        assert report.needs == [] and subjects(report.counted_asks) == ["choose"]
+        text = mailreport.render(report, clean=identity)
+        assert ("1 more mail(s) ask something, with no date, amount or correspondent behind "
+                "it — counted, not listed; `/mail` in the terminal lists them.") in text
+        assert "choose" not in text
+
+    def test_a_dated_deadline_earns_a_line(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "d", frm="a@shop.example", subject="choose", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="decide", deadline="2026-12-01")
+        assert facts_of(tmp_path, h.digest) == ("dated deadline",)
+
+    def test_a_stored_amount_earns_a_line_and_is_on_it(self, tmp_path, monkeypatch):
+        from aish import mailitems
+
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "d", frm="a@shop.example", subject="choose", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="decide")
+        monkeypatch.setattr(mailitems.Context, "stored_amounts",
+                            lambda self, d: frozenset({("PLN", 12050)}) if d == h.digest
+                            else frozenset())
+        assert facts_of(tmp_path, h.digest) == ("money recorded",)
+        text = mailreport.render(build(tmp_path), clean=identity)
+        assert "— 120,50 PLN —" in text
+
+    def test_a_recorded_payment_account_earns_a_line(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "d", frm="a@shop.example", subject="choose", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="decide")
+        path = next(mailverdicts.store_dir(tmp_path).glob("*/*.json"))
+        raw = json.loads(path.read_text())
+        for record in raw["by_model"].values():
+            record["code_coordinates"] = ["PL61109010140000071219812874"]
+        path.write_text(json.dumps(raw))
+        assert facts_of(tmp_path, h.digest) == ("money recorded",)
+
+    def test_an_authenticated_sender_he_wrote_to_earns_a_line(self, tmp_path):
+        fresh_health(tmp_path)
+        add_mail(tmp_path, "o", frm=OWNER, to="anna@client.example", subject="hello",
+                 at=NOW - 20 * DAY, sent=True)
+        h = add_mail(tmp_path, "d", frm="anna@client.example", subject="choose", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="decide")
+        assert facts_of(tmp_path, h.digest) == ("a sender you write to",)
+        assert "- DECIDE — anna@client.example" in mailreport.render(build(tmp_path),
+                                                                     clean=identity)
+
+    def test_an_unauthenticated_from_he_wrote_to_earns_nothing(self, tmp_path):
+        """An unauthenticated From is a claim: it inherits nobody's history."""
+        fresh_health(tmp_path)
+        add_mail(tmp_path, "o", frm=OWNER, to="anna@client.example", subject="hello",
+                 at=NOW - 20 * DAY, sent=True)
+        forged = mailindex.from_gmail(
+            gmail("forged", frm="anna@client.example", to=OWNER, subject="choose",
+                  at=NOW - DAY, auth="fail"), frozenset({OWNER}))
+        assert forged is not None
+        mailindex.MailIndex(tmp_path).add(forged.header, forged.body)
+        add_verdict(tmp_path, forged.header, wanted="decide")
+        report = build(tmp_path)
+        assert report.needs == [] and subjects(report.counted_asks) == ["choose"]
+
+    def test_mail_from_a_sender_he_wrote_to_only_later_earns_nothing_yet(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "d", frm="anna@client.example", subject="choose",
+                     at=NOW - 2 * DAY)
+        add_verdict(tmp_path, h, wanted="decide")
+        add_mail(tmp_path, "o", frm=OWNER, to="anna@client.example", subject="Re: choose",
+                 at=NOW - DAY, sent=True, in_reply_to="d@mail.example")
+        assert facts_of(tmp_path, h.digest) == ()
+
+    def test_his_show_first_preference_earns_a_line(self, tmp_path):
+        from aish import mailprefs
+
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "d", frm="a@shop.example", subject="choose", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="decide")
+        planned = mailprefs.plan(tmp_path, {"action": "add", "kind": "show_first",
+                                            "sender": "a@shop.example"})
+        assert mailprefs.apply(tmp_path, planned, source={"session": "t"},
+                               now=NOW - 2 * DAY).ok
+        assert facts_of(tmp_path, h.digest) == ("your preference",)
+
+    @pytest.mark.parametrize("marks", [{"suspicion": "suspicious"},
+                                       {"sender_case": "mismatch"}])
+    def test_any_caution_earns_its_own_line(self, tmp_path, marks):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "d", frm="a@shop.example", subject="choose", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="decide", **marks)
+        assert facts_of(tmp_path, h.digest) == ("caution",)
+
+    def test_a_counted_mail_that_later_earns_a_fact_gets_its_line(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "d", frm="anna@client.example", subject="choose",
+                     at=NOW - 2 * DAY)
+        add_verdict(tmp_path, h, wanted="decide")
+        post = FakePost([ok()])
+        run(tmp_path, post, now=NOW - DAY)
+        (entry,) = mailreport.read_ledger(tmp_path)
+        assert entry["counted"] == [h.digest] and entry["digests"] == []
+        assert build(tmp_path).counted_asks == []  # counted once: the count is news
+        # He writes to her about something else; the line test now passes and
+        # the earlier count does not bury it.
+        add_mail(tmp_path, "o", frm=OWNER, to="anna@client.example", subject="other",
+                 at=NOW - 3 * DAY, sent=True)
+        assert subjects(build(tmp_path).needs) == ["choose"]
+
+
+class TestMayInterestIsCounted:
+    def test_kept_visible_mail_that_asks_nothing_is_counted_and_filed_mail_is_not(
+        self, tmp_path
+    ):
         fresh_health(tmp_path)
         a = add_mail(tmp_path, "a", frm="a@news.example", subject="surfaced", at=NOW - DAY)
         add_verdict(tmp_path, a, wanted="nothing", disposition="surface")
@@ -146,13 +295,30 @@ class TestMayInterestYou:
         add_verdict(tmp_path, b, wanted="nothing", disposition="archive")
         c = add_mail(tmp_path, "c", frm="c@shop.example", subject="keeper", at=NOW - DAY)
         add_verdict(tmp_path, c, wanted="nothing", disposition="archive", keeper=True)
-        assert sorted(subjects(build(tmp_path).interest)) == ["keeper", "surfaced"]
+        report = build(tmp_path)
+        assert sorted(subjects(report.counted_visible)) == ["keeper", "surfaced"]
+        assert report.needs == []
+        text = mailreport.render(report, clean=identity)
+        assert "May interest you" not in text and "surfaced" not in text
+        assert "2 new mail(s) the assistant would keep visible ask nothing — counted" in text
+        assert report.counts()["counted"] == 2
 
-    def test_the_section_says_interest_matching_is_not_built(self, tmp_path):
+    def test_a_cautioned_mail_that_asks_nothing_keeps_its_own_line_once(self, tmp_path):
+        """The caution floor: removing the section must not turn a flagged mail
+        into a number."""
         fresh_health(tmp_path)
-        text = mailreport.render(build(tmp_path), clean=identity)
-        head = text.split("## May interest you", 1)[1]
-        assert "Not matched to your interests — that is not built yet" in head
+        h = add_mail(tmp_path, "a", frm="a@news.example", subject="Account change",
+                     at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="nothing", disposition="surface",
+                    suspicion="suspicious")
+        report = build(tmp_path)
+        assert subjects(report.needs) == ["Account change"] and report.counted_visible == []
+        line = next(t for t in mailreport.render(report, clean=identity).splitlines()
+                    if "Account change" in t)
+        assert line.startswith("- **CAUTION: the Reader judged it suspicious.** ASKS NOTHING")
+        assert "leaves the brief" not in line
+        run(tmp_path, FakePost([ok()]), now=NOW)
+        assert build(tmp_path, now=NOW + DAY).needs == []  # listed once, while news
 
 
 class TestExclusions:
@@ -171,7 +337,7 @@ class TestExclusions:
                         at=NOW - DAY)
         add_verdict(tmp_path, link, wanted="nothing", kind="notice")
         report = build(tmp_path)
-        assert report.needs == [] and report.interest == []
+        assert report.needs == [] and report.counted_asks == report.counted_visible == []
         assert report.excluded == {"gated": 1, "otp": 3}
         text = mailreport.render(report, clean=identity)
         assert "1 newsletter-gated, 3 one-time code(s) or sign-in link(s)" in text
@@ -181,7 +347,7 @@ class TestExclusions:
         h = add_mail(tmp_path, "d", frm="deals@shop.example", subject="Your discount code inside",
                      at=NOW - DAY)
         add_verdict(tmp_path, h, wanted="nothing", kind="promotion code")
-        assert subjects(build(tmp_path).interest) == ["Your discount code inside"]
+        assert subjects(build(tmp_path).counted_visible) == ["Your discount code inside"]
 
     def test_the_index_list_headers_gate_a_mail_with_no_reading(self, tmp_path):
         fresh_health(tmp_path)
@@ -249,19 +415,30 @@ def conversation(state, *, his_at: float, reply_at: float | None, reply_wanted="
 class TestFollowUps:
     def test_your_turn_when_they_answered_with_an_ask(self, tmp_path):
         fresh_health(tmp_path)
-        conversation(tmp_path, his_at=NOW - 10 * DAY, reply_at=NOW - 3 * DAY)
+        conversation(tmp_path, his_at=NOW - 10 * DAY, reply_at=NOW - 3 * DAY,
+                     reply_wanted="cannot_tell")
         report = build(tmp_path, since=NOW - DAY)  # the reply itself is not new
         assert [f.counterparty for f in report.yours] == ["bob@client.example"]
         assert report.theirs == []
         text = mailreport.render(report, clean=identity)
         assert "3 day(s) waiting on you — bob@client.example sent a message after your " \
-               "“Quote for the roof” (the Reader: reply)" in text
+               "“Quote for the roof” (the Reader: cannot_tell)" in text
 
-    @pytest.mark.parametrize("wanted", ["decide", "pay", "cannot_tell"])
-    def test_any_ask_or_an_undecided_reading_is_your_turn(self, tmp_path, wanted):
+    @pytest.mark.parametrize("wanted", ["reply", "decide", "pay"])
+    def test_an_ask_from_someone_he_wrote_to_is_one_open_line_not_two(self, tmp_path, wanted):
+        """He wrote to them, so the ask earns a line (and stays every morning
+        while open); the conversation is not repeated under Your turn."""
         fresh_health(tmp_path)
         conversation(tmp_path, his_at=NOW - 10 * DAY, reply_at=NOW - 3 * DAY,
                      reply_wanted=wanted)
+        report = build(tmp_path, since=NOW - DAY)
+        assert subjects(report.needs) == ["Re: Quote for the roof"]
+        assert report.yours == []
+
+    def test_an_undecided_reading_is_your_turn(self, tmp_path):
+        fresh_health(tmp_path)
+        conversation(tmp_path, his_at=NOW - 10 * DAY, reply_at=NOW - 3 * DAY,
+                     reply_wanted="cannot_tell")
         assert len(build(tmp_path, since=NOW - DAY).yours) == 1
 
     def test_no_reading_is_your_turn_and_says_so(self, tmp_path):
@@ -297,7 +474,7 @@ class TestFollowUps:
     def test_both_inboxes_his_gmail_mail_answered_through_tuta(self, tmp_path):
         fresh_health(tmp_path)
         conversation(tmp_path, his_at=NOW - 10 * DAY, reply_at=NOW - 2 * DAY,
-                     reply_mailbox="tuta")
+                     reply_mailbox="tuta", reply_wanted="cannot_tell")
         report = build(tmp_path, since=NOW - DAY)
         assert len(report.yours) == 1 and report.yours[0].latest.mailbox == "tuta"
 
@@ -368,20 +545,21 @@ class TestFollowUps:
 
 
 class TestWhatIsNew:
-    def test_the_first_report_covers_seven_days(self, tmp_path):
+    def test_the_first_report_counts_seven_days(self, tmp_path):
         fresh_health(tmp_path)
         for gid, age in (("in", 6), ("out", 8)):
             h = add_mail(tmp_path, gid, frm=f"{gid}@x.example", subject=gid, at=NOW - age * DAY)
-            add_verdict(tmp_path, h, wanted="pay", disposition="hold")
-        assert subjects(build(tmp_path).needs) == ["in"]
+            add_verdict(tmp_path, h, wanted="decide", disposition="hold")
+        assert subjects(build(tmp_path).counted_asks) == ["in"]
 
-    def test_a_mail_shown_once_is_never_shown_again(self, tmp_path):
+    def test_a_mail_counted_once_is_never_counted_again(self, tmp_path):
         fresh_health(tmp_path)
         h = add_mail(tmp_path, "a", frm="a@x.example", subject="a", at=NOW - DAY)
-        add_verdict(tmp_path, h, wanted="pay", disposition="hold")
+        add_verdict(tmp_path, h, wanted="decide", disposition="hold")
         mailreport.append_ledger(tmp_path, {"at": NOW - DAY / 2, "as_of": NOW - DAY / 2,
-                                            "status": "delivered", "digests": [h.digest]})
-        assert build(tmp_path).needs == []
+                                            "status": "delivered", "digests": [],
+                                            "counted": [h.digest]})
+        assert build(tmp_path).counted_asks == []
 
     def test_a_mail_read_late_still_reaches_the_next_report(self, tmp_path):
         fresh_health(tmp_path)
@@ -396,7 +574,7 @@ class TestWhatIsNew:
         for n in range(mailreport.NEEDS_SHOWN + 2):
             h = add_mail(tmp_path, f"m{n}", frm=f"s{n}@x.example", subject=f"s{n}",
                          at=NOW - DAY + n)
-            add_verdict(tmp_path, h, wanted="decide", disposition="hold")
+            add_verdict(tmp_path, h, wanted="pay", disposition="hold")
         report = build(tmp_path)
         assert len(report.needs) == mailreport.NEEDS_SHOWN + 2
         assert len(report.shown_digests()) == mailreport.NEEDS_SHOWN
@@ -416,6 +594,589 @@ class TestWhatIsNew:
         assert report.duplicates == 1
 
 
+# ---------------------------------------------------------------- open means shown again
+
+
+def delivered(state, now: float, digests=(), **extra) -> None:
+    mailreport.append_ledger(state, {"at": now, "as_of": now, "status": "delivered",
+                                     "digests": list(digests), **extra})
+
+
+class TestOpenMeansShownAgain:
+    def test_an_open_line_is_listed_again_the_next_day_with_its_age(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="Pay the roofer now",
+                     at=NOW - 4 * DAY)
+        add_verdict(tmp_path, h, wanted="pay")
+        delivered(tmp_path, NOW - DAY, [h.digest])
+        report = build(tmp_path)
+        assert subjects(report.needs) == ["Pay the roofer now"] and not report.needs[0].new
+        line = next(t for t in mailreport.render(report, clean=identity).splitlines()
+                    if t.startswith("- PAY"))
+        assert " — open 4 day(s)" in line and " — new" not in line
+
+    def test_a_line_he_resolved_leaves_and_is_counted(self, tmp_path):
+        from aish import mailitems
+
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="a", at=NOW - 4 * DAY)
+        add_verdict(tmp_path, h, wanted="pay")
+        mailitems.append_act(tmp_path, {"at": NOW - DAY, "verb": "resolve",
+                                        "anchor": h.digest})
+        report = build(tmp_path)
+        assert report.needs == [] and report.resolved == 1
+
+    def test_a_line_his_own_reply_settles_moves_to_probably_settled(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="a", at=NOW - 4 * DAY)
+        add_verdict(tmp_path, h, wanted="reply")
+        add_mail(tmp_path, "o", frm=OWNER, to="a@x.example", subject="Re: a", at=NOW - DAY,
+                 sent=True)
+        report = build(tmp_path)
+        assert report.needs == [] and [i.header.subject for i in report.settled] == ["a"]
+
+    def test_the_last_morning_inside_the_window_says_so(self, tmp_path):
+        fresh_health(tmp_path)
+        window = mailreport.FOLLOWUP_WINDOW_DAYS * DAY
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="a", at=NOW - window + DAY / 2)
+        add_verdict(tmp_path, h, wanted="pay")
+        report = build(tmp_path)
+        assert report.needs[0].leaving
+        assert "leaves the brief tomorrow, unanswered" in mailreport.render(report,
+                                                                          clean=identity)
+        assert build(tmp_path, now=NOW + DAY).needs == []  # and then it is gone
+        earlier = build(tmp_path, now=NOW - DAY)
+        assert not earlier.needs[0].leaving
+
+    def test_showable_agrees_with_the_lines_the_report_draws(self, tmp_path):
+        from aish import mailitems, mailsettle
+
+        fresh_health(tmp_path)
+        for n, wanted in enumerate(("pay", "decide", "reply")):
+            h = add_mail(tmp_path, f"m{n}", frm=f"s{n}@x.example", subject=f"s{n}",
+                         at=NOW - 20 * DAY + n)
+            add_verdict(tmp_path, h, wanted=wanted)
+        delivered(tmp_path, NOW - DAY)  # none is news any more: state decides
+        report = build(tmp_path)
+        ctx = mailitems.Context(tmp_path, now=NOW)
+        needs = {i.anchor for i in mailsettle.showable(ctx) if i.kind == mailitems.NEEDS}
+        assert needs == {i.reading.digest for i in report.needs}
+        assert len(needs) == 2
+
+
+# ---------------------------------------------------------------- folding
+
+
+class TestFolding:
+    def test_lines_from_one_sender_on_no_case_fold_into_one(self, tmp_path):
+        fresh_health(tmp_path)
+        a = add_mail(tmp_path, "a", frm="shop@x.example", subject="Invoice 1", at=NOW - 2 * DAY)
+        add_verdict(tmp_path, a, wanted="pay", deadline="2026-12-01")
+        b = add_mail(tmp_path, "b", frm="shop@x.example", subject="Invoice 2", at=NOW - DAY)
+        add_verdict(tmp_path, b, wanted="reply")
+        report = build(tmp_path)
+        (line,) = report.needs
+        assert [m.reading.digest for m in line.mails()] == [a.digest, b.digest]
+        text = mailreport.render(report, clean=identity)
+        row = next(t for t in text.splitlines() if t.startswith("- PAY"))
+        # The folded mail's ref, with its what-word and deadline where they differ.
+        assert f"2 mails, also ref {b.digest[:12]} (REPLY; no date)" in row
+        assert report.counts()["needs_action"] == 1 and report.counts()["needs_mails"] == 2
+        assert sorted(report.shown_digests()) == sorted([a.digest, b.digest])
+
+    def test_differing_stored_amounts_are_all_listed(self, tmp_path, monkeypatch):
+        from aish import mailitems
+
+        fresh_health(tmp_path)
+        a = add_mail(tmp_path, "a", frm="shop@x.example", subject="Invoice 1", at=NOW - 2 * DAY)
+        add_verdict(tmp_path, a, wanted="pay")
+        b = add_mail(tmp_path, "b", frm="shop@x.example", subject="Invoice 2", at=NOW - DAY)
+        add_verdict(tmp_path, b, wanted="pay")
+        amounts = {a.digest: frozenset({("PLN", 10000)}), b.digest: frozenset({("PLN", 25000)})}
+        monkeypatch.setattr(mailitems.Context, "stored_amounts",
+                            lambda self, d: amounts.get(d, frozenset()))
+        text = mailreport.render(build(tmp_path), clean=identity)
+        assert "100,00 PLN, 250,00 PLN" in text
+
+    def test_a_cautioned_mail_is_never_folded(self, tmp_path):
+        fresh_health(tmp_path)
+        a = add_mail(tmp_path, "a", frm="shop@x.example", subject="Invoice 1", at=NOW - 2 * DAY)
+        add_verdict(tmp_path, a, wanted="pay")
+        b = add_mail(tmp_path, "b", frm="shop@x.example", subject="New account", at=NOW - DAY)
+        add_verdict(tmp_path, b, wanted="pay", case_flags={"coordinates_changed": ["c1"]})
+        report = build(tmp_path)
+        assert len(report.needs) == 2 and all(not line.folded for line in report.needs)
+
+    def test_lines_on_one_open_case_fold_and_distinct_cases_never_do(
+        self, tmp_path, monkeypatch
+    ):
+        from aish import mailcases, mailitems
+
+        fresh_health(tmp_path)
+        a = add_mail(tmp_path, "a", frm="one@x.example", subject="a", at=NOW - 3 * DAY)
+        b = add_mail(tmp_path, "b", frm="two@y.example", subject="b", at=NOW - 2 * DAY)
+        c = add_mail(tmp_path, "c", frm="one@x.example", subject="c", at=NOW - DAY)
+        d = add_mail(tmp_path, "d", frm="one@x.example", subject="d", at=NOW - DAY / 2)
+        for h in (a, b, c, d):
+            add_verdict(tmp_path, h, wanted="pay")
+        cases = {n: mailcases.Case(id=n, created=(NOW - 30 * DAY, ""), created_by="owner")
+                 for n in ("case-1", "case-2")}
+        trusted = {a.digest: ["case-1"], b.digest: ["case-1"], c.digest: ["case-2"]}
+        monkeypatch.setattr(mailitems.Context, "cases_of",
+                            lambda self, digest: [cases[i] for i in trusted.get(digest, ())])
+        report = build(tmp_path)
+        groups = sorted(sorted(m.header.subject for m in line.mails()) for line in report.needs)
+        # a and b share case-1 across two senders; c is on case-2 and d on no
+        # case: neither folds with a, though the sender is the same — the
+        # sender fold is for lines on no case only.
+        assert groups == [["a", "b"], ["c"], ["d"]]
+
+    def test_a_closed_case_does_not_fold(self, tmp_path, monkeypatch):
+        from aish import mailcases, mailitems
+
+        fresh_health(tmp_path)
+        a = add_mail(tmp_path, "a", frm="one@x.example", subject="a", at=NOW - 3 * DAY)
+        b = add_mail(tmp_path, "b", frm="two@y.example", subject="b", at=NOW - 2 * DAY)
+        for h in (a, b):
+            add_verdict(tmp_path, h, wanted="pay")
+        closed = mailcases.Case(id="c", created=(NOW - 30 * DAY, ""), created_by="owner",
+                                status=mailcases.CLOSED)
+        monkeypatch.setattr(mailitems.Context, "cases_of", lambda self, digest: [closed])
+        assert len(build(tmp_path).needs) == 2
+
+
+# ---------------------------------------------------------------- the footer
+
+
+class TestTheFooterIsCompressed:
+    def test_machinery_lines_print_only_when_non_zero(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "g", frm="news@list.example", subject="Weekly", at=NOW - DAY)
+        add_verdict(tmp_path, h, gated=True)
+        footer = mailreport.render(build(tmp_path), clean=identity).split("\n---\n", 1)[1]
+        assert footer.splitlines()[0] == "Not shown: 1 newsletter-gated. `/mail` lists every " \
+                                         "reading."
+        assert "Settlement:" not in footer and "one-time code" not in footer
+
+    def test_the_preferences_line_is_printed_even_at_zero(self, tmp_path):
+        fresh_health(tmp_path)
+        footer = mailreport.render(build(tmp_path), clean=identity).split("\n---\n", 1)[1]
+        assert "Using 0 of your preferences — none saved." in footer
+
+    def test_hidden_and_shown_despite_counts_are_printed_when_preferences_exist(
+        self, tmp_path
+    ):
+        from aish import mailprefs
+
+        fresh_health(tmp_path)
+        planned = mailprefs.plan(tmp_path, {"action": "add", "kind": "hide",
+                                            "sender": "nobody@x.example"})
+        assert mailprefs.apply(tmp_path, planned, source={"session": "t"},
+                               now=NOW - 2 * DAY).ok
+        footer = mailreport.render(build(tmp_path), clean=identity).split("\n---\n", 1)[1]
+        assert "— hid 0 item(s); 0 shown despite a preference" in footer
+
+
+# ---------------------------------------------------------------- the miss counter
+
+
+class TestTheMissCounter:
+    def seed(self, state, *, wanted="decide", gated=False, listed=False, read_after=False,
+             in_reply=True):
+        fresh_health(state)
+        h = add_mail(state, "a", frm="anna@x.example", subject="choose", at=NOW - 3 * DAY)
+        add_verdict(state, h, wanted=wanted, gated=gated,
+                    recorded_at=NOW - DAY / 2 if read_after else None)
+        delivered(state, NOW - DAY, [h.digest] if listed else [])
+        add_mail(state, "o", frm=OWNER, to="anna@x.example", subject="Re: choose",
+                 at=NOW - DAY / 4, sent=True, in_reply_to="a@mail.example" if in_reply else "")
+        return h
+
+    def test_an_answered_mail_no_brief_listed_is_a_miss(self, tmp_path):
+        h = self.seed(tmp_path)
+        report = build(tmp_path)
+        assert report.missed == [h.digest]
+        assert ("You answered 1 mail(s) since the last brief that it had not listed."
+                in mailreport.render(report, clean=identity))
+
+    def test_matched_by_address_when_there_is_no_in_reply_to(self, tmp_path):
+        h = self.seed(tmp_path, in_reply=False)
+        assert build(tmp_path).missed == [h.digest]
+
+    def test_a_listed_mail_is_no_miss_and_zero_prints_nothing(self, tmp_path):
+        self.seed(tmp_path, listed=True)
+        report = build(tmp_path)
+        assert report.missed == []
+        assert "You answered" not in mailreport.render(report, clean=identity)
+
+    def test_the_denominator_excludes_gated_mail_and_mail_read_after_the_brief(
+        self, tmp_path
+    ):
+        self.seed(tmp_path, gated=True)
+        assert build(tmp_path).missed == []
+        other = tmp_path / "b"
+        self.seed(other, read_after=True)
+        assert build(other).missed == []
+
+    def test_mail_outside_the_window_is_not_counted(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="anna@x.example", subject="choose", at=NOW - 70 * DAY)
+        add_verdict(tmp_path, h, wanted="decide")
+        delivered(tmp_path, NOW - DAY)
+        add_mail(tmp_path, "o", frm=OWNER, to="anna@x.example", subject="Re: choose",
+                 at=NOW - DAY / 4, sent=True, in_reply_to="a@mail.example")
+        assert build(tmp_path).missed == []
+
+    def test_a_listed_your_turn_ask_is_no_miss(self, tmp_path):
+        fresh_health(tmp_path)
+        conversation(tmp_path, his_at=NOW - 10 * DAY, reply_at=NOW - 3 * DAY,
+                     reply_wanted="cannot_tell")
+        run(tmp_path, FakePost([ok()]), now=NOW - DAY)
+        (entry,) = mailreport.read_ledger(tmp_path)
+        assert len(entry["followups"]) == 1
+        add_mail(tmp_path, "o2", frm=OWNER, to="bob@client.example", subject="Re: Quote",
+                 at=NOW - DAY / 4, sent=True, in_reply_to="r1@mail.example")
+        assert build(tmp_path).missed == []
+
+    def test_the_ledger_records_it_on_every_attempt(self, tmp_path):
+        self.seed(tmp_path)
+        post = FakePost([(403, {}, b"{}")])
+        run(tmp_path, post)
+        entry = mailreport.read_ledger(tmp_path)[-1]
+        assert entry["status"] == "failed" and entry["missed"] == 1
+        assert "counted" not in entry  # only a delivered report records what it counted
+
+
+class TestTheNowOption:
+    def test_now_works_only_with_a_dry_run(self, capsys):
+        assert mailreport.main(["--now", "2026-11-01T07:30"]) == 2
+        assert "--now works only with --dry-run" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- the brief
+
+
+def brief_of(state, **kw) -> tuple[mailreport.Report, str]:
+    report = build(state, **kw)
+    return report, mailreport.render_brief(report, clean=identity, account="me@example.org")
+
+
+def weekday_now(weekday: int) -> float:
+    """A `now` near NOW that falls on `weekday` (0 = Monday), same clock time."""
+    import datetime
+
+    day = datetime.datetime.fromtimestamp(NOW)
+    return NOW + ((weekday - day.weekday()) % 7) * DAY
+
+
+def known_sender(state, address: str) -> None:
+    add_mail(state, f"o-{address}", frm=OWNER, to=address, subject="hello",
+             at=NOW - 50 * DAY, sent=True)
+
+
+class TestTheBrief:
+    def test_two_texts_from_one_build(self, tmp_path):
+        fresh_health(tmp_path)
+        known_sender(tmp_path, "anna@x.example")
+        h = add_mail(tmp_path, "abcdef12", frm="Anna <anna@x.example>",
+                     subject="Pay the roofer now",
+                     at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="pay", deadline="2026-12-01")
+        report, brief = brief_of(tmp_path)
+        working = mailreport.render(report, clean=identity, account="me@example.org")
+        assert f"ref {h.digest[:12]}" in working and "Inbox report —" in working
+        line = next(t for t in brief.splitlines() if t.startswith("- "))
+        assert line.startswith("- Pay — Anna — “Pay the roofer now” — due ")
+        # The only refs and links: the done chip and the Gmail link.
+        assert re.sub(r"\(aish-reply://resolve ref [0-9a-f]{12}\)", "", brief).count(
+            h.digest[:12]) == 0
+        assert re.findall(r"\]\(([^)]*)\)", brief) == [
+            f"aish-reply://resolve ref {h.digest[:12]}",
+            "https://mail.google.com/mail/u/0/?authuser=me%40example.org#all/abcdef12"]
+        for machinery in ("the Reader:", "gmail,", "pref-", "did not weigh", "Probably"):
+            assert machinery not in brief
+        assert mailreport.visible_length(line) <= mailreport.BRIEF_LINE_TARGET
+
+    def test_a_display_name_only_for_an_authenticated_sender_he_writes_to(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="Your Bank <x@bank.example>", subject="Pay now please",
+                     at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="pay", deadline="2026-12-01")
+        _report, brief = brief_of(tmp_path)
+        assert "Your Bank" not in brief and "x@bank.example" in brief
+
+    def test_the_headline_counts_new_and_still_open_and_health_leads(self, tmp_path):
+        fresh_health(tmp_path, now=NOW - 3 * 3600)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="a", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="pay", deadline="2026-12-01")
+        _report, brief = brief_of(tmp_path)
+        first, second = brief.splitlines()[:2]
+        assert first.startswith("THE MAIL WATCHER IS NOT HEALTHY")
+        assert first.endswith(mailreport.day_words(NOW) + " — 1 new, 0 still open.")
+        assert second.startswith("WATCHER:")
+
+    def test_an_empty_day_still_says_so(self, tmp_path):
+        fresh_health(tmp_path)
+        _report, brief = brief_of(tmp_path)
+        assert brief.splitlines()[0] == mailreport.day_words(NOW) + " — 0 new, 0 still open."
+        assert "Nothing needs you." in brief
+        assert brief.splitlines()[-1] == ("Not listed: nothing; 0 hidden by your preferences, "
+                                          "0 shown despite one. /mail shows everything.")
+
+    def test_caution_is_on_the_line_and_the_readers_sentence_is_withheld(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="Faktura", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="pay", suspicion="suspicious",
+                    meaning="Pay to PL61109010140000071219812874 today.")
+        _report, brief = brief_of(tmp_path)
+        line = next(t for t in brief.splitlines() if "Faktura" in t)
+        assert line.startswith("- **CAUTION: the Reader judged it suspicious.** Pay")
+        assert "PL611" not in brief
+
+    def test_the_readers_sentence_only_when_the_subject_says_little(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="Faktura", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="pay", deadline="2026-12-01",
+                    meaning="An invoice for the roof.")
+        _report, brief = brief_of(tmp_path)
+        assert "An invoice for the roof." in brief
+
+    @pytest.mark.parametrize("days,words", [(0, "(today)"), (3, "(in 3 days)"),
+                                            (-11, "(11 days overdue)")])
+    def test_date_wording(self, days, words):
+        import datetime
+
+        day = (datetime.date.fromtimestamp(NOW) + datetime.timedelta(days=days))
+        text = mailreport._date_words(day.isoformat(), NOW)
+        assert text == f"{day.day} {day.strftime('%b')} {words}"
+
+    def test_one_stored_amount_is_shown_and_several_are_not(self, tmp_path, monkeypatch):
+        from aish import mailitems
+
+        fresh_health(tmp_path)
+        one = add_mail(tmp_path, "a", frm="a@x.example", subject="Invoice one", at=NOW - DAY)
+        two = add_mail(tmp_path, "b", frm="b@y.example", subject="Invoice two", at=NOW - DAY)
+        for h in (one, two):
+            add_verdict(tmp_path, h, wanted="pay")
+        amounts = {one.digest: frozenset({("PLN", 12050)}),
+                   two.digest: frozenset({("PLN", 100), ("PLN", 900)})}
+        monkeypatch.setattr(mailitems.Context, "stored_amounts",
+                            lambda self, d: amounts.get(d, frozenset()))
+        _report, brief = brief_of(tmp_path)
+        assert "— 120,50 PLN" in brief
+        assert "1,00 PLN" not in brief and "9,00 PLN" not in brief
+
+    def test_several_stored_amounts_alone_earn_no_money_fact(self, tmp_path, monkeypatch):
+        """D: an order confirmation's price list is no sum he owes."""
+        from aish import mailitems
+
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="shop@x.example", subject="Order confirmed",
+                     at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="decide")
+        monkeypatch.setattr(mailitems.Context, "stored_amounts",
+                            lambda self, d: frozenset({("PLN", 100), ("PLN", 900)}))
+        report = build(tmp_path)
+        assert report.needs == [] and subjects(report.counted_asks) == ["Order confirmed"]
+
+    def test_a_folded_line_says_how_many_mails_and_the_earliest_date(self, tmp_path):
+        fresh_health(tmp_path)
+        for gid, deadline in (("a", "2026-12-05"), ("b", "2026-12-01")):
+            h = add_mail(tmp_path, gid, frm="shop@x.example", subject=f"Invoice {gid}",
+                         at=NOW - DAY)
+            add_verdict(tmp_path, h, wanted="pay", deadline=deadline)
+        _report, brief = brief_of(tmp_path)
+        line = next(t for t in brief.splitlines() if t.startswith("- "))
+        assert "(2 mails)" in line and "due 1 Dec" in line and "(+1 more dates)" in line
+
+    def test_a_first_contact_ask_with_only_the_readers_word_is_shown_once(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="sales@pitch.example", subject="Quick question",
+                     at=NOW - 2 * DAY)
+        add_verdict(tmp_path, h, wanted="reply")
+        report, brief = brief_of(tmp_path, now=NOW - DAY)
+        assert [i.header.subject for i in report.brief_first_contact] == ["Quick question"]
+        assert "**New, from senders you have not dealt with**" in brief
+        run(tmp_path, FakePost([ok()]), now=NOW - DAY)
+        assert mailreport.read_ledger(tmp_path)[-1]["brief"]["first_contact"] == [h.digest]
+        report, brief = brief_of(tmp_path)
+        assert report.brief_first_contact == [] and "Quick question" not in brief
+        assert "1 unanswered from new senders" in brief
+        # The working copy still lists it: the chat's model can name it.
+        assert "Quick question" in mailreport.render(report, clean=identity)
+
+    def test_a_line_backed_by_a_hard_fact_repeats(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="sales@pitch.example", subject="Quick question",
+                     at=NOW - 2 * DAY)
+        add_verdict(tmp_path, h, wanted="reply", deadline="2026-12-01")
+        run(tmp_path, FakePost([ok()]), now=NOW - DAY)
+        report, brief = brief_of(tmp_path)
+        assert [i.header.subject for i in report.brief_open] == ["Quick question"]
+        assert "**Still open**" in brief and "open 2 days" in brief
+
+    def test_an_open_line_with_no_deadline_ahead_even_overdue_is_listed_on_mondays_only(
+        self, tmp_path
+    ):
+        fresh_health(tmp_path)
+        for now in (weekday_now(0), weekday_now(2)):
+            fresh_health(tmp_path, now=now)
+            h = add_mail(tmp_path, "a", frm="a@x.example", subject="Pay this",
+                         at=now - 20 * DAY)
+            add_verdict(tmp_path, h, wanted="pay", deadline="2026-01-01")  # past: none ahead
+            delivered(tmp_path, now - 10 * DAY, [h.digest])
+        report, brief = brief_of(tmp_path, now=weekday_now(2))
+        assert report.brief_open == [] and "1 older open items (listed on Mondays)" in brief
+        report, brief = brief_of(tmp_path, now=weekday_now(0))
+        assert [i.header.subject for i in report.brief_open] == ["Pay this"]
+
+    def test_a_deadline_still_ahead_keeps_an_old_line_listed(self, tmp_path):
+        fresh_health(tmp_path)
+        now = weekday_now(2)
+        fresh_health(tmp_path, now=now)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="Pay this", at=now - 20 * DAY)
+        add_verdict(tmp_path, h, wanted="pay", deadline="2099-01-01")
+        delivered(tmp_path, now - 10 * DAY, [h.digest])
+        assert len(build(tmp_path, now=now).brief_open) == 1
+
+    def test_the_last_morning_is_listed_whatever_the_weekday(self, tmp_path):
+        now = weekday_now(2)
+        fresh_health(tmp_path, now=now)
+        window = mailreport.FOLLOWUP_WINDOW_DAYS * DAY
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="Pay this",
+                     at=now - window + DAY / 2)
+        add_verdict(tmp_path, h, wanted="pay", deadline="2026-01-01")
+        delivered(tmp_path, now - 10 * DAY, [h.digest])
+        report, brief = brief_of(tmp_path, now=now)
+        assert len(report.brief_open) == 1 and "leaves the brief tomorrow" in brief
+
+    def test_waiting_on_others_lists_five_to_thirty_days_and_counts_older(self, tmp_path):
+        fresh_health(tmp_path)
+        add_mail(tmp_path, "o1", frm=OWNER, to="bob@x.example", subject="Recent",
+                 at=NOW - 6 * DAY, sent=True)
+        add_mail(tmp_path, "o2", frm=OWNER, to="eve@y.example", subject="Old",
+                 at=NOW - 40 * DAY, sent=True)
+        report, brief = brief_of(tmp_path)
+        assert [f.counterparty for f in report.brief_waiting] == ["bob@x.example"]
+        assert "**Waiting on others**" in brief and "Recent" in brief and "Old" not in brief
+        assert "1 waiting on others over 30 days" in brief
+
+    def test_the_counts_line_always_carries_the_preferences_clause(self, tmp_path):
+        from aish import mailprefs
+
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="a", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="pay")
+        planned = mailprefs.plan(tmp_path, {"action": "add", "kind": "hide",
+                                            "sender": "a@x.example"})
+        assert mailprefs.apply(tmp_path, planned, source={"session": "t"},
+                               now=NOW - 2 * DAY).ok
+        _report, brief = brief_of(tmp_path)
+        assert brief.splitlines()[-1] == ("Not listed: nothing; 1 hidden by your preferences, "
+                                          "0 shown despite one. /mail shows everything.")
+
+    def test_handled_items_are_one_count(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="a", at=NOW - 4 * DAY)
+        add_verdict(tmp_path, h, wanted="reply")
+        add_mail(tmp_path, "o", frm=OWNER, to="a@x.example", subject="Re: a", at=NOW - DAY,
+                 sent=True)
+        _report, brief = brief_of(tmp_path)
+        assert "1 item(s) look handled by later mail." in brief
+        assert "probably settled" not in brief
+
+    def test_the_brief_is_delivered_beside_the_working_copy(self, tmp_path):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="a", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="pay")
+        post = FakePost([ok()])
+        run(tmp_path, post)
+        payload = post.calls[0][1]
+        assert payload["report"].startswith("Inbox report —")
+        assert payload["brief"].startswith(mailreport.day_words(NOW) + " — 1 new")
+        entry = mailreport.read_ledger(tmp_path)[-1]
+        # A first-contact sender, only the Reader's word: its own section, once.
+        assert entry["brief"]["first_contact"] == [h.digest]
+
+
+class TestTheBriefReviewFixes:
+    """The final review of slice 1: trust offers are offered only when HE saw
+    them, a broken brief costs nothing, and nothing escapes the counts line."""
+
+    def offers(self, monkeypatch, n: int) -> list:
+        made = [mailreport.TrustOffer(f"case-{i:012x}", f"Case {i}", f"desk{i}@shop.example",
+                                      ("sales@shop.example",), "") for i in range(n)]
+        monkeypatch.setattr(mailreport, "trust_offers",
+                            lambda store, index, offered: (
+                                [o for o in made if o.key not in offered], 0))
+        return made
+
+    def test_an_offer_counts_as_offered_only_when_the_brief_drew_it(self, tmp_path,
+                                                                     monkeypatch):
+        fresh_health(tmp_path)
+        made = self.offers(monkeypatch, mailreport.TRUST_OFFERS_SHOWN + 1)
+        post = FakePost([ok()])
+        run(tmp_path, post, now=NOW - DAY)
+        brief = post.calls[0][1]["brief"]
+        chips = re.findall(r"\[trust\]\((aish-reply://[^)]*)\)", brief)
+        assert len(chips) == mailreport.TRUST_OFFERS_SHOWN
+        # The server keeps exactly these shapes.
+        assert server.presented_report(brief).count("](aish-reply://trust sender") == len(chips)
+        assert all(mailreport.visible_length(t) <= mailreport.BRIEF_LINE_TARGET
+                   for t in brief.splitlines() if t.startswith("- "))
+        entry = mailreport.read_ledger(tmp_path)[-1]
+        assert entry["trust_offers"] == sorted(o.key for o in made[:-1])
+        # Next morning: the one not drawn is offered again; the drawn ones are not.
+        report = build(tmp_path)
+        assert [o.key for o in report.trust_offers] == [made[-1].key]
+
+    def test_a_broken_brief_delivers_the_working_copy_and_says_so(self, tmp_path,
+                                                                    monkeypatch):
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="Secret subject 4411",
+                     at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="pay")
+
+        def broken(*a, **k):
+            raise ValueError("a message that quotes Secret subject 4411")
+
+        monkeypatch.setattr(mailreport, "render_brief", broken)
+        post = FakePost([ok()])
+        assert run(tmp_path, post)[0] == 0
+        payload = post.calls[0][1]
+        assert "brief" not in payload
+        assert payload["report"].splitlines()[0] == mailreport.BRIEF_FAILED_LINE
+        assert "Secret subject 4411" in payload["report"]
+        entry = mailreport.read_ledger(tmp_path)[-1]
+        assert entry["status"] == "delivered" and entry["brief_failed"] == "ValueError"
+        assert "Secret" not in json.dumps(entry) and "brief" not in entry
+        assert entry["digests"] == [h.digest]
+
+    def test_a_shown_despite_line_is_marked_and_counted(self, tmp_path):
+        from aish import mailprefs
+
+        fresh_health(tmp_path)
+        h = add_mail(tmp_path, "a", frm="a@x.example", subject="Pay now", at=NOW - DAY)
+        add_verdict(tmp_path, h, wanted="pay", suspicion="suspicious")
+        planned = mailprefs.plan(tmp_path, {"action": "add", "kind": "hide",
+                                            "sender": "a@x.example"})
+        assert mailprefs.apply(tmp_path, planned, source={"session": "t"},
+                               now=NOW - 2 * DAY).ok
+        _report, brief = brief_of(tmp_path)
+        line = next(t for t in brief.splitlines() if "Pay now" in t)
+        assert "shown despite your preference" in line
+        assert "0 hidden by your preferences, 1 shown despite one." in brief
+
+    def test_follow_ups_over_the_cap_are_counted(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mailreport, "FOLLOWUPS_SHOWN", 1)
+        fresh_health(tmp_path)
+        for n in range(3):
+            add_mail(tmp_path, f"o{n}", frm=OWNER, to=f"p{n}@x.example", subject=f"s{n}",
+                     at=NOW - 6 * DAY - n, sent=True)
+        _report, brief = brief_of(tmp_path)
+        assert "2 more follow-ups over the cap" in brief
+
+
 # ---------------------------------------------------------------- render safety
 
 
@@ -432,6 +1193,24 @@ def seed_hostile(state) -> None:
     add_verdict(state, tuta, wanted="nothing", meaning=f"{HOSTILE} [x](https://e.example)")
     add_mail(state, "o", frm=OWNER, to="eve@evil.example", subject=HOSTILE,
              at=NOW - 9 * DAY, sent=True)
+    # The slice's new strings: a mail folded into the attacker's line (its
+    # what-word and deadline differ), a line on its last morning, a counted
+    # ask, and a miss — each carrying hostile text where a record can.
+    folded = add_mail(state, "abcdef5678", frm="attacker@evil.example", subject=HOSTILE,
+                      at=NOW - DAY / 2)
+    add_verdict(state, folded, wanted="reply", deadline="2026-12-01", meaning=HOSTILE)
+    leaving = add_mail(state, "abcdef9999", frm=f"{HOSTILE} <mallory@evil.example>",
+                       subject=HOSTILE, at=NOW - 60 * DAY + DAY / 2)
+    add_verdict(state, leaving, wanted="pay", meaning=HOSTILE)
+    counted = add_mail(state, "c", frm="trent@evil.example", subject=HOSTILE, at=NOW - DAY)
+    add_verdict(state, counted, wanted="decide", meaning=HOSTILE)
+    missed = add_mail(state, "m", frm="peggy@evil.example", subject=HOSTILE,
+                      at=NOW - 4 * DAY, mid="missed@evil.example")
+    add_verdict(state, missed, wanted="decide", meaning=HOSTILE, recorded_at=NOW - 4 * DAY)
+    mailreport.append_ledger(state, {"at": NOW - 3 * DAY, "as_of": NOW - 3 * DAY,
+                                     "status": "delivered", "digests": []})
+    add_mail(state, "o2", frm=OWNER, to="peggy@evil.example", subject=HOSTILE,
+             at=NOW - DAY, sent=True, in_reply_to="missed@evil.example")
 
 
 UNSAFE = re.compile(
@@ -476,6 +1255,58 @@ class TestRenderSafety:
             assert fragment not in text, fragment
         assert any(HOSTILE in s for s in seen)
 
+    def test_the_new_strings_are_present_and_a_stored_amount_passes_the_sanitiser(
+        self, tmp_path, monkeypatch
+    ):
+        from aish import mailitems
+
+        fresh_health(tmp_path)
+        seed_hostile(tmp_path)
+        def amounts(self, digest):
+            header = self.index.get(digest)
+            return (frozenset({(HOSTILE, 100)})
+                    if header is not None and header.from_addr == "attacker@evil.example"
+                    else frozenset())
+
+        monkeypatch.setattr(mailitems.Context, "stored_amounts", amounts)
+        seen: list[str] = []
+
+        def recording(text: str) -> str:
+            seen.append(text)
+            return "«ok»"
+
+        text = mailreport.render(build(tmp_path, clean=recording), clean=recording)
+        assert "mails, also ref " in text and "leaves the brief tomorrow" in text
+        assert "2 more mail(s) ask something" in text and "You answered 1 mail(s)" in text
+        assert any(HOSTILE in s for s in seen) and "evil" not in text and "\x9b" not in text
+        clean_text = mailreport.render(build(tmp_path, clean=cli._mail_cell),
+                                       clean=cli._mail_cell)
+        assert not UNSAFE.search(clean_text.replace("\n", ""))
+
+    def test_every_brief_string_passes_the_sanitiser_and_no_foreign_link_survives(
+        self, tmp_path
+    ):
+        fresh_health(tmp_path)
+        seed_hostile(tmp_path)
+        seen: list[str] = []
+
+        def recording(text: str) -> str:
+            seen.append(text)
+            return "«ok»"
+
+        report = build(tmp_path, clean=recording)
+        brief = mailreport.render_brief(report, clean=recording)
+        assert any(HOSTILE in s for s in seen)
+        for fragment in ("evil", "\x9b", "‮", "attacker", "Pay\x9b"):
+            assert fragment not in brief, fragment
+        clean = mailreport.render_brief(build(tmp_path, clean=cli._mail_cell),
+                                        clean=cli._mail_cell, account="me@example.org")
+        assert not UNSAFE.search(clean.replace("\n", ""))
+        for target in re.findall(r"\]\(([^)]*)\)", clean):
+            assert (re.fullmatch(r"aish-reply://resolve ref [0-9a-f]{12}", target)
+                    or target.startswith("https://mail.google.com/mail/u/0/")), target
+        assert server.presented_report(clean).count("](") == clean.count("](")
+
     def test_gmail_links_are_built_only_from_a_hex_gmail_id(self):
         base = mailindex.from_gmail(gmail("abcdef12", frm="a@x.example", at=T0),
                                     frozenset({OWNER})).header
@@ -507,9 +1338,9 @@ class TestTheReportSaysWhatItRestsOn:
                  at=NOW - DAY, sent=True)
         text = mailreport.render(build(tmp_path), clean=identity)
         assert text.splitlines()[0].endswith(": nothing needs you.")
-        assert "Nothing new asks you to pay, reply or decide." in text
+        assert "Nothing open asks you to pay, reply or decide." in text
         assert "Your turn (0):\n- none" in text and "(0):\n- none" in text
-        assert "Nothing new the assistant would keep in front of you." in text
+        assert "Not shown: nothing else." in text
 
 
 # ---------------------------------------------------------------- run, delivery, ledger
@@ -557,6 +1388,12 @@ class TestRun:
         post = FakePost([])
         code, printed = run(tmp_path, post, dry_run=True)
         assert code == 0 and post.calls == []
+        # The owner's brief by default; the working copy on request.
+        assert printed[0].startswith(mailreport.day_words(NOW) + " — ")
+        printed = []
+        assert mailreport.run(tmp_path, clean=identity, now=NOW, dry_run=True, since=None,
+                              account="", base="", token="", post=post,
+                              out=printed.append, working_copy=True) == 0
         assert printed[0].startswith("Inbox report — ")
         assert tree(tmp_path) == before
 
@@ -586,9 +1423,11 @@ class TestRun:
         run(tmp_path, FakePost([ok("chat-1.jsonl")]))
         (entry,) = mailreport.read_ledger(tmp_path)
         assert entry["status"] == "delivered" and entry["session"] == "chat-1.jsonl"
-        assert entry["counts"] == {"needs_action": 1, "your_turn": 0, "their_turn": 0,
-                                   "may_interest": 0, "probably_settled": 0}
+        assert entry["counts"] == {"needs_action": 1, "needs_mails": 1, "your_turn": 0,
+                                   "their_turn": 0, "counted": 0, "probably_settled": 0,
+                                   "missed": 0}
         assert entry["digests"] == [h.digest]
+        assert entry["counted"] == [] and entry["followups"] == [] and entry["missed"] == 0
 
     def test_an_empty_day_still_delivers(self, tmp_path):
         fresh_health(tmp_path)

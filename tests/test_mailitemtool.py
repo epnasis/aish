@@ -94,7 +94,9 @@ class TestTheVerbs:
     def test_restore_pulls_a_demoted_item_back_into_its_section(self, tmp_path):
         offer = add_mail(tmp_path, "n1", frm="agent@broker.example", subject="Offer",
                          at=NOW - 3 * DAY)
-        add_verdict(tmp_path, offer, wanted="decide", recorded_at=NOW - 3 * DAY)
+        # Dated, so the offer earns its line (a `decide` alone is only counted).
+        add_verdict(tmp_path, offer, wanted="decide", deadline="2026-12-01",
+                    recorded_at=NOW - 3 * DAY)
         his_sent(tmp_path, "o1", to="agent@broker.example", at=NOW - 2 * DAY,
                  subject="Re: Offer")
         assert [r.reading.digest for r in report(tmp_path).settled] == [offer.digest]

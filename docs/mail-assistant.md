@@ -322,7 +322,14 @@ there is his explicit command through the case tool. **Once per (case, address)*
 DELIVERED report showed is recorded in that report's ledger line (`trust_offers`) and never
 offered again — keyed by the case it IS now (`offered_keys` resolves each recorded case id
 through his merges), so a merge, which carries the withheld record to the surviving case, does
-not re-offer it (`TestAMergeDoesNotReOffer`); a dry run records nothing. Open, undismissed cases only; at most
+not re-offer it (`TestAMergeDoesNotReOffer`); a dry run records nothing. **Since the brief
+(2026-11-12), "showed" means the OWNER was shown it**: he reads the brief, not the working copy (a
+kept note he never opens), so the brief carries the offers itself — a short *Senders on your
+cases* section, `<address> wrote on “<case>”; you wrote to <address> · [trust]`, with the recent
+trusts' `[untrust]` lines, the same two chip shapes the server already admits — and only the
+offers the brief DREW are recorded. One the brief did not draw stays pending and is offered next
+morning; when the brief could not be built and the working copy was presented instead, the
+working copy's draws are recorded (`TestTheBriefReviewFixes`). Open, undismissed cases only; at most
 `TRUST_OFFERS_SHOWN` (3) per report, whole lines, never cut by the size cap. **The server keeps
 exactly this link shape** (`server._REPORT_FOREIGN_LINK`, its fourth): the address grammar and
 the case-id shape come from their one authority in `mailcases`, never a second literal.
@@ -1031,21 +1038,198 @@ step in digest form; event pushes stay deferred. **Delivered as an aish-web chat
 (owner directive the same day): one new chat each morning, which he can answer — *"pay this"*,
 *"file that"* — in place.
 
-### What it holds — three sections, built by code, no model call
+**A second amendment, recorded so it is not "fixed" back (2026-11-12, the brief by case).** The
+premise's *"also separately for info that may be of interest"* is amended: the *May interest you*
+section is REMOVED and those mails are counted. Reason: the section never matched interests — it
+listed every kept-visible mail that asks nothing (there is no interest store; S5) — and on
+11 November it was 15 of the report's 43 lines. Real interest lines return when the interest store
+exists (a later slice of the assistant design; not built). **This is a choice the owner has not
+explicitly confirmed**; it was made in the slice's build spec and is his to reverse.
 
-Read from the verdict store and the thread index only (and the watcher's health file and the
-report's own ledger). Every reading per mail: the newest one with a verdict; a mail any model
-saw newsletter-gated is gated.
+### What it holds — built by code, no model call
 
-- **Needs your action** — new mail whose stored verdict says `wanted` ∈ {pay, reply, decide},
-  ordered dated deadline soonest first, then pay, reply, decide, then newest. Each item: what is
-  wanted and by when, sender, subject, the Reader's one line, inbox, date, and — for Gmail mail
-  only — an *open in Gmail* link built by CODE from the hex provider id (`gmail_link`).
+Read from the verdict store and the thread index only (and the watcher's health file, the case
+store and preference/act stores, and the report's own ledger). Every reading per mail: the newest
+one with a verdict; a mail any model saw newsletter-gated is gated.
+
+- **Needs your action** — one line per thing to do (§The brief by case, below): an open item
+  whose reading wants `pay`, `reply` or `decide` (or that his `important` preference places
+  there) AND that a recorded fact earns a line; ordered dated deadline soonest first, then lines
+  no report listed before, then pay, reply, decide, then newest. Above the lines, the COUNT of new
+  mail that asks something with no fact behind it, and of new mail the assistant would keep
+  visible that asks nothing.
 - **Follow-ups** — deterministic, below.
-- **May interest you** — new mail whose EFFECTIVE disposition (`mailverdicts.
-  effective_disposition`, after both clamps) is `surface` with `wanted` nothing. **v1 is not
-  interest matching**: there is no interest index (S5), and the section header says so in
-  words — *these are new mails the assistant would keep visible that ask nothing of you*.
+- **Probably settled** and the trust chips — §Open items and settlement, §The trust chip.
+
+### The brief by case (2026-11-12) — one line per thing to do
+
+**Why.** The 11 November report: 43 lines, about 9,000 characters, 6 rows that needed him, 15
+that asked nothing, 200-600 characters a row, one row per mail, each shown once and never again.
+The build spec (reviewed against the code, deleted once its rationale moved here) made six
+changes; no new power, no new store kind, no model call.
+
+1. **The line test** (`mailitems.Context.line_facts`, replacing *"the Reader said pay, reply or
+   decide"*). An open needs item earns a line when a RECORDED fact holds: a dated deadline on the
+   reading (the sender's own words as a model extracted them — showing is the safe direction, and
+   the caution floor still marks it); money — a stored amount (`Context.stored_amounts`) or a
+   recorded payment account (`Context.payment_account`, the recorded-account half of `meanings`);
+   the Reader read it as `pay` or `reply`; **he writes to this sender** — the mail is authenticated
+   AND `mailgate.grade` (his outbound mail only, as of the mail) is known or established — never
+   bare `owner_acts`: an unauthenticated From is a claim and inherits nothing; his `important` or
+   `show_first` preference; any caution (`Context.caution`, or a caution mark on the record); his
+   restore. **`decide` alone earns nothing** — it was the measured over-call (190 of 637 readings);
+   with any fact it keeps its word. A your-turn follow-up always passes (he wrote to that party).
+   The his-restore fact is this build's addition to the spec's list: his word that an item is
+   still open, the visible direction. No fixed number of lines; `NEEDS_SHOWN` and
+   `REPORT_MAX_CHARS` stay as fuses. `TestTheLineTest`.
+2. **Counted, not listed.** An item that fails the test is counted in one line — *N more mail(s)
+   ask something, with no date, amount or correspondent behind it — counted, not listed; `/mail`
+   in the terminal lists them.* — while it is news (§What is new), and its digest is recorded in
+   the ledger's NEW `counted` field, never in `digests`: the count is news, not a running total,
+   and a counted mail that later earns a fact (he writes to its sender) still earns its line. The
+   counts sit above the rows, so the size cap can never cut one. No new chip: the server's chip
+   allowlist is not widened.
+3. **One line per case or party** (`mailreport.fold_lines`). Lines whose mails sit on the same
+   OPEN cases (trusted membership, `Context.cases_of`; closed, dismissed and merged cases do not
+   count) fold into one; otherwise lines on no case from the same exact sender address do. The
+   line says how many mails it stands for and each one's ref, with its what-word and deadline
+   where they differ from the line's own, and every distinct stored amount. **Lines on distinct
+   cases never fold**: the case key is the exact SET of open cases, so a mail on cases A and B
+   does not fold with one on A alone (the visible direction). The sender fold is for lines on no
+   case only. A cautioned line, and one shown despite a preference, never folds — its marks are
+   its own. Near-duplicates keep their meaning (*their texts differ*). Every folded mail is
+   recorded as shown. `TestFolding`.
+4. **Open means shown again.** A line is listed every morning while it is open
+   (`Context.state_of`) — not while it is news: settled by his word it leaves (counted, as
+   before); probably settled it moves to that section; otherwise it stays until it leaves the
+   window. A repeated line says *open N day(s)*; a line no delivered report listed says *new*. The
+   window is the derivation's existing 60 days, measured on `Reading.when` — the provider's
+   receipt time, never later than aish's first read (the spec says "from the anchor's first
+   read"; `derive` already bounds needs by `when`, which is at or before the first read, so this
+   is the same bound or a stricter one, and the line can always announce its own leaving). Its
+   last morning says *leaves the brief tomorrow, unanswered*; a folded mail on its last morning
+   says so on the line. `mailsettle.showable`'s needs half is now this same test (line facts
+   inside the window, minus his hides), so the settlement judge judges exactly what the brief can
+   show. `TestOpenMeansShownAgain` (including `showable` agreeing with the lines drawn).
+5. **May interest you is removed** (the amendment above). Those mails are counted — *N new
+   mail(s) the assistant would keep visible ask nothing — counted, not listed.* — in the ledger's
+   `counted`. **Kept law: a cautioned mail is never only a number.** A kept-visible mail that asks
+   nothing and carries a caution mark — which the old section showed, marked — keeps its own line
+   (*ASKS NOTHING*), once, while it is news, and is recorded as shown. `TestMayInterestIsCounted`.
+6. **Short lines.** `WHAT, by WHEN — address — “subject” — amount — new | open N day(s) — ref`
+   (the sender's exact address, never a display name a sender writes; the subject capped at
+   `LINE_SUBJECT_CAP` 60). The Reader's sentence appears only when the subject has fewer than
+   `SUBJECT_TELLING_WORDS` (3) words of three letters or more, capped at `LINE_MEANING_CAP`
+   (100) — and its withholding on a cautioned mail always. Inbox and date only where another line
+   has the same sender and subject. The Gmail link stays, labelled `[Gmail]`. Follow-up rows drop
+   the inbox and date too. The footer stays complete but compressed: *Not shown:* names only the
+   non-zero counts (*nothing else* when all are zero); settlement and trust machinery lines print
+   only when non-zero; one short line for the window. **Exempt, always printed**: the preferences
+   line (with its zero state) and the hidden / shown-despite counts, which make suppression
+   visible. `TestTheFooterIsCompressed`.
+7. **The miss counter** (`mailreport.misses`). *You answered N mail(s) since the last brief that
+   it had not listed.* — printed only when N > 0, recorded on EVERY ledger attempt (`missed`,
+   `missed_digests`). Counted over the mail his sent mail since the last delivered brief answered
+   — his own In-Reply-To, or failing that the newest earlier inbound mail from an address he
+   addressed (Tuta replies carry no usable In-Reply-To) — that had a reading, was report-eligible
+   (not gated, not a one-time code, not his own copy, inside the window) and **was first read by
+   aish at or before that brief** (a stated choice: mail that arrived after a brief no brief could
+   list). "Listed" is the ledger's `digests` plus the new `followups` field — the asks the listed
+   your-turn rows rested on. It is the instrument for whether change 1 is right. `TestTheMissCounter`.
+
+`aish-mailreport --dry-run --now YYYY-MM-DDTHH:MM` builds as of another instant (refused without
+`--dry-run`). The stores themselves are read as they are now — see *Residuals*. `TestTheNowOption`.
+
+**Measured on a frozen copy of the owner's mail state (2026-11-12, counts only; no mailbox, model or
+server call).** Same data, both layouts, as of 2026-11-11 07:30 through a best-effort as-of view
+(below): old 41 lines / 8,796 characters / 6 rows needing him / 12 *May interest* rows; new 43
+lines / 9,235 characters / 14 lines (19 mails; 3 new, 11 repeated, 3 folded) / 14 counted. A
+line's own part (up to its ref, link collapsed) fell from a median of 286 to 138 characters
+(longest 358 → 274), but 12 of the 14 lines carry the settlement's *later mail aish did not weigh*
+tail (a kept law: a refused pair is named on its item), so whole lines stayed long (median 292 →
+304 characters with the link collapsed). The total did not shrink because open lines now come back: over
+the 14 mornings 29 Oct–11 Nov the line count rose 2, 2, 2, 4, 5, 8, 8, 9, 8, 9, 11, 11, 11, 14 —
+accumulation, not a daily flood: 0-3 new lines a morning, and the items stay because nothing
+settles them but his word, a judgement or his own reply. His replies in the last 60 days: 19
+sent, 10 answered mails, 7 of those with no reading (backfilled), 3 eligible; 2 passed the old
+rule, 2 pass the new test (the same 2), 1 came from a sender first-contact at the time (and passed
+both). That sample is too small to decide whether a first-contact clause is needed.
+
+### The brief — two texts from one build (revision 1b, 2026-11-12)
+
+**Why.** Read as the owner would, slice 1's output was still what he called *"very chatty while
+not very helpful"*: lines of 200-540 characters each dragging machinery (hex refs, the settlement's
+*later mail aish did not weigh* tails, vouch chips, the Reader's sentence, lists of stored amounts),
+six footer lines of accounting, a *Probably settled* section asking him to audit aish, and open
+items piling up. The delivery already carried the report twice — the kept note the chat's model
+reads, and the presented answer he reads — so `mailreport` now composes TWO texts from ONE
+`build`, both by code, no model call:
+
+- **The working copy** (`render`, unchanged) — refs, evidence, settlement tails, vouch and trust
+  chips, preference listing, the full footer. It is the `/trigger` payload's `report`, the KEPT
+  note, so *"done"*, *"restore"*, *"pay this"* still resolve in that chat. `--dry-run
+  --working-copy` prints it.
+- **The brief** (`render_brief`) — the payload's new `brief`, presented as the turn's answer
+  through the SAME `server.presented_report` sanitiser and link allowlist (`docs/web-server.md`).
+  `--dry-run` prints it. Headline `Thu 12 Nov — N new, M still open.`, the watcher's warnings
+  before it. Sections, each omitted when empty: *Reminders* (his own, due today — kept because they
+  reach him only in the report), *New*, *Still open* (overdue first, oldest due date first; then
+  dated, soonest first; then undated, newest first), *New, from senders you have not dealt with*,
+  *Waiting on others* (their turn, 5 to `BRIEF_WAITING_LISTED_DAYS` (30) days). Your-turn rows
+  ride *New* or *Still open* as `Answer — …` lines (new = their asks were not in an earlier
+  report's `followups`). Then one line *N item(s) look handled by later mail.* (no list), and ONE
+  counts line — *Not listed: N that ask nothing, …, N newsletters, N codes, N other; N hidden by
+  your preferences. /mail shows everything.* — whose preferences clause is printed always, zero
+  included (the suppression-visibility law, now as one clause). An empty day says *Nothing needs
+  you.* Every eligible reading is in a line or that counts line.
+- **A line**: `Pay — who — “subject” — amount — due 1 Nov (11 days overdue) — open N days ·
+  [done] · [open]`. The what-word in sentence case; dates as `1 Nov` with `(today)`, `(in N
+  days)` or `(N days overdue)`; `open N days` on *Still open*; the amount only when the case store
+  recorded EXACTLY ONE for that mail; a folded line says `(N mails)`, its earliest date and `(+N
+  more dates)`. `who` is the display name only when the mail is authenticated and the sender is
+  one he writes to (`Context.correspondent`) — otherwise the address, since a display name is the
+  sender's own words. `[done]` is the existing `aish-reply://resolve ref <12 hex>` chip built from
+  the anchor; `[open]` the code-built Gmail link. **CAUTION stays on the line**, and a cautioned
+  mail's Reader sentence is never shown; otherwise the sentence appears only under the
+  subject-says-little rule, in the room left. A line aims at `BRIEF_LINE_TARGET` (140) VISIBLE
+  characters (link targets excluded, `visible_length`): the subject gives way first, down to
+  `BRIEF_SUBJECT_MIN` (24). A long CAUTION can still exceed it.
+- **What repeats.** A line backed by a hard fact (deadline, money, a sender he writes to, his
+  preference, caution, his restore) repeats while open. A line resting ONLY on the Reader's `pay`
+  or `reply` from a sender he does not write to is shown once, under *New, from senders you have
+  not dealt with*, and afterwards counted (*N unanswered from new senders*): a cold pitch must not
+  nag for 60 days; the miss counter measures what this loses. **Ageing, a stated choice**: a
+  *Still open* line open longer than `BRIEF_AGEING_DAYS` (14) with no deadline still ahead — an
+  undated one, and also an OVERDUE dated one — is listed on Mondays only and counted on other days (*N older open items (listed on Mondays)*);
+  its last morning in the window is listed whatever the day. The working copy still lists every
+  open line.
+- **The ledger** records each delivered brief's sections (`brief`: digests per section, and the
+  ones only counted) beside `digests` and `counted`, so a brief can be reproduced; a shown-once
+  line is recorded as listed and does not repeat.
+- **Money tightened (measured).** On the frozen copy, a `decide` order confirmation earned a line
+  on "money" from TWO stored amounts (its price list). `line_facts` now counts money only for
+  exactly one stored amount, or a recorded payment account. A single-amount order confirmation
+  would still pass. *Not* tightened, reported instead: 4 of the 7 dated deadlines on lines were
+  already past (a parcel's pickup date, for one) — a model-extracted date keeps an item open as
+  *overdue*; ageing lists such lines on Mondays only.
+
+`TestTheBrief` (tests/test_mailreport.py), `TestTheBriefIsWhatHeReads`
+(tests/test_mailreport_chat.py).
+
+**Measured (revision 1b, after the final review's fixes, a fresh frozen copy of 2026-11-12,
+counts only).** The brief: 15 lines, 1,645 characters (1,210 visible), 7 item lines, visible
+length median 119, longest 140, none over 140; sections *Still open* 6 and *Waiting on others* 1
+(no new line, no first-contact line, no trust offer, no reminder that morning); counted 4
+first-contact, 3 older, 1 waiting over 30 days; 5 look handled. The working copy of the same build:
+40 lines, 8,766 characters. From the earlier 1b copy, New + Still open over the mornings of
+29 Oct–11 Nov (as-of view, its leaks under *Residuals*): 3, 3, 3, 3, 4, 4, 5, 6, 6, 6, 7, 7, 5, 6.
+
+**Consequences, stated.** A `show_first` preference on mail that asks nothing used to pin it in
+*May interest you*; such mail is now counted (show_first earns a line only for an item that
+asks something). An ask from someone he wrote to is now a Needs line every morning while open,
+so its conversation is not repeated under *Your turn* (the existing rule); *Your turn* keeps the
+rows whose asks are not lines — readings that could not tell, unread answers. `--since` widens
+what is COUNTED; it no longer reaches lines, which are state.
 
 **Excluded everywhere, and counted where he reads it**: newsletter-gated mail (the gate's record,
 or the index's own List-Id / List-Unsubscribe — so a mail with no reading is still recognised by
@@ -1071,8 +1255,10 @@ A mail is news when it arrived at or after the floor and no earlier delivered re
 (the ledger records the digests shown). The floor is: the first report, 7 days back
 (`FIRST_RUN_DAYS`); after a delivered report, that report's build time minus `LATE_GRACE_DAYS`
 (7) — so a mail read late (an admission lapse, a top-up fetch) or held over a section's cap
-(`NEEDS_SHOWN` 30, `INTEREST_SHOWN` 20; the overflow line says they stay eligible) still reaches
-him once, and nothing is shown twice. The time judged is the provider's receipt time when there
+(`NEEDS_SHOWN` 30; the overflow line says they stay eligible) still reaches him once, and
+nothing is counted twice. **Since the brief by case this window governs only what is COUNTED and
+excluded**: an open line is not news-gated, it is listed every morning while open (change 4); the
+counted mails are recorded in the ledger's `counted`, read apart from `digests`. The time judged is the provider's receipt time when there
 is one; a sender-written Date (Tuta) is never later than when aish first read the mail, so no
 sender can date a mail into the future to keep it news, and an undated mail is judged by when it
 was first read. `--since YYYY-MM-DD|Nd` asks for everything since then, whatever earlier reports
@@ -1190,7 +1376,9 @@ recorded* when there is no ledger (the job may not be installed).
 through `envrun` + aish-web's env file as the watcher's job, `AISH_WEB_URL` in the plist, the
 token read at run time from the Keychain (`email_poll.read_token`), never in the plist.
 
-`tests/test_mailreport.py` — `TestNeedsYourAction`, `TestMayInterestYou`, `TestExclusions`,
+`tests/test_mailreport.py` — `TestNeedsYourAction`, `TestTheLineTest`, `TestMayInterestIsCounted`,
+`TestOpenMeansShownAgain`, `TestFolding`, `TestTheFooterIsCompressed`, `TestTheMissCounter`,
+`TestTheNowOption`, `TestExclusions`,
 `TestCautions`, `TestFollowUps`, `TestWhatIsNew` (the window), `TestRenderSafety`,
 `TestTheReportSaysWhatItRestsOn` (stale watcher, empty day), `TestRun` (dry run, delivery,
 ledger), `TestHealthInMail`; `tests/test_mailreport_chat.py` — `TestTheReportChat` (origin +
@@ -1274,8 +1462,9 @@ key joins the case wherever it says it — `OWNER_KEY`, `_says_key` — and open
 mail whose cases are all closed reads with the Reader's own disposition again (after the live
 clamp) — in `/mail` (`would: archive [keeper clamp from archive RELEASED: … — you closed its
 case]`), in the CSV's `disposition_effective` and `keeper_clamped` (`…; released: you closed its
-case`), and in the daily report, where such a mail leaves *May interest you*. *Needs your action*
-does not read dispositions and is unchanged. **No mailbox is touched**: the cleanup lane (trash /
+case`), and in the daily report, where such a mail moves from the *kept visible, asks nothing*
+count to the footer's *held or filed* count (it was *May interest you* before 2026-11-12). *Needs
+your action* does not read dispositions and is unchanged. **No mailbox is touched**: the cleanup lane (trash /
 archive on closure, the owner's 2026-10-28 directive) is NOT built — nothing moves, labels or
 deletes mail, and nothing in this slice can.
 
@@ -1308,7 +1497,7 @@ corrupt bytes cannot widen a hide (an empty subject phrase would match every mai
 | kind | about | the report |
 |---|---|---|
 | `hide` | `sender` · `domain` (and its subdomains) · `recipient` (To or Cc — the kids' forwards) · `mail_kind` (a phrase in the Reader's `kind`) · `subject` (a phrase, 3+ characters, word-bounded, folded) | left out of every section; their-turn follow-ups are matched by sender/domain against the person he wrote to |
-| `show_first` | `sender` · `domain` · `mail_kind` | first in its section, marked `[first: your preference …]` |
+| `show_first` | `sender` · `domain` · `mail_kind` | first in its section, marked `[first: your preference …]`; since 2026-11-12 also a line fact — an item that asks something and matches it earns its line (mail that asks nothing is counted) |
 | `not_a_follow_up` | `counterparty` (standing) · `conversation` (a report `ref`) | left out of Follow-ups; a conversation only **until a new message arrives in it** after the preference was saved — the Catherine case, which revives if she writes again |
 | `remind` | `case` or `counterparty`, with `due` (a date, shown for `DUE_SHOWN_DAYS` 7 days from it), `every` (a weekday) or `no_answer_days` (counterparty only: his last message to them unanswered N days), and his `note` | `Reminders due` at the top of Follow-ups; a case reminder ends when the case closes |
 | `correction` | one `mail` (a report `ref`) and `label` `needed_action` / `junk` | **not applied**: counted in the footer, and the review CSV's `owner_correction` column |
@@ -1428,9 +1617,9 @@ An **item** is one thing the report would put in front of him, anchored by a DIG
 
 `mailitems.derive` is the ONE derivation (review-2 change 7): the watcher's settlement step and
 the 07:30 report both call it, so they cannot disagree about what is open. The report still shows
-a needs item only while it is news (§What is new) — the watcher judges only what the report could
-show (`mailsettle.showable`, reading the report's own `news_window`, and nothing his hide
-preferences take out). It is a slight SUPERSET in one corner — a your-turn row whose ask the report
+every needs item that earns a line, every morning while it is open (§The brief by case) — the
+watcher judges only what the report could show (`mailsettle.showable`: the same line test inside
+the window, and nothing his hide preferences take out). It is a slight SUPERSET in one corner — a your-turn row whose ask the report
 folds under a shown Needs item, or a near-duplicate's twin — so the watcher can spend a call on a
 row the report will not draw; never the other way. Follow-ups are unchanged in what they list (per counterparty, B3), and a
 your-turn row he answered in its own conversation is simply not derived: his answer moved his
@@ -1592,7 +1781,10 @@ model-free.
 - **A refused pair is never sent, and is named.** The open item's line says *later mail aish did
   not weigh: from <address> (<date>): <code's reason>* — an address and code's words only, never
   the later mail's subject or text (review: an attacker-writable channel pinned to a chosen item).
-  A pair whose bodies are not recorded is not judged and is counted.
+  A pair whose bodies are not recorded is not judged and is counted. **Amended 2026-11-12 (revision
+  1b), by the owner's complaint that the report was "very chatty while not very helpful"**: the
+  naming is in the WORKING COPY (the chat's kept note) and in `/mail`; the owner's brief carries
+  none of it — not even a count line of its own; its pairs are part of the working copy's footer.
 - **Bounded and idempotent.** At most `MAX_JUDGED_PER_PASS` (12, a choice) calls per pass, newest
   candidate first, the rest counted `capped`; one judgement per (item key, candidate, charter
   digest) — a charter edit is a new judgement. `unadmitted` stops the step without a call;
@@ -1625,7 +1817,10 @@ backfill's "older backfilled mail is never assessed": an old answer an open foll
   `TestTheSectionCap`) and never by the sections' (review-2 change 11). Each line: the item in code's words, *probably settled:*
   the evidence code verified — *you wrote to X on <date>* (the rule) or *mail from X on <date>
   (the same party / a third party with history; the stored amount), as aish's settlement judge
-  read it* with the evidence mail's ref — and two one-tap chips, `[restore]` and `[done]`. **The
+  read it* with the evidence mail's ref — and two one-tap chips, `[restore]` and `[done]`.
+  **Since the brief (2026-11-12) this list lives in the working copy and `/mail`**: the brief he
+  reads shows only *N item(s) look handled by later mail.*; he restores one by asking in the
+  report chat (whose model holds the working copy, refs and chips included) or from `/mail`. **The
   chips are the report's second link shape**: `aish-reply://restore ref <12 hex>` /
   `…resolve ref <12 hex>`, built by code from the anchor alone; `server.presented_report` keeps
   exactly that shape and breaks every other (`mailreport.safe` disarms every `aish-reply:` in mail
@@ -1644,8 +1839,8 @@ backfill's "older backfilled mail is never assessed": an old answer an open foll
 - **The footer** adds: items his word took out; *Settlement:* candidates not yet judged (those
   items stay open), later mail the tier rule does not let settle anything, pairs whose body is not
   recorded, unreadable judgement files; his own copies with both refs; rows a late reading closed.
-- A needs item he **restored** is shown again after it was news, until he resolves it or it
-  leaves the window.
+- A needs item he **restored** is listed while open, like every line (his restore is itself one
+  of the line facts), until he resolves it or it leaves the window.
 
 ### The verbs — `inbox_items` (`mailitemtool.py`)
 
@@ -1685,7 +1880,10 @@ and `anything` would — the preview shows him which before he saves.
 `OWN_COPY_SKEW_S` 300 s, `NEAR_DUPLICATE_S` 600 s, `ENTITY_DOMAIN_MAX_SENDERS` 5 addresses,
 `ENTITY_TOKEN_MIN` 4 characters, `CANDIDATES_PER_ITEM` 3, `MAX_JUDGED_PER_PASS` 12,
 `LATE_READS_PER_PASS` 5, `THIRD_PARTY_MIN_CASES` 2, `THIRD_PARTY_MIN_AGE_DAYS` 30 (the design's),
-`PREVIEW_DAYS` 90: all CHOICES, none a measurement, moved only on evidence or his word. None is a
+`PREVIEW_DAYS` 90 — and, since the brief by case, `LINE_SUBJECT_CAP` 60, `LINE_MEANING_CAP`
+100, `SUBJECT_TELLING_WORDS` 3, folding on the exact set of open cases, and the miss counter's
+"first read by the last brief": all CHOICES, none a measurement, moved only on evidence or his
+word. None is a
 word list; their misses are visible in the footer counts (not judged, not weighed, body not
 recorded) and the judgement store, not yet in `aish vocab`.
 
@@ -2069,6 +2267,20 @@ never a word that grades the pipeline (`docs/replay.md` R3, R5). `TestReport`.
   was not opened against his account here; it is built from the provider id alone.
 - **Retry on the report's answer** re-asks the task string — fixed words and the headline — of the
   session's MODEL, with the note in context: a model's presentation then replaces code's.
+- **`--now` is not a true as-of.** It moves the clock the report reads by; the stores are read as
+  they are. Readings and index entries newer than `--now` are in, his acts and the ledger
+  include later lines, and the case store, preferences, settler vouches and judgements are as of
+  the run. The slice's measurement filtered what could be filtered by time (ledger, item acts,
+  readings by `recorded_at`, index entries by their time) and still read the case store,
+  preferences, vouches and judgements as they stood at the copy; a superseded reading whose
+  re-read was later was dropped, not restored.
+- **The brief by case keeps open lines until something settles them.** On the frozen copy the
+  line count rose from 2 to 14 in 14 mornings. Only his word, a verified judgement or his own
+  reply to the counterparty settles an item; mail he handled elsewhere (by phone, in a portal)
+  stays a line until the 60-day window ends, saying how long it has been open.
+- **The miss counter's matching by address is a guess at which mail he answered**: the newest
+  earlier inbound mail from someone his message addressed. It only counts — nothing is shown or
+  settled by it.
 - **The Reader's admission has not been run.** The charter's central claims — that a model answers
   these cases as the exam expects — are hypotheses until `scripts/role-admission.py` runs per
   model. Nothing in this repository measured a model on it.
