@@ -98,7 +98,9 @@ from .agent import (
     ModelUnavailable,
     environment_context,
     prune_chat_scratch,
+    prune_chat_skill_runs,
     remove_chat_scratch,
+    remove_chat_skill_runs,
     surface_slot,
 )
 from .approval import (
@@ -2087,6 +2089,9 @@ class WebServer:
         # open anything, which is now. create_app opens the default session
         # immediately after constructing us. One directory listing.
         prune_chat_scratch(state_dir)
+        # The chat's skill runs are its own in the same sense (#467 slice
+        # 2c), so the same moment and the same rule: log gone, folder goes.
+        prune_chat_skill_runs(state_dir)
         self.uploads_dir = state_dir / "uploads"
         # The share inbox survives a restart, and it has to: a photo shared from
         # the phone at lunchtime is claimed when the app is next opened, and
@@ -5180,7 +5185,8 @@ class WebServer:
         Since #177 the log is MOVED to the trash rather than unlinked, so the
         conversation and its command audit trail can be put back for 30 days.
         Everything else about a delete is unchanged, including what it destroys
-        outright (the scratch workspace, the evidence blobs, the pin) — see the
+        outright (the scratch workspace, the third-party skill runs, the
+        evidence blobs, the pin) — see the
         trash section in session.py for why those are not held."""
         session = self.sessions.get(name)
         path = safe_session_path(self.state_dir, name)
@@ -5233,6 +5239,9 @@ class WebServer:
         # is the ONLY thing that collects it — closing the session no longer
         # does, because the workspace has to survive eviction and restart.
         await asyncio.to_thread(remove_chat_scratch, self.state_dir, path)
+        # And its third-party skill runs (#467 slice 2c), with the same
+        # semantics: destroyed, not trashed, because the chat owns them.
+        await asyncio.to_thread(remove_chat_skill_runs, self.state_dir, path)
         # And its evidence (#352, #177): the chat's directory in the per-chat
         # store holds every request its log referenced, and the chat is the
         # only thing that owns it.

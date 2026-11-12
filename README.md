@@ -541,7 +541,8 @@ thousands of entries without bloating the context.
   (of your files it can read only those, the skill and its packages — your
   home folder, other volumes and shared temp folders are closed, while system
   folders such as `/etc` and `/Library` stay readable; it writes only
-  its own scratch folder under `~/.local/state/aish/skill-runs/`; no network).
+  its own scratch folder under `~/.local/state/aish/skill-runs/<chat>/`; no network).
+  A chat's skill runs are deleted with the chat — not kept in Recently deleted.
   What comes back is written by aish — how it ended, the files it made (moved
   to names aish chooses) and kernel refusals — with the runner's own report
   kept apart and marked as third-party; the result counts as content from
@@ -1218,8 +1219,11 @@ collapsed section at the bottom of the chat list, and you can restore it there
 for **30 days** — the conversation and its command audit log come back as they
 were, in the same place in the list (a pinned chat comes back unpinned). After
 that aish purges it. What the delete does destroy at once, and a restore does
-not bring back: the chat's throwaway scratch workspace and its stored copies of
-the requests its steps sent. The copy mirrored to your devices goes at once
+not bring back: the chat's throwaway scratch workspace, the folders its
+third-party skill runs wrote (and the files they made), and its stored copies of
+the requests its steps sent. The terminal's `/delete` destroys the same, except
+the scratch workspace the running terminal itself is still using, which is
+removed when aish-web next starts. The copy mirrored to your devices goes at once
 too, and re-syncs after a restore. In the terminal, `aish trash` lists what is
 there, `aish trash restore <name>` brings one back, and `aish trash delete
 <name>` destroys one for good — that last one is the only step here that

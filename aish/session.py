@@ -1234,10 +1234,13 @@ def _turn_opens_at(records: list[dict], user_index: int) -> int:
 #    ones that went in. There is nothing to re-derive and nothing to get wrong.
 #
 # What trash does NOT hold, said plainly so the promise does not outrun the
-# code: a chat's throwaway scratch workspace and its evidence blobs are deleted
-# when the chat is (`agent.remove_chat_scratch`, `turns.delete_chat`). This
-# holds the conversation and its command audit trail — the part a delete
-# destroys that nothing else has a copy of.
+# code: a chat's throwaway scratch workspace, its third-party skill runs and its
+# evidence blobs are deleted when the chat is (`agent.remove_chat_scratch`,
+# `agent.remove_chat_skill_runs`, `turns.delete_chat`), from the web's delete
+# and the terminal's /delete alike — except that the terminal keeps the
+# scratch its own live Agent still writes to (see cli.py). A restored chat
+# comes back without them. This holds the conversation and its command audit
+# trail — the part a delete destroys that nothing else has a copy of.
 TRASH_DIR_NAME = "trash"
 TRASH_MAX_AGE_S = 30 * 24 * 3600
 # A ceiling on the directory, so a bulk delete cannot grow it without limit

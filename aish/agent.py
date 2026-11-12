@@ -3633,7 +3633,38 @@ def prune_chat_scratch(state_dir: os.PathLike | str) -> list[Path]:
     two. Call it while no session is open (server start), so a live chat that
     has not yet written its first record cannot be mistaken for an orphan.
     """
-    root = Path(state_dir) / "scratch"
+    return _prune_orphans(state_dir, Path(state_dir) / "scratch")
+
+
+def chat_skill_runs_dir(state_dir: os.PathLike | str, session_path: os.PathLike | str) -> Path:
+    """Where one CHAT's third-party skill runs live (#467 slice 2c) — one
+    level under the skill-runs store, keyed on the session log exactly as
+    `chat_scratch_dir` is, and for the same reason: the agent that writes a
+    run and the server or terminal that deletes the chat must name it alike.
+
+    Deliberately NOT inside the chat's scratch: the store is outside content
+    and recordless, and the scratch is the acting model's own cardless pen."""
+    return Path(state_dir) / "skill-runs" / Path(session_path).stem
+
+
+def remove_chat_skill_runs(
+    state_dir: os.PathLike | str, session_path: os.PathLike | str
+) -> None:
+    """Destroy one chat's skill runs with the chat, as its scratch is — not
+    trashed: the trash holds the conversation, not its whole footprint."""
+    _remove_scratch(chat_skill_runs_dir(state_dir, session_path))
+
+
+def prune_chat_skill_runs(state_dir: os.PathLike | str) -> list[Path]:
+    """`prune_chat_scratch` for the skill-runs store: every chat folder whose
+    session log is gone. Chat lifecycle, not age — a live chat's runs stay
+    however old they are. Same calling rule: before any session is open."""
+    return _prune_orphans(state_dir, Path(state_dir) / "skill-runs")
+
+
+def _prune_orphans(state_dir: os.PathLike | str, root: Path) -> list[Path]:
+    """Delete each directory under `root` whose `<state_dir>/<name>.jsonl`
+    session log is gone, and return what went."""
     removed: list[Path] = []
     try:
         entries = sorted(root.iterdir())
@@ -4587,10 +4618,22 @@ class Agent:
         # files aish collected out of it under its own names. use_skill names
         # them and the model is meant to read them — the #375 reasoning for
         # tool-downloads, and like it, everything here is outside content.
+        #
+        # This is the STORE (the boundary and the outside-content answer); a
+        # run goes one level down, in its chat's folder (`_skill_run_home`),
+        # which dies with the chat (slice 2c). An agent with no chat identity
+        # gets a throwaway store of its own, never the shared one: nothing
+        # would ever delete a run filed under no chat.
+        has_chat = state_dir is not None and current_session is not None
         self.skill_runs_dir = (
             Path(state_dir) / "skill-runs"
-            if state_dir is not None
-            else self.scratch_dir / "skill-runs"
+            if state_dir is not None and current_session is not None
+            else Path(tempfile.mkdtemp(prefix="aish-skill-runs-")).resolve()
+        )
+        self._skill_runs_finalizer = (
+            None
+            if has_chat
+            else weakref.finalize(self, shutil.rmtree, self.skill_runs_dir, ignore_errors=True)
         )
         # Probed recordings, keyed by the source the model named -> (what it
         # is, when we asked). Per-session and in memory only: the expensive
@@ -4610,7 +4653,7 @@ class Agent:
 
     def close(self) -> None:
         """Best-effort cleanup of the EPHEMERAL scratch workspace and the
-        ephemeral continuation cache beside it. Idempotent; also runs
+        ephemeral continuation cache and skill-runs store beside it. Idempotent; also runs
         automatically when the Agent is garbage-collected or the interpreter
         exits (weakref.finalize).
 
@@ -4618,7 +4661,9 @@ class Agent:
         object (#258), and evicting an agent must not delete the directory the
         conversation still refers to. The state-dir cache is untouched for the
         same reason — a result cut in one session is paged in the next."""
-        for finalizer in (self._scratch_finalizer, self._cache_finalizer):
+        for finalizer in (
+            self._scratch_finalizer, self._cache_finalizer, self._skill_runs_finalizer
+        ):
             if finalizer is not None:
                 finalizer()
 
@@ -16682,6 +16727,15 @@ class Agent:
             out.append(str(target))
         return list(dict.fromkeys(out)), ""
 
+    def _skill_run_home(self) -> Path:
+        """The folder this chat's skill runs go in: its own level of the
+        store, keyed on the log the chat is writing NOW. Asked per run rather
+        than fixed at construction, because the terminal keeps one Agent across
+        /new and /resume, and a run must die with the chat that ran it."""
+        if self.state_dir is not None and self.current_session is not None:
+            return chat_skill_runs_dir(self.state_dir, self.current_session())
+        return self.skill_runs_dir
+
     def _use_skill(self, args: dict) -> str | tools.ToolOutcome:
         """Run a third-party skill in quarantine (#467 slice 2b,
         `skill_runner`). Refused before any card unless a person started
@@ -16723,7 +16777,7 @@ class Agent:
             )
         if self.approve_tool is None:
             return _gate_outcome(USE_SKILL_NO_APPROVER, decision="blocked")
-        run_dir = self.skill_runs_dir / (
+        run_dir = self._skill_run_home() / (
             time.strftime("%Y%m%d-%H%M%S") + "-" + entry.name + "-" + os.urandom(3).hex()
         )
         scratch = run_dir / "scratch"

@@ -944,6 +944,57 @@ def test_delete_moves_the_chat_to_the_trash_and_says_how_to_get_it_back(
     assert entry.path.read_bytes() == body
 
 
+class TestTerminalDeleteTakesTheChatsFiles:
+    """#467 slice 2c: the terminal's /delete destroys what the web's delete
+    destroys — the chat's skill runs and its scratch — where it used to leave
+    the scratch behind while session.py said both surfaces removed it."""
+
+    def test_its_skill_runs_and_scratch_go_with_it(self, tmp_path, capsys, monkeypatch):
+        from aish.agent import chat_scratch_dir, chat_skill_runs_dir
+        from aish.cli import handle_slash
+
+        agent, logref = two_session_setup(tmp_path)
+        doomed = tmp_path / "session-20260101-000000-000000.jsonl"
+        kept = tmp_path / "session-20260201-000000-000000.jsonl"
+        for chat in (doomed, kept):
+            (chat_skill_runs_dir(tmp_path, chat) / "run" / "files").mkdir(parents=True)
+            chat_scratch_dir(tmp_path, chat).mkdir(parents=True)
+        scripted_input(monkeypatch, ["2", "y"])
+        handle_slash("/delete", agent, logref, tmp_path)
+
+        assert "deleted session-20260101" in capsys.readouterr().out
+        assert not chat_skill_runs_dir(tmp_path, doomed).exists()
+        assert not chat_scratch_dir(tmp_path, doomed).exists()
+        assert chat_skill_runs_dir(tmp_path, kept).is_dir()
+        assert chat_scratch_dir(tmp_path, kept).is_dir()
+
+    def test_the_scratch_this_terminal_still_writes_to_is_kept(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """/new does not move a live Agent's scratch, so the chat it was built
+        for can be deleted from under it; removing that folder would take the
+        current chat's throwaway files with it."""
+        from aish.agent import Agent, chat_scratch_dir, chat_skill_runs_dir
+        from aish.cli import LogRef, handle_slash
+        from aish.session import SessionLog
+
+        first = SessionLog(tmp_path / "session-20260101-000000-000000.jsonl")
+        first.message({"role": "user", "content": "from january"})
+        agent = Agent(
+            model="fake", approve=lambda _c: None, client_chat=lambda **_k: None,
+            state_dir=tmp_path, current_session=lambda: first.path,
+        )
+        (chat_skill_runs_dir(tmp_path, first.path) / "run").mkdir(parents=True)
+        logref = LogRef(SessionLog.new(tmp_path))  # as after /new
+        scripted_input(monkeypatch, ["y"])
+        handle_slash("/delete january", agent, logref, tmp_path)
+
+        assert "deleted session-20260101" in capsys.readouterr().out
+        assert agent.scratch_dir == chat_scratch_dir(tmp_path, first.path).resolve()
+        assert agent.scratch_dir.is_dir()
+        assert not chat_skill_runs_dir(tmp_path, first.path).exists()
+
+
 def test_trash_cli_lists_restores_and_deletes_for_good(tmp_path, capsys, monkeypatch):
     """The terminal's whole way back. Without it a web-less user's delete is
     still one-way, whatever the trash holds."""

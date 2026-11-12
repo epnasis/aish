@@ -3306,11 +3306,18 @@ class TestSessions:
             scratch = app_env["state_dir"] / "scratch" / name[: -len(".jsonl")]
             assert scratch.is_dir()
             (scratch / "probe.py").write_text("x")
+            # And its third-party skill runs (#467 slice 2c), same semantics.
+            runs = app_env["state_dir"] / "skill-runs" / name[: -len(".jsonl")]
+            (runs / "20261112-101500-pdf-a1b2c3" / "files").mkdir(parents=True)
+            other = app_env["state_dir"] / "skill-runs" / "session-20200102-000000-000000"
+            other.mkdir(parents=True)
 
             ws.send_json({"type": "delete_session", "name": name})
             recv_until(ws, "session_deleted")
             recv_until(ws, "session_list")
             assert not scratch.exists()
+            assert not runs.exists()
+            assert other.is_dir()
 
     def test_startup_sweeps_workspaces_whose_chat_is_gone(self, app_env):
         """Orphans predate the fix (every rebuilt agent leaked its
@@ -3329,10 +3336,18 @@ class TestSessions:
             encoding="utf-8",
         )
 
+        # The chat's skill runs are swept by the same rule (#467 slice 2c).
+        orphan_runs = state_dir / "skill-runs" / "session-20200101-000000-000000"
+        (orphan_runs / "run" / "files").mkdir(parents=True)
+        kept_runs = state_dir / "skill-runs" / "session-20200102-000000-000000"
+        kept_runs.mkdir(parents=True)
+
         client, _ = make_client(app_env, [])
         with client, connected(client) as (ws, _, _):
             assert not orphan.exists()
             assert kept.is_dir()
+            assert not orphan_runs.exists()
+            assert kept_runs.is_dir()
 
     def test_delete_rejects_path_escape_and_unknown_names(self, app_env):
         client, _ = make_client(app_env, [])

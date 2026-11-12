@@ -477,6 +477,76 @@ class TestUseSkill:
         assert "use_skill" in agent._menu.names
 
 
+class TestSkillRunsBelongToTheChat:
+    """#467 slice 2c: a run is filed under the chat that ran it and dies with
+    that chat, the way its scratch does — before this, `skill-runs/` carried no
+    chat id and every run outlived the chat that made it."""
+
+    def _run_in(self, tmp_path, log_of):
+        vendor()
+        project = tmp_path / "project"
+        project.mkdir(exist_ok=True)
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        agent, _ = make_agent(
+            [model_says(tool_calls=[use()]),
+             model_says(tool_calls=[tool_call("write_file", path="r.md", content="made")]),
+             model_says("STATUS: done"), model_says("done")],
+            cwd=str(project), approve_tool=lambda *a: True,
+            state_dir=str(state), current_session=log_of,
+        )
+        agent.run_task("make my pdf")
+        return agent, state
+
+    def test_a_run_is_filed_under_its_chat_and_is_still_outside_content(self, tmp_path):
+        log = tmp_path / "state" / "session-1.jsonl"
+        agent, state = self._run_in(tmp_path, lambda: log)
+        home = agent_module.chat_skill_runs_dir(state, log)
+        assert home == state / "skill-runs" / "session-1"
+        [made] = list(home.glob("*-pdfmaker-*/files/*"))
+        assert made.read_text() == "made"
+        assert agent.skill_runs_dir == state / "skill-runs"  # the store is unchanged
+        assert agent._artefact_source(str(made)).what == skill_runner.ARTEFACT_WHAT
+
+    def test_the_chat_is_the_one_writing_when_the_run_starts(self, tmp_path):
+        """The terminal keeps one Agent across /new: a run belongs to the chat
+        it ran in, not to the chat the Agent was built for."""
+        logs = [tmp_path / "state" / "session-1.jsonl"]
+        agent, state = self._run_in(tmp_path, lambda: logs[0])
+        logs[0] = state / "session-2.jsonl"
+        agent.chat.responses = [model_says(tool_calls=[use()]), model_says("STATUS: done"),
+                                model_says("done")]
+        agent.run_task("again")
+        assert list((state / "skill-runs" / "session-1").glob("*-pdfmaker-*"))
+        assert list((state / "skill-runs" / "session-2").glob("*-pdfmaker-*"))
+
+    def test_with_no_chat_a_run_never_lands_in_the_shared_store(self, tmp_path):
+        agent, state = self._run_in(tmp_path, None)
+        assert not (state / "skill-runs").exists()
+        assert "aish-skill-runs-" in agent.skill_runs_dir.name
+        assert list(agent.skill_runs_dir.glob("*-pdfmaker-*/files/*"))
+        agent.close()
+        assert not agent.skill_runs_dir.exists()
+
+    def test_deleting_a_chat_destroys_its_runs_and_no_other_chats(self, tmp_path):
+        mine = agent_module.chat_skill_runs_dir(tmp_path, tmp_path / "session-1.jsonl")
+        theirs = agent_module.chat_skill_runs_dir(tmp_path, tmp_path / "session-2.jsonl")
+        for home in (mine, theirs):
+            (home / "run" / "files").mkdir(parents=True)
+        agent_module.remove_chat_skill_runs(tmp_path, tmp_path / "session-1.jsonl")
+        assert not mine.exists() and theirs.is_dir()
+
+    def test_runs_whose_chat_is_gone_are_swept_and_a_live_chats_are_not(self, tmp_path):
+        assert agent_module.prune_chat_skill_runs(tmp_path) == []  # no store: no error
+        dead = tmp_path / "skill-runs" / "session-dead"
+        live = tmp_path / "skill-runs" / "session-live"
+        dead.mkdir(parents=True)
+        live.mkdir(parents=True)
+        (tmp_path / "session-live.jsonl").write_text("{}\n")
+        assert agent_module.prune_chat_skill_runs(tmp_path) == [dead]
+        assert live.is_dir()
+
+
 # -------------------------------------------------------------- dependencies
 
 

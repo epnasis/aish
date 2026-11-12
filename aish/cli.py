@@ -43,10 +43,13 @@ from .agent import (
     PROVIDER_LABELS,
     Agent,
     ModelUnavailable,
+    chat_scratch_dir,
     environment_context,
     feedback_prompt,
     format_tokens,
     learn_prompt,
+    remove_chat_scratch,
+    remove_chat_skill_runs,
     surface_slot,
 )
 from .approval import (
@@ -1740,6 +1743,16 @@ def handle_slash(
         # of its directory in the per-chat store, and the trash holds the
         # conversation, not the whole footprint (see session.py).
         turns.delete_chat(state_dir, selected.path)
+        # So do its skill runs (#467 slice 2c) and its scratch — the web
+        # always removed the scratch here and this surface never did. The one
+        # exception is the scratch this REPL's own Agent still writes to: it
+        # is keyed on the log the Agent was built with, which /new and
+        # /resume do not move, so the chat it was built for can be deleted
+        # from under it. That folder is left for the web server's orphan
+        # sweep at its next start.
+        remove_chat_skill_runs(state_dir, selected.path)
+        if chat_scratch_dir(state_dir, selected.path).resolve() != agent.scratch_dir:
+            remove_chat_scratch(state_dir, selected.path)
         print(
             f"{DIM}deleted {selected.path.name} — put it back with "
             f"'aish trash restore {selected.path.name}'{RESET}"
