@@ -204,7 +204,8 @@ class TestLocalAddressFromConfig:
         `local_url` is the only place in aish/ or scripts/ that reads
         AISH_LOCAL_URL from the environment."""
         root = Path(backends.__file__).resolve().parent.parent
-        reads = re.compile(r"environ(?:\.get\(|\[)\s*(?:backends\.)?(?:LOCAL_URL_ENV|"
+        # `os.getenv` too: the review found the first version saw only `environ`.
+        reads = re.compile(r"(?:environ(?:\.get\(|\[)|getenv\()\s*(?:backends\.)?(?:LOCAL_URL_ENV|"
                            r"[\"']AISH_LOCAL_URL[\"'])")
         found = [
             f"{path.relative_to(root)}:{number}"
