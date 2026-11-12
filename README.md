@@ -560,10 +560,11 @@ thousands of entries without bloating the context.
   files are checked against the recorded hashes before a run: a skill whose
   files changed after install is refused, naming the files (delete its folder
   and import it again). aish's file and skill tools never write into
-  `vendor-skills/`, and a shell command the model proposes that names
+  `vendor-skills/`, and a shell command the model proposes whose text names
   `vendor-skills/` or `skill-sources` is refused outright, with no card —
   reads included, and including spellings that differ only in case; your own
-  `!` commands are not affected. Retiring or removing a third-party skill is
+  `!` commands are not affected. A command that reaches them through a path
+  its text does not show (a script that computes it) is not caught. Retiring or removing a third-party skill is
   your own edit. A skill you wrote yourself and want trusted goes into `skills/` by
   hand, not through import.
 - **Plugin tools** — where a skill *teaches*, a tool *does*. A droppable
