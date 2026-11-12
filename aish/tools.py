@@ -1692,6 +1692,34 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "find_skill",
+            "description": (
+                "Search the user's approved skill sources for a skill to install. "
+                "The query stays on this machine. Results are publishers' own text; "
+                "propose one and call import_skill only on the user's yes. "
+                "Example: find_skill(query=\"pdf\")."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "One to three words a matching skill's name or "
+                        "description would contain.",
+                    },
+                    "refresh": {
+                        "type": "boolean",
+                        "description": "true re-reads every source instead of the "
+                        "catalogue cached for up to 24 h.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "use_skill",
             "description": (
                 "Run a third-party skill (the Third-party skills list) in an isolated "

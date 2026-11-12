@@ -69,6 +69,7 @@ from . import (
     sandbox,
     schedule,
     secrets,
+    skill_catalog,
     skill_env,
     skill_grants,
     skill_import,
@@ -1436,6 +1437,13 @@ USE_SKILL_ENV_BROKEN = (
     "{problem}. Nothing ran."
 )
 USE_SKILL_DENIED = "use_skill was DENIED by the user: nothing ran."
+# find_skill's one refusal (#467 4a): a search's result is a stranger's text
+# chosen by the query, and use_skill's precedent is that third-party skills are
+# for chats a person started.
+FIND_SKILL_UNATTENDED = (
+    "NOT SEARCHED: find_skill runs only in a chat a person started (this chat's "
+    "origin is {origin!r}). Nothing was fetched."
+)
 USE_SKILL_NO_APPROVER = (
     "NOT RUN: no approval card is available here, and every use_skill run is "
     "approved by the user. Nothing ran."
@@ -2376,6 +2384,11 @@ UNRECORDED_PICTURE = provenance.ArtefactSource(
 # the runner held the pen in its scratch, so no record there is evidence.
 SKILL_RUN_ARTEFACT = provenance.ArtefactSource(
     tool="use_skill", outside=True, source="", what=skill_runner.ARTEFACT_WHAT,
+)
+# Every file in find_skill's catalogue cache (#467 4a): what publishers wrote.
+SKILL_CATALOG_ARTEFACT = provenance.ArtefactSource(
+    tool="find_skill", outside=True, source="",
+    what="a cached catalogue of skill names and descriptions their publishers wrote",
 )
 TOOL_MEDIA_EXPIRED = (
     "[aish: picture(s) from an earlier task were dropped from view to save "
@@ -8233,12 +8246,17 @@ class Agent:
             # The index's third-party section names use_skill as the only way
             # in; a menu without it would list skills nothing can run.
             required.append("use_skill")
+        continuity = self._previous_task_tools()
+        if "find_skill" in continuity:
+            # Its result tells the model to call import_skill on the owner's
+            # yes, which arrives as the NEXT task; a menu without it would
+            # have built that miss itself (docs/tool-menu.md, `core`).
+            required.append("import_skill")
         if self.holds_kept_outside_note():
             # The daily inbox report's chat (#142 W5): what the owner says
             # there is about his mail, its cases and his standing preferences,
             # worded however he likes.
             required += list(MAIL_STORE_TOOLS)
-        continuity = self._previous_task_tools()
         if mode == tool_menu.MODE_CATALOG:
             # Arm C: nothing is ranked; the rest is a catalog the model loads
             # from. An empty task text means no name hit either.
@@ -9061,6 +9079,12 @@ class Agent:
             # A runner followed a stranger's skill (#467 slice 2b): its report
             # and every name and byte it made are third-party-derived.
             return True
+        if name == "find_skill":
+            # Every row is a publisher's name and description, and a failed
+            # source's row is git's stderr, which carries what the remote sent
+            # (#467 4a). By name, like use_skill — NOT through EGRESS_TOOLS,
+            # whose gate would read its args as a destination.
+            return True
         if name in MAIL_STORE_TOOLS:
             # The case store quotes mail (#142 W5): every result, read or
             # change, carries text a stranger wrote or a model read from one;
@@ -9150,6 +9174,8 @@ class Agent:
             return str(a.get("name") or "skill")
         if name == "use_skill":
             return str(a.get("name") or "skill")
+        if name == "find_skill":
+            return str(a.get("query") or "")
         if "command" in a:
             return str(a["command"])  # read_docs, run_command
         # A PLUGIN tool: its args are its own, and this used to fall through to
@@ -13841,6 +13867,11 @@ class Agent:
             browser.downloads_dir(),
             self.tool_downloads_dir,
             self.skill_runs_dir,
+            # find_skill's cached catalogues (#467 4a): publishers' names and
+            # descriptions. No result names a file here, so it is NOT in the
+            # workspace boundary — but a carded read_file must still answer
+            # outside content, and so must every other local-path door.
+            skill_catalog.catalog_dir(),
         ]
 
     def _recordless_stores(self) -> list[Path]:
@@ -13860,7 +13891,11 @@ class Agent:
 
         The skill-runs store is the third (#467 slice 2b): a runner writes its
         own scratch, so it could write a record there as easily as a file."""
-        return [browser.downloads_dir(), self.tool_downloads_dir, self.skill_runs_dir]
+        return [
+            browser.downloads_dir(), self.tool_downloads_dir, self.skill_runs_dir,
+            # Nothing writes a record there; one found there is not evidence.
+            skill_catalog.catalog_dir(),
+        ]
 
     def _artefact_source(self, path: str) -> "provenance.ArtefactSource | None":
         """Where the bytes at `path` came from, or None when the path is not in
@@ -13881,6 +13916,8 @@ class Agent:
             if files.contains(store, path, self.cwd):
                 if store == self.skill_runs_dir:
                     return SKILL_RUN_ARTEFACT
+                if store == skill_catalog.catalog_dir():
+                    return SKILL_CATALOG_ARTEFACT
                 if store in self._recordless_stores():
                     return provenance.UNKNOWN_ARTEFACT
                 target = files.resolved(path, self.cwd)
@@ -15914,6 +15951,9 @@ class Agent:
         if name == "import_skill":
             return self._import_skill(args)
 
+        if name == "find_skill":
+            return self._find_skill(args)
+
         if name == "use_skill":
             # The second execution point (docs/agent-core.md L1): entered only
             # here, carded, and every command it runs is in the kernel's sandbox.
@@ -17137,6 +17177,22 @@ class Agent:
         if self.state_dir is not None and self.current_session is not None:
             return chat_skill_runs_dir(self.state_dir, self.current_session())
         return self.skill_runs_dir
+
+    def _find_skill(self, args: dict) -> str | tools.ToolOutcome:
+        """Search the owner's approved skill sources (#467 4a,
+        `skill_catalog`). No card: the query never leaves this machine and
+        nothing installs — an import goes through `import_skill`'s own card.
+        Echoed, refused in a chat no person started, and the result is
+        outside content (`_brings_outside_content`)."""
+        query = " ".join(str(args.get("query", "") or "").split())
+        if self.origin != "user":
+            return _gate_outcome(FIND_SKILL_UNATTENDED.format(origin=self.origin),
+                                 decision="blocked")
+        if not query:
+            return "ERROR: find_skill needs a query."
+        refresh = args.get("refresh") is True or str(args.get("refresh")).lower() == "true"
+        self._note(f"→ find_skill: {query}" + (" (re-reading every source)" if refresh else ""))
+        return skill_catalog.find(query, refresh=refresh)
 
     def _use_skill(self, args: dict) -> str | tools.ToolOutcome:
         """Run a third-party skill in quarantine (#467 slice 2b,

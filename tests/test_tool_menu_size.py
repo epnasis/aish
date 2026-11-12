@@ -100,7 +100,11 @@ from aish import tools
 # assistant-next): no new tool — the files on people, organisations, accounts
 # and interests are written through remember, and `about` is what tells the
 # writer which file and section.
-MAX_MENU_CHARS = 42_300
+# Raised 42,300 -> 42,900 on 2026-11-12 for ONE new tool, find_skill (+596 chars
+# measured, 42,290 -> 42,886; epic #467 slice 4a). The owner asked aish to find
+# him a skill and then propose installing it; without a tool the model could
+# only guess repository paths for import_skill, or browse GitHub as web pages.
+MAX_MENU_CHARS = 42_900
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.
