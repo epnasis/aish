@@ -107,6 +107,10 @@ class SessionUsage:
     # them into counters; this module only carries them, so the two readers
     # cannot disagree about what a role call was.
     role_calls: list[dict] = field(default_factory=list)
+    # Raw `skill_run` records (#467 slice 2b): a third-party skill's runner
+    # calls the session's model on its own, and its spend is attributed here,
+    # beside the acting loop's and never inside it — the role precedent.
+    skill_runs: list[dict] = field(default_factory=list)
     # Raw `vocab` records (#322), likewise kept as written.
     vocab_calls: list[dict] = field(default_factory=list)
     contributors: list[Contributor] = field(default_factory=list)
@@ -236,6 +240,8 @@ def scan_session(path: Path) -> SessionUsage:
                 # them would make every existing per-model figure move for a
                 # reason no reader could see. It is reported beside them.
                 session.role_calls.append(dict(step))
+            elif skind == "skill_run":
+                session.skill_runs.append(dict(step))
             elif skind == "vocab":
                 # #322, carried the same way and for the same reason: this
                 # module holds the raw records and `vocab.scan_counters` is the
@@ -615,6 +621,7 @@ def render(
     )
     lines += _trend_rows(sessions, grouped, window)
     lines += _role_rows(sessions)
+    lines += _skill_run_rows(sessions)
     lines += [""] + _caveats(sessions)
     lines.append(f"{DIM}  measures RECORDED usage — not a billing statement{RESET}")
     return "\n".join(lines)
@@ -656,6 +663,39 @@ def _role_rows(sessions: list[SessionUsage]) -> list[str]:
         for field_name, tally in sorted(c.flags.items()):
             counted = ", ".join(f"{v} {k}" for k, v in sorted(tally.items()))
             lines.append(f"      {DIM}{field_name}{RESET} {counted}")
+    return lines
+
+
+def _skill_run_rows(sessions: list[SessionUsage]) -> list[str]:
+    """What third-party skill runners spent (#467 slice 2b), per skill, BESIDE
+    the acting model's figures for `_role_rows`' reason. A run refused before
+    it started (`ended: blocked`) made no model call and is not counted; a
+    run whose provider reported no usage adds nothing to the token figures,
+    and the line says how many runs that was rather than reading it as 0."""
+    per: dict[str, dict] = {}
+    for session in sessions:
+        for run in session.skill_runs:
+            if run.get("ended") == "blocked":
+                continue
+            row = per.setdefault(str(run.get("skill") or "?"),
+                                 {"runs": 0, "calls": 0, "in": 0, "out": 0, "unreported": 0})
+            usage = run.get("usage") or {}
+            row["runs"] += 1
+            row["calls"] += int(run.get("model_calls") or 0)
+            row["in"] += int(usage.get("input") or 0)
+            row["out"] += int(usage.get("output") or 0)
+            if not usage:
+                row["unreported"] += 1
+    if not per:
+        return []
+    lines = ["", f"  {BOLD}third-party skill runs{RESET}"]
+    for name, row in sorted(per.items()):
+        lines.append(
+            f"    {name:<18} {row['runs']:>5} run{'' if row['runs'] == 1 else 's'}"
+            f" · {row['calls']} model calls · {human(row['in'])} in + {human(row['out'])} out"
+            + (f" {DIM}({row['unreported']} reported no usage){RESET}"
+               if row["unreported"] else "")
+        )
     return lines
 
 

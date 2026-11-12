@@ -17,11 +17,14 @@ Wheels only (`--only-binary :all:`). Building a source distribution runs the
 package's own build code with the owner's rights at import time — exactly the
 third-party execution the runner exists to confine.
 
-Slice 1 is scoped to an explicit table (`PACKAGES`) for the names the pdf
-skill uses. An import the table does not know is not installed and is said on
-the card, never guessed: an import name is not a package name (`PIL` is
-`pillow`, `fitz` is `pymupdf`), and a guessed one would install whatever a
-stranger published under the guess.
+Slice 1 is scoped to an explicit table (`PACKAGES`) for the names the
+anthropics `pdf` skill imports. An import the table does not know gets nothing
+installed for it and the card says so, never a guess: an import name is not a
+package name (`PIL` is `pillow`, `fitz` is `pymupdf`), and a guessed one would
+install whatever a stranger published under the guess. The card does not claim
+such an import will be missing — another package may bring it in — only that
+aish installed nothing for it. Imports that drive a program aish does not
+provide (`PROGRAMS`) are named with that program.
 """
 
 from __future__ import annotations
@@ -39,10 +42,23 @@ from pathlib import Path
 from .paths import state_home
 
 # Import name -> the PyPI package aish installs for it. Exactly the names the
-# slice serves; growing it is a reviewed change, never a lookup.
+# anthropics `pdf` skill imports that ship wheels (the orchestrator ran `needs`
+# on the staged skill, 2026-11-12); growing it is a reviewed change, never a lookup.
 PACKAGES = {
     "pypdf": "pypdf",
     "reportlab": "reportlab",
+    "PIL": "pillow",
+    "pdfplumber": "pdfplumber",
+    "pypdfium2": "pypdfium2",
+    "pandas": "pandas",
+    "numpy": "numpy",
+}
+
+# Imports that are thin wrappers over a program outside Python, which aish
+# does not install (slice 1 excludes them): the import -> the program.
+PROGRAMS = {
+    "pdf2image": "poppler",
+    "pytesseract": "tesseract",
 }
 
 INSTALL_TIMEOUT_S = 300
@@ -59,6 +75,7 @@ class Needs:
     packages: tuple[str, ...] = ()
     unknown: tuple[str, ...] = ()
     renamed: tuple[tuple[str, str], ...] = ()
+    programs: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -113,8 +130,10 @@ def needs(files: Iterable[tuple[str, str]]) -> Needs:
     )
     packages = tuple(sorted({PACKAGES[n] for n in foreign if n in PACKAGES}))
     renamed = tuple((n, PACKAGES[n]) for n in foreign if n in PACKAGES and PACKAGES[n] != n)
-    unknown = tuple(n for n in foreign if n not in PACKAGES)
-    return Needs(python=True, packages=packages, unknown=unknown, renamed=renamed)
+    programs = tuple((n, PROGRAMS[n]) for n in foreign if n in PROGRAMS)
+    unknown = tuple(n for n in foreign if n not in PACKAGES and n not in PROGRAMS)
+    return Needs(python=True, packages=packages, unknown=unknown, renamed=renamed,
+                 programs=programs)
 
 
 def needs_of_folder(folder: Path) -> Needs:
@@ -145,10 +164,15 @@ def card_flags(found: Needs) -> list[str]:
     flags += [
         f"imports {imp!r}, installed as the package {pkg!r}" for imp, pkg in found.renamed
     ]
+    flags += [
+        f"imports {imp!r}, which drives the program {program!r}: aish installs "
+        "neither, and does not provide that program"
+        for imp, program in found.programs
+    ]
     if found.unknown:
         flags.append(
-            f"imports {', '.join(found.unknown)}, which aish has no package for — not "
-            "installed; code that needs them will fail"
+            f"imports {', '.join(found.unknown)}, which aish's package table does not "
+            "name: aish installs nothing for them"
         )
     return flags
 

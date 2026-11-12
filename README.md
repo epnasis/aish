@@ -527,7 +527,9 @@ thousands of entries without bloating the context.
   names the skill, the brief and the files. The skill then runs in an
   **isolated runner**: a separate conversation holding only the skill, the
   brief and the input paths, whose every command runs in aish's skill sandbox
-  (it can read only those files, the skill and its packages; it writes only
+  (of your files it can read only those, the skill and its packages — your
+  home folder, other volumes and shared temp folders are closed, while system
+  folders such as `/etc` and `/Library` stay readable; it writes only
   its own scratch folder under `~/.local/state/aish/skill-runs/`; no network).
   What comes back is written by aish — how it ended, the files it made (moved
   to names aish chooses) and kernel refusals — with the runner's own report
@@ -538,8 +540,12 @@ thousands of entries without bloating the context.
   import's review card lists them, and approving the import installs them
   (pre-built wheels only, exact versions recorded in the lock) into
   `~/.local/state/aish/skill-envs/<name>/` — never while the skill runs. In
-  this first version aish knows the packages of the `pdf` skill (`pypdf`,
-  `reportlab`); any other import is listed as not installed. The skill's
+  this first version aish knows the packages the `pdf` skill imports
+  (`pypdf`, `reportlab`, `pillow`, `pdfplumber`, `pypdfium2`, `pandas`,
+  `numpy`); for any other import the card says aish installs nothing for it,
+  and `pdf2image`/`pytesseract` are named with the program they drive
+  (poppler, tesseract), which aish does not provide. A skill with no recorded
+  review hashes says so on its run card. The skill's
   files are checked against the recorded hashes before a run: a skill whose
   files changed after install is refused, naming the files (delete its folder
   and import it again). aish's file and skill tools never write into

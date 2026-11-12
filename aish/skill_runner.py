@@ -52,6 +52,7 @@ REPORT_CHARS = 2000
 QUESTION_CHARS = 500
 MAX_COLLECTED_FILES = 20
 NAME_CHARS = 80
+TARGET_CHARS = 300
 
 # Whose file this is to a later reader, when a later task reads a file a
 # runner wrote (`Agent._artefact_source`). The store answers it by itself: a
@@ -70,8 +71,9 @@ What you have, and nothing else:
 - read_file(path): your input files, the skill's own folder, and your scratch \
 folder.
 - run_command(command): a shell in your scratch folder {scratch}. Every \
-command runs in a sandbox: it can read only what read_file can (plus system \
-files), write only inside the scratch folder, has NO network, and can start \
+command runs in a sandbox: of the owner's files it can read only your \
+inputs, the skill, its packages and your scratch folder (system files stay \
+readable), write only inside the scratch folder, has NO network, and can start \
 only the shell, simple read-only commands, mkdir/touch/rm{python}. It cannot \
 download anything. A refused operation fails, usually with "Operation not \
 permitted"; there is no way around it, so do not retry it — choose another way \
@@ -227,7 +229,12 @@ class Outcome:
         refused = record.get("refused") or []
         if not refused:
             return "none named in the log (a sample: that is not proof none happened)"
-        listed = "; ".join(f"{r['process']} {r['op']} {r['target']}" for r in refused)
+        # The target is a path, and a path is a name the runner chose: it gets
+        # the report's treatment, or a file name could speak in aish's voice.
+        listed = "; ".join(
+            " ".join(flatten(str(r.get(k, "")), TARGET_CHARS) for k in ("process", "op", "target"))
+            for r in refused
+        )
         return f"{listed} (a sample of {record.get('refused_seen', len(refused))})"
 
     def envelope(self) -> str:
@@ -260,7 +267,8 @@ class Outcome:
             )
         if self.links_skipped or self.over_cap:
             lines.append(
-                f"- Not collected: {self.links_skipped} link(s); {self.over_cap} file(s) "
+                f"- Not collected: {self.links_skipped} link(s) (symbolic, or a file with "
+                f"more than one name); {self.over_cap} file(s) "
                 f"past the cap of {MAX_COLLECTED_FILES}."
             )
         lines.append(f"- Kernel refusals, read once at the end: {self.refusal_sentence()}.")
@@ -501,8 +509,9 @@ def _kind(name: str) -> str:
 def collect(scratch: Path, into: Path) -> tuple[list[CollectedFile], int, int]:
     """Move what the runner wrote out of its scratch, under names aish
     chooses (`01.pdf`, …), so no name a stranger chose reaches a path the
-    acting model will type. Links are never collected; a file that turns
-    into one in the move is dropped."""
+    acting model will type. Links are never collected — a symlink, or a
+    file with more than one name (a hard link may share its bytes with a file
+    outside scratch) — and a file that turns into one in the move is dropped."""
     found: list[str] = []
     links = 0
     for top, dirs, names in os.walk(scratch, followlinks=False):
@@ -513,10 +522,11 @@ def collect(scratch: Path, into: Path) -> tuple[list[CollectedFile], int, int]:
         for name in sorted(names):
             full = os.path.join(top, name)
             try:
-                mode = os.lstat(full).st_mode
+                info = os.lstat(full)
             except OSError:
                 continue
-            if stat.S_ISLNK(mode):
+            mode = info.st_mode
+            if stat.S_ISLNK(mode) or (stat.S_ISREG(mode) and info.st_nlink > 1):
                 links += 1
             elif stat.S_ISREG(mode):
                 found.append(os.path.relpath(full, scratch))
@@ -532,7 +542,7 @@ def collect(scratch: Path, into: Path) -> tuple[list[CollectedFile], int, int]:
             moved = os.lstat(dest)
         except OSError:
             continue
-        if not stat.S_ISREG(moved.st_mode):
+        if not stat.S_ISREG(moved.st_mode) or moved.st_nlink > 1:
             links += 1
             dest.unlink(missing_ok=True)
             continue

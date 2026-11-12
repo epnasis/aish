@@ -84,6 +84,8 @@ measurable* as *nothing was resident*. Same rule for a backend that reports no u
 for a log a Retry or redaction rewrote, and for calls made outside a task.
 `TestHonestAboutWhatItCannotSay`, `TestScanIsContained`.
 
+**Third-party skill runs (#467 slice 2b)** call the session's model from a runner, outside the acting loop. Their spend is read from the `skill_run` record's `usage` (the providers' own reports, summed over the run) and reported per skill under *third-party skill runs*, BESIDE the acting model's figures and never folded into them — the role precedent. A run refused before it started made no call and is not counted; a run whose provider reported no usage is counted as a run and said to have reported none, never read as 0 tokens. `TestSkillRunSpend`.
+
 ## Decisions the reporting surface must not re-litigate
 
 **A scanner, not a new record.** §0 forbids re-deriving from mutable live source; it

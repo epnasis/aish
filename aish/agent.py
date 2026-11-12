@@ -16645,10 +16645,15 @@ class Agent:
             )
         preview = (
             f"Run the third-party skill {entry.name!r} in an isolated runner. It sees "
-            f"only the brief and may read only the {len(inputs)} file(s) listed, the "
-            "skill's own folder and its packages; every command runs in aish's sandbox "
+            f"only the brief; of your files it may read only the {len(inputs)} listed, "
+            "the skill's own folder and its packages; every command runs in aish's sandbox "
             "with no network, and it writes only to its own scratch folder."
         )
+        if skill_import.recorded_hashes(skills.VENDOR_SKILLS_DIR, skill_dir.name) is None:
+            preview += (
+                " Its files have NO recorded review hashes, so aish did not check "
+                "whether they changed since import."
+            )
         card_args = dict(skill=entry.name, brief=brief, inputs=inputs)
         decision = self._ask_owner(ASKED_BY_SKILL, "use_skill", card_args, preview)
         if isinstance(decision, Denied):

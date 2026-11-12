@@ -34,8 +34,9 @@ log lines, so `process == "kernel"` is part of the query. The kernel collapses
 repeats and drops lines under a flood, so the record is a SAMPLE and says so.
 
 Tier S (epic #467 slice 2b) is the same shape for a third-party skill's
-runner (`render_skill_profile`, `SkillConfinement`): reads reopened only for
-what `use_skill` named, one interpreter added to the exec list, and no card
+runner (`render_skill_profile`, `SkillConfinement`): the owner's files closed
+and reopened only for what `use_skill` named (system and world-readable trees
+stay readable, as in Tier R), one interpreter added to the exec list, and no card
 anywhere — its caller refuses to run at all when it is unavailable.
 
 Fail closed: no `sandbox-exec`, a profile that does not apply, or a canary
@@ -420,11 +421,15 @@ def render_skill_profile(paths: SkillPaths, exec_list: Iterable[str]) -> str:
     """The Tier S profile: what a third-party skill's runner may do.
 
     Tier R's shape with three differences, each the reason the tier exists.
-    READS reach only what `use_skill` named — its input files, the skill's
-    folder, the skill's Python environment and the interpreter's own
-    installation — and the runner's scratch; not the chat's roots, so the
-    tool's promise about what the skill may read is the kernel's, not the
-    tool's (design review, 2026-11-11). EXEC adds exactly one program, the
+    READS: the owner's files are closed (`CLOSED_TO_READ`: the home tree,
+    other users, volumes, the shared temp dirs) and reopened only for what
+    `use_skill` named — its input files, the skill's folder, the skill's
+    Python environment and the interpreter's own installation — and the
+    runner's scratch; not the chat's roots, so the tool's promise about which
+    of the owner's files the skill may read is the kernel's, not the tool's
+    (design review, 2026-11-11). Under `(allow default)` system and
+    world-readable trees (`/etc`, `/opt`, `/usr/local`, `/Library`,
+    `/Applications`) stay readable, as in Tier R. EXEC adds exactly one program, the
     environment's interpreter, and MAP-EXECUTABLE adds the two trees its code
     loads from. The environment is never writable here: a runner that could
     write it could plant code its next run would load.
@@ -620,8 +625,9 @@ class SkillConfinement(Confinement):
             else " (no Python: this skill has no environment)"
         )
         return (
-            "it could read only its input files, the skill's folder, the skill's "
-            f"Python environment and its scratch folder {self.skill_paths.scratch}; "
+            "of the owner's files it could read only its input files, the skill's "
+            "folder, the skill's Python environment and its scratch folder "
+            f"{self.skill_paths.scratch} (system files stay readable); "
             "write only to that scratch folder; start only the shell, aish's "
             f"read-only commands, mkdir/touch/rm{python}; and it had no network"
         )
@@ -717,12 +723,12 @@ class SeatbeltSandbox:
             template = render_skill_profile(paths, exec_list)
         except (OSError, ValueError) as exc:
             return Unavailable(f"aish could not build the skill sandbox profile: {exc}")
-        with self._lock:
-            if template not in self._proven:
-                self._proven[template] = self._canary(
-                    template, paths, make=SkillConfinement, interpreter=paths.interpreter
-                )
-            verdict = self._proven[template]
+        # NOT cached, unlike Tier R: every run has its own scratch, so every
+        # template is new and a per-template cache in the long-lived aish-web
+        # would only grow. The canary runs once per run (measured 0.06 s).
+        verdict = self._canary(
+            template, paths, make=SkillConfinement, interpreter=paths.interpreter
+        )
         if verdict is not None:
             return verdict
         return SkillConfinement(template, paths, self)
