@@ -8246,6 +8246,11 @@ class Agent:
             # The index's third-party section names use_skill as the only way
             # in; a menu without it would list skills nothing can run.
             required.append("use_skill")
+        if self._skill_sources_approved():
+            # On the lexical floor "find me a skill for PDF forms" scores it 0
+            # (`find` and `skill` are stopwords, `pdf` under four letters), so
+            # ranking alone would never hand it over while he has sources.
+            required.append("find_skill")
         continuity = self._previous_task_tools()
         if "find_skill" in continuity:
             # Its result tells the model to call import_skill on the owner's
@@ -17178,6 +17183,16 @@ class Agent:
             return chat_skill_runs_dir(self.state_dir, self.current_session())
         return self.skill_runs_dir
 
+    @staticmethod
+    def _skill_sources_approved() -> bool:
+        """Does the owner's approved-sources file list at least one source?
+        Unreadable or missing means no: there would be nothing to search."""
+        try:
+            text = skills.SKILL_SOURCES_FILE.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        return bool(skill_import.parse_sources(text)[0])
+
     def _find_skill(self, args: dict) -> str | tools.ToolOutcome:
         """Search the owner's approved skill sources (#467 4a,
         `skill_catalog`). No card: the query never leaves this machine and
@@ -17190,7 +17205,11 @@ class Agent:
                                  decision="blocked")
         if not query:
             return "ERROR: find_skill needs a query."
-        refresh = args.get("refresh") is True or str(args.get("refresh")).lower() == "true"
+        # A boolean, or the usual spellings of one: true/yes/on/1.
+        raw = args.get("refresh")
+        refresh = raw is True or (
+            not isinstance(raw, bool) and str(raw).strip().casefold() in ("true", "yes", "on", "1")
+        )
         self._note(f"→ find_skill: {query}" + (" (re-reading every source)" if refresh else ""))
         return skill_catalog.find(query, refresh=refresh)
 

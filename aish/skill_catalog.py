@@ -3,7 +3,9 @@
 `find_skill(query)` answers "is there a skill for this?" from the only places
 an import may come from: the repositories the owner listed in
 `skills.SKILL_SOURCES_FILE`. Each listed source is read as a CATALOGUE — every
-`SKILL.md` under the line's path prefix, its frontmatter name and description,
+`SKILL.md` under the line's path prefix, its name and description as the
+skill parser reads them (the frontmatter's, or the body's first line when
+there is no description),
 its folder, and the commit the clone was at — through the import's own clone
 seam (`skill_import._clone`: shallow, redirects off, no terminal prompt, a
 timeout). Nothing else is fetched, and the fetch never carries the query: the
@@ -45,8 +47,18 @@ from .provenance import disarm_markers
 CATALOG_TTL_S = 24 * 3600
 #: Rows returned per search.
 FIND_TOP = 8
-#: A skill name or folder path in a row, cut — the publisher chose both.
+#: A skill name in a row, cut — the publisher chose it.
 FIELD_CHARS = 120
+#: The longest folder path listed. A path is never cut — it is what
+#: import_skill is called with — so a longer one is not listed, and says so.
+PATH_CHARS = 200
+#: Below this `score_entries` tier the best match is weak (a close spelling
+#: only, or only some of the query's words), and the result adds every
+#: catalogued skill's name so the model can choose by meaning. The
+#: knowledge layer's own bar for injecting a lexical match.
+STRONG_TIER = skills.PREFLIGHT_MIN_SCORE
+#: How long the every-skill listing may run; past it the rest is counted.
+ALL_NAMES_MAX = 400
 #: An error said about one source or one SKILL.md, cut — git's stderr carries
 #: text the remote sent.
 ERROR_CHARS = 300
@@ -110,6 +122,9 @@ class Hit:
     source: SourceCatalog
     installed_as: str = ""
     installed_commit: str | None = None
+    # Matched by score_entries' tiers from STRONG_TIER up, rather than by a
+    # close spelling or only some of the query's words.
+    strong: bool = True
 
 
 def _one_line(text: str, cap: int) -> str:
@@ -152,6 +167,14 @@ def _skill_manifests(base: Path, prefix: tuple[str, ...]) -> tuple[list[Path], s
 def _read_row(base: Path, manifest: Path) -> Row:
     rel = manifest.parent.relative_to(base).as_posix()
     path = "" if rel == "." else rel
+    # The path is what import_skill is called with, so it is shown whole or
+    # not at all: a cut, flattened or disarmed path names no folder.
+    if len(path) > PATH_CHARS or _one_line(path, PATH_CHARS + 1) != path:
+        return Row(
+            path=_one_line(path, FIELD_CHARS),
+            error=f"its folder path is over {PATH_CHARS} characters or holds characters "
+            "aish does not show as they are; not listed",
+        )
     if manifest.is_symlink() or not manifest.is_file():
         return Row(path=path, error="its SKILL.md is a symlink or not a regular file; not read")
     try:
@@ -280,28 +303,71 @@ def _installed() -> dict[tuple[str, str], tuple[str, str | None]]:
     return out
 
 
+def _query_words(query: str) -> list[str]:
+    """The query's topic words for partial matching: the knowledge layer's
+    stopword list applied, kept from three letters up, so `pdf` counts while
+    `a`, `in`, `find` and `skill` do not."""
+    words: list[str] = []
+    for raw in query.casefold().split():
+        word = raw.strip(skills._PUNCT)
+        if len(word) >= 3 and word not in skills._STOPWORDS and word not in words:
+            words.append(word)
+    return words
+
+
 def search(query: str, catalogs: list[SourceCatalog], top: int = FIND_TOP) -> list[Hit]:
-    """The best `top` readable rows for `query`, by the knowledge layer's
-    lexical tiers over each row's name and description only."""
-    pairs: dict[int, tuple[Row, SourceCatalog]] = {}
+    """The best `top` readable rows for `query`, over each row's name and
+    description only, on this machine.
+
+    Two lexical rails. `skills.score_entries`' tiers first — the exact name,
+    the phrase, or every query word — and below them a row holding SOME of the
+    query's topic words as whole words, ordered by the share it holds: "fill in
+    a PDF form" must still find a skill about PDF forms, which the every-word
+    tiers cannot (no description says `in` and `a` around it). A close
+    spelling alone (tier 1) ranks below any whole-word share."""
+    rows: list[tuple[Row, SourceCatalog]] = []
     entries: list[skills.Entry] = []
     for source in catalogs:
         for row in source.rows:
             if row.error:
                 continue
-            entry = skills.Entry(
+            entries.append(skills.Entry(
                 name=row.name, description=row.description, keywords=[], body="",
                 kind="skill", words=skills._build_words(row.name, row.description),
-            )
-            pairs[id(entry)] = (row, source)
-            entries.append(entry)
+            ))
+            rows.append((row, source))
+    tiers = {id(entry): tier for tier, entry in skills.score_entries(entries, query)}
+    patterns = [skills._whole_word_pattern(word) for word in _query_words(query)]
+    ranked = []
+    for order, entry in enumerate(entries):
+        tier = tiers.get(id(entry), 0)
+        head = f"{entry.name} {entry.description}".casefold()
+        share = sum(1 for p in patterns if p.search(head)) / len(patterns) if patterns else 0.0
+        if tier == 0 and share == 0:
+            continue
+        strong = tier if tier >= STRONG_TIER else 0
+        ranked.append(((-strong, -share, -tier, order), order, tier))
+    ranked.sort()
     installed = _installed()
     hits = []
-    for _score, entry in skills.score_entries(entries, query)[:top]:
-        row, source = pairs[id(entry)]
+    for _key, order, tier in ranked[:top]:
+        row, source = rows[order]
         name, commit = installed.get((source.repo.casefold(), row.path), ("", None))
-        hits.append(Hit(row=row, source=source, installed_as=name, installed_commit=commit))
+        hits.append(Hit(row=row, source=source, installed_as=name, installed_commit=commit,
+                        strong=tier >= STRONG_TIER))
     return hits
+
+
+def _every_name(catalogs: list[SourceCatalog]) -> list[str]:
+    """One line per catalogued skill — `name — source` — for choosing by
+    meaning when the words did not match (a skill named `xlsx` for "excel")."""
+    lines = [
+        f"- {_one_line(row.name, FIELD_CHARS) or '(unnamed)'} — {cat.source}"
+        for cat in catalogs for row in cat.rows if not row.error
+    ]
+    if len(lines) > ALL_NAMES_MAX:
+        lines = [*lines[:ALL_NAMES_MAX], f"[aish: and {len(lines) - ALL_NAMES_MAX} more]"]
+    return lines
 
 
 def _age(seconds: float) -> str:
@@ -359,16 +425,20 @@ def render(
             description = _one_line(hit.row.description, skills.INDEX_THIRD_PARTY_DESCRIPTION_MAX)
             lines.append(f"{i}. {name}{installed}")
             lines.append(f"   {description}")
-            path = _one_line(hit.row.path, FIELD_CHARS) or "(root)"
-            lines.append(f"   repo: {hit.source.repo}  path: {path}")
-    else:
+            # Whole, never cut: `_read_row` lists no row whose path it would change.
+            lines.append(f"   repo: {hit.source.repo}  path: {hit.row.path or '(root)'}")
+    if not hits or not hits[0].strong:
         total = sum(1 for c in catalogs for r in c.rows if not r.error)
+        said = "no skill" if not hits else "no skill strongly"
         lines.append(
-            f"[aish: no skill in the approved sources matched {_one_line(query, FIELD_CHARS)!r} "
-            f"({total} skill{'s' * (total != 1)} searched). A match needs every word "
-            "of the query, or a close spelling of it, in a skill's name or "
-            "description; try fewer or other words.]"
+            f"[aish: {said} in the approved sources matched "
+            f"{_one_line(query, FIELD_CHARS)!r} ({total} skill{'s' * (total != 1)} "
+            "searched). Matching is by words, not meaning — a skill named `xlsx` does "
+            "not match `excel`. Every catalogued skill is listed below by name: choose "
+            "by meaning, then call find_skill with that skill's exact name to see its "
+            "description, repo and path before proposing it.]"
         )
+        lines += _every_name(catalogs)
     lines.append("[aish: searched, by name and description only, on this machine:]")
     lines += [_source_line(c, now) for c in catalogs]
     if unread_lines:
