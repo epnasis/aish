@@ -21,6 +21,13 @@ downgrades.
 **It spends real money.** One metered call per case, plus one more for each case
 whose first answer does not validate.
 
+**A run that could not complete records nothing.** A case ending
+`Status.UNAVAILABLE` — no key, a refused or failed call — says nothing about
+the model's quality, so the exam stops there, the existing record is left
+exactly as it was, and the exit code is 3 (`EXIT_INCOMPLETE`). It stops rather
+than spending the remaining calls, because nothing they returned could be
+recorded. Before this, an all-503 run overwrote a charter's record with 0/16.
+
 **Two halves, and the second is the owner's.** The charter's own sanitized cases
 ship inside the package and are what the load gate binds on. His full-fidelity
 mined cases live in `~/.config/aish/roles/<charter>/cases.yaml` and are additive
@@ -41,6 +48,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from aish import roles, web  # noqa: E402
+
+# Distinct from 1 (examined and failed) and 2 (could not start): the exam began
+# and could not finish, so there is no verdict and nothing was written.
+EXIT_INCOMPLETE = 3
 
 
 def state_dir() -> Path:
@@ -107,6 +118,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     failed = 0
+    incomplete = 0
     for name, charter in sorted(catalogue.items()):
         if wanted and name not in wanted:
             continue
@@ -129,6 +141,7 @@ def main(argv: list[str]) -> int:
 
         tally = {"charter": [0, 0], "owner": [0, 0]}
         spent = {"input": 0, "output": 0, "ms": 0}
+        unavailable: roles.Case | None = None
         for case in shipped + private:
             ok, problems, result = run_case(charter, case, model, verbose=True)
             tally[case.source][1] += 1
@@ -142,6 +155,11 @@ def main(argv: list[str]) -> int:
             print(f"  {mark} {case.source:7} {case.name}{extra}")
             for problem in problems:
                 print(f"       ↳ {problem}")
+            # roles.py's own vocabulary decides this, never the error text: a
+            # provider's wording is not a contract, the status is.
+            if result is not None and result.status == roles.Status.UNAVAILABLE:
+                unavailable = case
+                break
 
         total = tally["charter"][1] + tally["owner"][1]
         if total:
@@ -150,6 +168,14 @@ def main(argv: list[str]) -> int:
                 f"{total} case(s), {spent['ms']} ms total, "
                 f"{spent['ms'] // total} ms each"
             )
+        if unavailable is not None:
+            print(
+                f"  COULD NOT COMPLETE — {unavailable.name} ended "
+                f"{roles.Status.UNAVAILABLE}; nothing was recorded, and the existing "
+                f"record for {name} against {model} is untouched"
+            )
+            incomplete += 1
+            continue
         admission = roles.Admission(
             charter=name,
             version=charter.version,
@@ -171,6 +197,8 @@ def main(argv: list[str]) -> int:
         # reader can see the exam ran rather than inferring it from silence.
         print(f"  {'ADMITTED' if admission.ok else 'NOT ADMITTED'} — recorded in {path}")
         failed += not admission.ok
+    if incomplete:
+        return EXIT_INCOMPLETE
     return 1 if failed else 0
 
 

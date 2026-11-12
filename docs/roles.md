@@ -955,6 +955,15 @@ admission — the automation only ever exercises the public half, so a recorded 
 failure is the one signal that a charter is green where the machine looks and wrong where he
 lives. `TestAdmission`, `TestOwnerCases`.
 
+**A run that could not complete records nothing (#472).** A case ending `unavailable` —
+`roles.Status`'s own word, never matched on error text — means no key, or a call that was
+refused or failed: nothing about the model's quality. The script stops at that case (the
+remaining calls could not be recorded), prints that the run could not complete, leaves
+`admission.json` byte-for-byte as it was, and exits 3 (`EXIT_INCOMPLETE`), distinct from 1
+(examined and failed) and 2 (could not start). Found live on 2026-11-12: an all-503 Gemini
+run overwrote the auditor's record for that model with 0/16. An `invalid` answer is the
+model answering badly and IS recorded as a failure. `tests/test_role_admission.py::TestAnIncompleteRun`.
+
 **On a fresh install nothing is admitted, so the reader does not run and search behaves
 exactly as it did before.** That is the correct default and it is visible in the log rather
 than silent. Two commands make it live:
