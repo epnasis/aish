@@ -1230,7 +1230,8 @@ not bring back: the chat's throwaway scratch workspace, the folders its
 third-party skill runs wrote (and the files they made), and its stored copies of
 the requests its steps sent. The terminal's `/delete` destroys the same, except
 the scratch workspace the running terminal itself is still using, which is
-removed when aish-web next starts. The copy mirrored to your devices goes at once
+removed when aish-web next starts (if you never run aish-web, nothing removes
+it). The copy mirrored to your devices goes at once
 too, and re-syncs after a restore. In the terminal, `aish trash` lists what is
 there, `aish trash restore <name>` brings one back, and `aish trash delete
 <name>` destroys one for good — that last one is the only step here that
