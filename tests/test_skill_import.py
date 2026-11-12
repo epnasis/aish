@@ -817,3 +817,8 @@ class TestOneInstallPipeline:
         installed, _, note = skill_import.install("myskill", root=qroot)
         assert not (installed / "blob.bin").exists()
         assert "binary files in the staged copy were not installed: blob.bin" in note
+        # Not destroyed: the owner may have put his only copy there by hand.
+        kept = qroot / "myskill.not-installed" / "blob.bin"
+        assert kept.read_bytes() == b"\xff\xfe\x00"
+        assert str(kept.parent) in note
+        assert skill_import.pending(qroot) == []  # never reads as a pending import

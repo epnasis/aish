@@ -954,11 +954,25 @@ def install(name: str, root: Path | None = None) -> tuple[Path, list[str], str]:
             f"could not write {dest} ({exc}); whatever was written before the failure is "
             "there, and the staged copy is kept"
         ) from None
+    binary_note = ""
+    if binaries:
+        # Not installed, and not destroyed either: the owner may have put his
+        # only copy of a file there by hand. Moved beside the quarantine under
+        # a name with no SKILL.md, so it can never read as a pending import.
+        kept = root / f"{name}.not-installed"
+        suffix = 1
+        while kept.exists():
+            suffix += 1
+            kept = root / f"{name}.not-installed-{suffix}"
+        for rel in binaries:
+            target = kept / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src / rel), str(target))
+        binary_note = (
+            f"binary files in the staged copy were not installed: {', '.join(binaries)}; "
+            f"they were moved to {kept}"
+        )
     shutil.rmtree(src, ignore_errors=True)
-    binary_note = (
-        f"binary files in the staged copy were not installed: {', '.join(binaries)}"
-        if binaries else ""
-    )
     origin_file = _origin_path(root, name)
     try:
         origin = json.loads(origin_file.read_text(encoding="utf-8"))
