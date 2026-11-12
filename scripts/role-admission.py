@@ -20,8 +20,10 @@ says the same in the same words, so nothing promises a check the code
 downgrades.
 
 **It spends real money — `--runs` times over.** The exam runs `--runs N` times
-(default 3, `DEFAULT_RUNS`) and admits only if EVERY run passes EVERY case (#472:
-a model that missed a case in 2 of 3 runs had been admitted on the third). So
+(default and floor 3, `roles.RUNS_REQUIRED`; fewer is refused, since such a
+record could never admit and would replace the current one) and admits only if
+EVERY run passes EVERY case (#472: a model that missed a case in 2 of 3 runs
+had been admitted on the third). So
 the bill is N× one exam: one metered call per case per run, plus one more for
 each answer that does not validate. Every run is spent even after one fails, so
 the record's per-case fail counts cover the whole batch; the token total of all
@@ -63,7 +65,7 @@ from aish import roles, web  # noqa: E402
 # and could not finish, so there is no verdict and nothing was written.
 EXIT_INCOMPLETE = 3
 
-DEFAULT_RUNS = 3
+DEFAULT_RUNS = roles.RUNS_REQUIRED
 
 
 def state_dir() -> Path:
@@ -161,6 +163,14 @@ def main(argv: list[str]) -> int:
     runs, argv = runs_of(argv)
     if runs is None:
         print("--runs takes a whole number of at least 1")
+        return 2
+    if runs < roles.RUNS_REQUIRED and not dry_run:
+        # A batch below the floor could only write a record `roles.admitted`
+        # refuses, replacing whatever admitted the role before it.
+        print(
+            f"--runs {runs} is below the {roles.RUNS_REQUIRED} runs admission needs: "
+            "its record could never admit, and it would replace the current one"
+        )
         return 2
     wanted = [a for a in argv if not a.startswith("-")]
 

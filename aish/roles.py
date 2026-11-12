@@ -983,6 +983,11 @@ def _dict_or_empty(value: Any) -> dict:
 # pass, a fail) without the file growing for ever.
 SUPERSEDED_KEPT = 5
 
+# The fewest exam runs, every one passing every case, that admit a role (#472).
+# A tripwire for gross flakiness, not proof of stability: a case passed 90% of
+# the time passes three runs about 73% of the time.
+RUNS_REQUIRED = 3
+
 
 def _superseded(entry: dict) -> dict[str, Any]:
     """What a replaced record said, short. A single-run record never named
@@ -1086,7 +1091,21 @@ def admitted(charter: Charter, model: str, state_dir: os.PathLike | str | None) 
     if found is None:
         return f"admitted against {', '.join(sorted(per_model))}, this session runs {model}"
     if not found.ok:
-        return f"the recorded exam did not pass ({found.passed}/{found.total})"
+        runs = (
+            "" if found.single_run
+            else f", {found.runs_passed} of {found.runs_required} runs clean"
+        )
+        return f"the recorded exam did not pass ({found.passed}/{found.total}{runs})"
+    # The floor (#472) binds only records that carry runs. A record written
+    # under the one-run rule still admits — the mail reader, the tracker and
+    # the settlement judge run on such records, and refusing them would stop
+    # production roles until re-examined; it is labelled `single_run` in the
+    # file, and the next batch replaces it.
+    if not found.single_run and found.runs_required < RUNS_REQUIRED:
+        return (
+            f"the recorded exam ran {found.runs_required} time(s); "
+            f"admission needs {RUNS_REQUIRED}"
+        )
     # Version first, only because it is the more specific way to say the same
     # thing when someone bumped it on purpose. The version lives INSIDE the
     # charter, so the digest below already covers every case this catches.

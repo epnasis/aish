@@ -251,3 +251,59 @@ class TestWhatARecordSupersedes:
         ))
         raw = json.loads(roles.admission_path(tmp_path).read_text())
         assert raw[charter.name]["models"]["a:m"]["single_run"] is True
+
+
+def a_record(charter: roles.Charter, state_dir: Path, **runs) -> None:
+    per_run = runs.pop("per_run", 2)
+    required = runs.get("runs_required", 0)
+    passed = runs.pop("passed", per_run * max(required, 1))
+    roles.write_admission(state_dir, roles.Admission(
+        charter=charter.name, version=charter.version, model=MODEL, at="t",
+        passed=passed, total=per_run * max(required, 1),
+        charter_digest=charter.digest, cases_digest=roles.owner_cases_digest(charter),
+        **runs,
+    ))
+
+
+class TestTheRunsFloor:
+    """`roles.admitted` is the one place that answers "may it run": a record
+    carrying runs must meet `RUNS_REQUIRED`; a single-run record written
+    before #472 still admits, so the roles running on one do not stop."""
+
+    def test_a_clean_batch_at_the_floor_admits(self, tmp_path):
+        charter = roles.parse_charter(charter_text())
+        a_record(charter, tmp_path, runs_required=roles.RUNS_REQUIRED,
+                 runs_passed=roles.RUNS_REQUIRED)
+        assert roles.admitted(charter, MODEL, tmp_path) is None
+
+    def test_a_clean_batch_below_the_floor_does_not(self, tmp_path):
+        charter = roles.parse_charter(charter_text())
+        a_record(charter, tmp_path, runs_required=2, runs_passed=2)
+        assert roles.admitted(charter, MODEL, tmp_path) == (
+            "the recorded exam ran 2 time(s); admission needs 3")
+
+    def test_one_unclean_run_does_not_admit_even_when_the_sums_would(self, tmp_path):
+        """`passed == total` alone is not the rule: the runs count is."""
+        charter = roles.parse_charter(charter_text())
+        a_record(charter, tmp_path, runs_required=3, runs_passed=2)
+        assert roles.admitted(charter, MODEL, tmp_path) == (
+            "the recorded exam did not pass (6/6, 2 of 3 runs clean)")
+
+    def test_a_single_run_record_still_admits_and_is_labelled(self, tmp_path):
+        charter = roles.parse_charter(charter_text())
+        a_record(charter, tmp_path)
+        found = roles.read_admissions(tmp_path)[charter.name][MODEL]
+        assert found.single_run
+        assert roles.admitted(charter, MODEL, tmp_path) is None
+
+    def test_the_script_refuses_a_batch_below_the_floor(self, exam, capsys):
+        charter, state_dir, run, _ = exam
+        before = a_recorded_pass(charter, state_dir)
+        code, scripted = run([OK] * 4, "--runs", "2")
+        assert code == 2 and scripted.calls == 0
+        assert roles.admission_path(state_dir).read_bytes() == before
+        assert "below the 3 runs admission needs" in capsys.readouterr().out
+
+    def test_the_default_is_the_floor(self, exam):
+        _, _, _, script = exam
+        assert script.DEFAULT_RUNS == roles.RUNS_REQUIRED == 3

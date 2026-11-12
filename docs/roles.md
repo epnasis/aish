@@ -938,7 +938,8 @@ the step — which would wedge browsing on a flaky connection.
    `<state_dir>/roles/admission.json`.
 2. **Load time** checks that a **recorded pass exists and is current** — `roles.admitted`,
    which compares the charter's **content digest**, the owner's cases file digest, the
-   version and the model spec, and returns a *phrase* rather than a bool, because "no
+   version and the model spec — and, on a record carrying runs, the runs floor (*Repeated
+   runs*, below) — and returns a *phrase* rather than a bool, because "no
    admission recorded", "the charter text has changed since it was examined" and "admitted
    against another model" are different facts. The digest comparison is what makes this the
    system's actual write-path control rather than a staleness check — see *Keeping the model
@@ -998,6 +999,20 @@ before it. **`Admission.ok` requires `runs_passed == runs_required`** on a recor
 so one failing run keeps the role out. The script prints the verdict `roles.admitted` gives
 for the record it just wrote, so it cannot print ADMITTED about a record the role would be
 refused on. `TestRepeatedRuns`, `TestWhatARecordSupersedes`.
+
+**The reader floor — one place answers "may it run".** `roles.admitted` refuses a record
+that carries runs unless it has at least `RUNS_REQUIRED` (3) of them and every one passed
+every case ("the recorded exam ran 2 time(s); admission needs 3", "the recorded exam did not
+pass (46/48, 2 of 3 runs clean)"). The script refuses `--runs` below the floor before
+spending anything, because such a batch could only write a record that never admits, over
+the one that did. **A record written under the one-run rule still admits** — the mail
+reader, the tracker and the settlement judge run on such records, and refusing them would
+stop production roles until each is re-examined. It is labelled `single_run: true` **in
+`admission.json` only** (a record is labelled when the writer next rewrites its charter's
+entry; one nothing has rewritten carries no runs fields, which reads the same through
+`Admission.single_run`). No card, log line, strip or `aish usage` output shows that label;
+"admitted" on any surface does not say whether it rests on one run or three. The next batch
+for that charter and model replaces it, and keeps it under `supersedes`. `TestTheRunsFloor`.
 
 **What it does not mean.** Every run passing every case is a **tripwire for gross
 flakiness, not proof of stability.** A case a model passes 90% of the time passes a 3-run
