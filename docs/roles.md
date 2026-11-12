@@ -39,7 +39,7 @@ Issue #297, stage 1 of the epic in #295.
 > **The fourth caller (#467 slice 3): `skill-auditor`**, the import auditor, called on both
 > skill-import review paths before the card (`skillaudit.audit`, `docs/knowledge-layer.md`
 > §The import auditor) — `caller` class, one named spec (`$AISH_SKILL_AUDITOR_MODEL`, default
-> `gemini:gemini-flash-latest`), no entry in `roles.WIRINGS`: its findings reach the owner's
+> `local:mlx-community/Qwen3.6-35B-A3B-8bit`, the owner's server at `$AISH_LOCAL_URL`), no entry in `roles.WIRINGS`: its findings reach the owner's
 > card and the lock, never an acting context. A fifth output shape, `findings`, delegated to
 > `skillaudit.py`.
 

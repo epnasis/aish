@@ -282,9 +282,21 @@ class TestTheAudit:
         assert "did not run: the auditor's charter does not load" in audit.headline()
 
     def test_the_model_is_named_by_the_caller_and_overridable(self, monkeypatch):
-        assert skillaudit.model_spec() == "gemini:gemini-flash-latest"
+        assert skillaudit.model_spec() == "local:mlx-community/Qwen3.6-35B-A3B-8bit"
         monkeypatch.setenv(skillaudit.MODEL_ENV, "openai:gpt-x")
         assert skillaudit.model_spec() == "openai:gpt-x"
+
+    def test_with_no_local_server_address_the_card_says_so(self, tmp_path, monkeypatch):
+        """The default is the owner's own server, reached at AISH_LOCAL_URL.
+        Unset, the backend refuses to build a client, and that refusal is the
+        observed reason on the card — admitted, and still not run."""
+        monkeypatch.delenv("AISH_LOCAL_URL", raising=False)
+        admit(tmp_path)
+        audit, charter, result = skillaudit.audit("s", SKILL, state_dir=tmp_path)
+        assert charter is not None and result is not None
+        assert audit.status == roles.Status.UNAVAILABLE and not audit.findings
+        assert audit.headline().startswith(
+            f"the auditor ({MODEL}) did not run: AISH_LOCAL_URL is not set")
 
     def test_the_lock_copy_says_which_bytes_it_read(self, tmp_path):
         admit(tmp_path)
