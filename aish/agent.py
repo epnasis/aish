@@ -954,6 +954,9 @@ _GLOB_CHARS = "*?["
 _CHARTER_WORDS = ("charters", "roles", "AISH_CONFIG_HOME")
 # The same, for the automations folder (epic #142 W2).
 _AUTOMATION_WORDS = ("automations", "AISH_CONFIG_HOME")
+# The same, for the third-party skills tree and the owner's approved-sources
+# file (#467 slice 3). Matched case-insensitively: the owner's disk is.
+_THIRD_PARTY_WORDS = ("vendor-skills", "skill-sources", "AISH_CONFIG_HOME")
 
 
 def _is_dynamic(text: str) -> bool:
@@ -1278,6 +1281,15 @@ THIRD_PARTY_NOT_WRITABLE = (
     "importing it again) and changing the approved sources are the owner's own "
     "edits. There is nothing to approve here — if something there should "
     "change, tell the user what and why."
+)
+
+THIRD_PARTY_COMMAND_REFUSED = (
+    "NOT EXECUTED: this command names {where} — the third-party skills aish "
+    "imported, or the owner's list of the sources they may come from. A command "
+    "naming either is refused whether it would read or write, because that "
+    "cannot be told apart from the command text. To use a third-party skill, "
+    "call use_skill. There is nothing to approve here — if something there "
+    "should change, tell the user what and why."
 )
 
 # The acting model never reads a third-party skill (#467 slice 2b): its text
@@ -13272,31 +13284,79 @@ class Agent:
             command, self._automation_dirs(), _AUTOMATION_WORDS
         )
 
+    def _command_touches_third_party(self, command: str) -> str:
+        """The third-party skills tree or the approved-sources file this shell
+        command names, or "" (#467 slice 3) — the charter fence's four nets,
+        with containment asked the case-folding way `skills.in_third_party_tree`
+        and `skills.is_sources_file` ask it, because on the owner's disk
+        `VENDOR-SKILLS/x` IS the tree. The file and skill tools already refuse
+        to write either (`skills.third_party_write_refusal`); this is the
+        shell's half, so a card-approved or prefix-rule command cannot either
+        — for any spelling the command TEXT shows."""
+        return self._command_names_a_store(
+            command,
+            [skills.VENDOR_SKILLS_DIR, skills.SKILL_SOURCES_FILE],
+            _THIRD_PARTY_WORDS,
+            contains=self._in_third_party_store,
+            casefold=True,
+        )
+
+    @staticmethod
+    def _in_third_party_store(store: Path, candidate: str, base: str) -> bool:
+        if store == skills.SKILL_SOURCES_FILE:
+            return skills.is_sources_file(candidate, base)
+        return skills.in_third_party_tree(candidate, base)
+
     def _command_names_a_store(
-        self, command: str, stores: list[Path], words: tuple[str, ...]
+        self,
+        command: str,
+        stores: list[Path],
+        words: tuple[str, ...],
+        *,
+        contains: Callable[[Path, str, str], bool] | None = None,
+        casefold: bool = False,
     ) -> str:
         """The fenced store `command` names, or "" — the four nets described
         on `_command_touches_a_charter`, for any list of stores and the words
-        that name them."""
+        that name them.
+
+        `contains` replaces `files.contains` in net 2, and `casefold` makes
+        nets 1 and 4 compare case-insensitively (net 3 always does). A store
+        whose own containment test folds case passes both — otherwise the
+        fence would claim a case coverage its predicate lacks."""
+        def inside(store: Path, candidate: str, base: str) -> bool:
+            if contains is not None:
+                return contains(store, candidate, base)
+            return files.contains(store, candidate, base)
+
+        text = command.casefold() if casefold else command
         for store in stores:
             # NET 1 — the literal spelling, anywhere in the text. It is what
             # catches a form no path extractor sees as a path:
             # `D=<charters>; echo x > $D/x.md` puts the directory in the token
             # `D=<charters>`, which resolves to nothing.
             for spelling in {str(store), _display_path(store)}:
-                if spelling and spelling in command:
+                if casefold:
+                    spelling = spelling.casefold()
+                if spelling and spelling in text:
                     return _display_path(store)
 
         # NET 2 — a literal path, resolved. `files.contains` is the one
         # containment function (#309), so a symlink from a session root answers
-        # the same as the store's own path.
-        for raw in set(_PATHISH.findall(_expand_home(command))):
+        # the same as the store's own path. Resolved against every directory a
+        # `cd` in the command could have moved to, as net 3 does: `cd <config
+        # home> && echo x >> skill-sources` names the file in a token with no
+        # `/` at all, so once the command moves, every token is a candidate.
+        expanded = _expand_home(command)
+        bases = _cd_bases(expanded, self.cwd)
+        for raw in set(_PATHISH.findall(expanded)):
             candidate = _after_assignment(raw.strip("\"'`,;()"))
-            if "/" not in candidate:
+            if not candidate or ("/" not in candidate and len(bases) == 1):
                 continue
-            for store in stores:
-                if files.contains(store, candidate, self.cwd):
-                    return _display_path(store)
+            for base in bases:
+                for store in stores:
+                    if inside(store, candidate, base):
+                        return _display_path(store)
 
         # NET 3 — a path the SHELL would finish writing. Asked of what the token
         # COULD expand to rather than of what it resolves to, because a resolver
@@ -13307,8 +13367,7 @@ class Agent:
         # one token instead of three. Home expansion runs before masking, so the
         # two spellings this code can resolve exactly stay exact.
         loose = _writes(command)
-        bases = _cd_bases(_expand_home(command), self.cwd)
-        for raw in set(_PATHISH.findall(_SUBSTITUTION.sub("*", _expand_home(command)))):
+        for raw in set(_PATHISH.findall(_SUBSTITUTION.sub("*", expanded))):
             candidate = _as_pattern(_after_assignment(raw.strip("\"'`,;()")))
             if not candidate or not _is_dynamic(candidate):
                 continue
@@ -13324,8 +13383,11 @@ class Agent:
         # under-refusing puts a governance write on an approval card, and the
         # owner has said he does not read them.
         if _is_dynamic(command):
+            flags = re.IGNORECASE if casefold else 0
             for word in words:
-                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(word)}(?![A-Za-z0-9_])", command):
+                if re.search(
+                    rf"(?<![A-Za-z0-9_]){re.escape(word)}(?![A-Za-z0-9_])", command, flags
+                ):
                     return _display_path(stores[0])
         return ""
 
@@ -15479,6 +15541,17 @@ class Agent:
             if where := self._command_touches_automations(command):
                 result = AUTOMATION_COMMAND_REFUSED.format(where=where)
                 self._note("✕ command names aish's automations folder")
+                self._run_meta = {"command": command, "decision": "blocked", "output": result}
+                return _gate_outcome(result, decision="blocked")
+            # The third-party tree and the approved-sources file (#467 slice
+            # 3): the file and skill tools refuse both, and without this a
+            # command on a card, or one a prefix rule runs cardless and
+            # unsandboxed, could still write a stranger's skill or widen who
+            # may publish to the owner. The owner's own `!` commands never
+            # come through here (`run_user_command`).
+            if where := self._command_touches_third_party(command):
+                result = THIRD_PARTY_COMMAND_REFUSED.format(where=where)
+                self._note("✕ command names the third-party skills or their sources")
                 self._run_meta = {"command": command, "decision": "blocked", "output": result}
                 return _gate_outcome(result, decision="blocked")
 

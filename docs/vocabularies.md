@@ -375,7 +375,7 @@ so the next person does not have to re-find them: `approval.EXEC_WRAPPERS` (27),
 `approval._CMD_WRAPPERS` (9), `approval._SHELL_NAMES` (5), `approval._WRAPPERS` (4),
 `approval._DISKUTIL_DESTRUCTIVE` (6), `approval._FIND_EXEC_FLAGS` (4),
 `approval.SUBCOMMAND_DEPTH` (11), `approval.UNSAFE_FLAGS` (2), `agent._WRITE_VERBS` (25),
-`agent._CHARTER_WORDS` (3), `files._SENSITIVE_DIRS` (6) / `_SENSITIVE_NAMES` (11) /
+`agent._CHARTER_WORDS` (3), `agent._THIRD_PARTY_WORDS` (3, #467 slice 3), `files._SENSITIVE_DIRS` (6) / `_SENSITIVE_NAMES` (11) /
 `_SENSITIVE_SUFFIXES` (5), `curate.ARMING_TRIGGERS` (3), `curate.DEMANDING_VERBS` (3),
 `rules.AISH_NOTE_MARKERS` (3), `dir_ignore.DEFAULT_IGNORE` (26),
 `prompt.ATFILE_IGNORED_DIRS` (11). All of these are **program names, flag names, aish's own
@@ -383,6 +383,13 @@ grammar keywords or path patterns** — locale-invariant, so the failure mode th
 (a language the list does not speak) does not apply. `files._SENSITIVE_*` is the one worth
 doing next: it is `permits`-shaped (a miss lets an auto-approved `read_file` touch a
 credential without a prompt) and it is the only entry in this paragraph where that is true.
+
+**Regular expressions over fetched code, not a word list:** `skill_import._RISK_PATTERNS`
+(widened in #467 slice 3), the import review's risk flags. Program names, library import
+forms, flags and path patterns — locale-invariant, matched against a stranger's scripts, never
+against prose a person reads in a language. Its miss is advisory by construction: a flag fewer
+on a card that decides either way, and nothing is gated on it. Uncounted for that reason; its
+patterns and the prose they must not fire on are pinned in `TestTheWiderScan`.
 
 ## How a consultation is counted
 

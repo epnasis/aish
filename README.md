@@ -516,8 +516,9 @@ thousands of entries without bloating the context.
   other source, any address that is not `https://github.com/<owner>/<repo>`,
   or a local path is refused before anything is fetched; aish's file and skill
   tools will not edit that file. An approved import is a read-only clone, then
-  one consolidated review of every file plus deterministic risk flags before
-  anything installs. It goes to `~/.config/aish/vendor-skills/`, never into
+  one consolidated review of every file plus deterministic risk flags (network
+  access, a download piped to a shell, Keychain reads, AppleScript, package
+  installs, decoded payloads, credential paths, …) before anything installs. It goes to `~/.config/aish/vendor-skills/`, never into
   your own `skills/`, with where it came from and a hash of every installed
   file recorded in `vendor-skills/skills.lock`. Imported skills are
   **third-party**: listed in a separate index section and never preloaded,
@@ -549,8 +550,11 @@ thousands of entries without bloating the context.
   files are checked against the recorded hashes before a run: a skill whose
   files changed after install is refused, naming the files (delete its folder
   and import it again). aish's file and skill tools never write into
-  `vendor-skills/` — retiring or removing a third-party skill is your own
-  edit. A skill you wrote yourself and want trusted goes into `skills/` by
+  `vendor-skills/`, and a shell command the model proposes that names
+  `vendor-skills/` or `skill-sources` is refused outright, with no card —
+  reads included, and including spellings that differ only in case; your own
+  `!` commands are not affected. Retiring or removing a third-party skill is
+  your own edit. A skill you wrote yourself and want trusted goes into `skills/` by
   hand, not through import.
 - **Plugin tools** — where a skill *teaches*, a tool *does*. A droppable
   `<name>/TOOL.md` the model calls exactly like a built-in tool, choosing from a

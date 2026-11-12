@@ -325,13 +325,19 @@ def third_party_write_refusal(path: os.PathLike | str, cwd: str | None = None) -
     which the import's own install goes through."""
     if in_third_party_tree(path, cwd):
         return "inside the third-party skills tree"
-    target = files.resolved(path, cwd)
-    sources = files.resolved(SKILL_SOURCES_FILE)
-    if target is not None and sources is not None and (
-        str(target).casefold() == str(sources).casefold()
-    ):
+    if is_sources_file(path, cwd):
         return "the owner's approved skill sources file"
     return ""
+
+
+def is_sources_file(path: os.PathLike | str, cwd: str | None = None) -> bool:
+    """Is `path` the owner's approved-sources file? Resolved, then compared
+    case-insensitively, for the reason `in_third_party_tree` gives."""
+    target = files.resolved(path, cwd)
+    sources = files.resolved(SKILL_SOURCES_FILE)
+    return target is not None and sources is not None and (
+        str(target).casefold() == str(sources).casefold()
+    )
 
 
 def resolve_skill(name: str, cwd: str) -> "Entry | None":

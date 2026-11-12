@@ -54,17 +54,47 @@ _LANG = {
 }
 
 # Deterministic heuristics that FOCUS the human review — not a verdict. Each is
-# a pattern whose presence in a fetched file is worth a second look.
+# a pattern whose presence in a fetched file is worth a second look. A miss
+# shows one flag fewer and gates nothing: the card is the decision either way.
+#
+# Program names, API names, flags and path patterns — never a natural-language
+# word list, so `docs/vocabularies.md` inventories this under "Considered and
+# not catalogued". Library names are matched only in their IMPORT or CALL
+# form: the bare word `requests` or `socket` is ordinary prose in a SKILL.md.
+_PY_NETWORK_MODULES = r"requests|socket|http\.client|urllib\.request"
 _RISK_PATTERNS = [
     (re.compile(r"\b(curl|wget|nc|ncat|scp|ssh|telnet)\b"), "network access"),
+    (re.compile(r"/dev/(tcp|udp)/"), "network access"),
+    (re.compile(
+        rf"^[ \t]*(import[ \t]+({_PY_NETWORK_MODULES})\b"
+        rf"|from[ \t]+({_PY_NETWORK_MODULES})[ \t]+import\b"
+        r"|from[ \t]+urllib[ \t]+import[ \t]+request\b"
+        r"|from[ \t]+http[ \t]+import[ \t]+client\b)",
+        re.M,
+    ), "network access"),
+    (re.compile(r"\bfetch\("), "network access"),
     (re.compile(r"(curl|wget)[^|\n]*\|\s*(sh|bash|zsh|python)"), "pipe-to-shell"),
     (re.compile(r"\beval\b|\bexec\s*\("), "dynamic eval/exec"),
     (re.compile(r"\brm\s+-[rf]{1,2}\b"), "recursive delete"),
     (re.compile(r"\bsudo\b"), "sudo / privilege escalation"),
-    (re.compile(r"base64\s+(-d|--decode)"), "base64-decoded payload"),
+    # `-D` is the macOS spelling of `--decode`.
+    (re.compile(r"base64\s+(-d|-D|--decode)\b"), "base64-decoded payload"),
+    (re.compile(r"\bxxd\b[^\n|;]*\s-[a-z]*r"), "hex-decoded payload"),
+    (re.compile(r"\bopenssl\s+(enc|base64)\b[^\n]*\s-d\b"), "openssl-decoded payload"),
     (re.compile(r">\s*/etc/|>>?\s*~|>\s*\$HOME"), "writes outside its own dir"),
     (re.compile(r"\bchmod\b|\bchown\b"), "changes file permissions/ownership"),
-    (re.compile(r"/etc/passwd|id_rsa|\.ssh/|\.aws/|\.config/aish"), "touches sensitive paths"),
+    (re.compile(
+        r"/etc/passwd|id_rsa|\.ssh/|\.aws/|\.gnupg/|\.netrc\b|Library/Keychains|\.config/aish"
+    ), "touches sensitive paths"),
+    (re.compile(
+        r"\bsecurity\s+(find-generic-password|find-internet-password|dump-keychain)\b"
+    ), "reads the macOS Keychain"),
+    (re.compile(r"\bosascript\b"), "runs AppleScript (osascript)"),
+    (re.compile(
+        r"\b(pip3?|uv\s+pip)\s+install\b|\buv\s+run\b[^\n]*\s--with\b|\buvx\b|\bnpx\b"
+        r"|\bnpm\s+(install|i)\b|\bgem\s+install\b|\bcargo\s+install\b"
+        r"|\bgo\s+(install|get)\b|\bbrew\s+install\b"
+    ), "installs packages"),
 ]
 
 

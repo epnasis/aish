@@ -5246,6 +5246,161 @@ class TestTheThirdPartyWriteFence:
         assert (skills_module.VENDOR_SKILLS_DIR / "s" / "SKILL.md").is_file()
 
 
+class TestTheThirdPartyCommandFence:
+    """#467 slice 3: the shell's half of the write fence. A `run_command`
+    naming the third-party tree, its lock or the owner's `skill-sources` is
+    BLOCKED before any card — so neither a card-approved command nor a
+    prefix-rule one (cardless AND unsandboxed) can write a stranger's skill or
+    widen who may publish to the owner. Any literal mention refuses, reads
+    included, as the charter fence does."""
+
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        """A config home under a fake $HOME, so `~/…` and `$HOME/…` spellings
+        name the fenced paths exactly as they would on the owner's machine."""
+        home = tmp_path / "home"
+        config = home / ".config" / "aish"
+        tree = config / "vendor-skills"
+        (tree / "helper").mkdir(parents=True)
+        (tree / "helper" / "SKILL.md").write_text("---\nname: helper\n---\nTHEIRS\n")
+        (config / "skill-sources").write_text("github.com/acme/skills\n")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("AISH_CONFIG_HOME", str(config))
+        monkeypatch.setattr(skills_module, "VENDOR_SKILLS_DIR", tree)
+        monkeypatch.setattr(skills_module, "SKILL_SOURCES_FILE", config / "skill-sources")
+        return home
+
+    # Every spelling probed while building this, refused and pinned — a table
+    # listing only the failures is how a class stays open while the prose
+    # says closed (`docs/roles.md`, the charter fence's table).
+    BLOCKED = [
+        # literal, absolute and home-relative
+        "echo x > {tree}/helper/SKILL.md",
+        "cat {tree}/helper/SKILL.md",
+        "cat ~/.config/aish/vendor-skills/helper/SKILL.md",
+        "cp /tmp/x $HOME/.config/aish/vendor-skills/helper/SKILL.md",
+        "rm ~/.config/aish/vendor-skills/skills.lock",
+        "echo github.com/evil/x >> ~/.config/aish/skill-sources",
+        "cat ~/.config/aish/skill-sources",
+        "sed -i '' s/acme/evil/ ~/.config/aish/skill-sources",
+        "python3 -c \"open('{config}/skill-sources','a').write('x')\"",
+        # case-varied: the owner's disk is case-insensitive
+        "echo x > ~/.config/aish/VENDOR-SKILLS/helper/SKILL.md",
+        "echo x >> ~/.config/aish/Skill-Sources",
+        "echo x > ~/.CONFIG/aish/vendor-skills/helper/SKILL.md",
+        "echo x > {TREE}/helper/SKILL.md",
+        # relative to a cd, including a bare file name with no `/`
+        "cd ~/.config/aish && echo x >> skill-sources",
+        "cd ~/.config/aish && git checkout -- skill-sources",
+        "cd ~/.config && echo x > aish/vendor-skills/helper/SKILL.md",
+        "cd ~/.config/aish/vendor-skills && echo x > helper/SKILL.md",
+        # what the shell rewrites
+        "echo x > ~/.config/aish/vendor*/helper/SKILL.md",
+        "echo x > ~/.config/aish/VENDOR*/helper/SKILL.md",
+        "echo x >> ~/.config/aish/skill-sour?es",
+        "echo x > $AISH_CONFIG_HOME/vendor-skills/helper/SKILL.md",
+        "echo x >> ${{AISH_CONFIG_HOME}}/skill-sources",
+        "D=~/.config/aish/vendor-skills; echo x > $D/helper/SKILL.md",
+        "echo x > $(echo ~/.config)/aish/vendor-skills/helper/SKILL.md",
+        "echo x > ~/.config/aish/{{vendor-skills,x}}/helper/SKILL.md",
+        "echo x >> $(dirname $AISH_CONFIG_HOME)/aish/SKILL-SOURCES",
+    ]
+
+    # Ordinary work that must NOT be refused — a fence that fires on these is
+    # one somebody removes rather than fixes.
+    ALLOWED = [
+        "git -C ~/.config/aish log --oneline -5",
+        "git -C ~/.config/aish status",
+        "ls ~/.config/aish/skills",
+        "cat ~/.config/aish/skills/mine.md",
+        "cd ~/.config/aish && git log",
+        "ls -la",
+        "git status",
+        "echo ${PATH}",
+        "ls *.py",
+        "grep -rn 'vendor' aish/",
+        "uv run pytest -q",
+    ]
+
+    @pytest.mark.parametrize("spelling", BLOCKED)
+    def test_every_probed_spelling_is_refused(self, home, tmp_path, spelling):
+        tree = skills_module.VENDOR_SKILLS_DIR
+        command = spelling.format(
+            tree=tree, TREE=str(tree).replace("vendor-skills", "Vendor-Skills"),
+            config=tree.parent,
+        )
+        agent, _ = make_agent([model_says("ok")], cwd=str(tmp_path))
+        assert agent._command_touches_third_party(command), command
+
+    @pytest.mark.parametrize("command", ALLOWED)
+    def test_ordinary_work_is_not_refused(self, home, tmp_path, command):
+        agent, _ = make_agent([model_says("ok")], cwd=str(tmp_path))
+        assert not agent._command_touches_third_party(command), command
+
+    def test_a_symlink_into_the_tree_answers_the_same(self, home, tmp_path):
+        (tmp_path / "link").symlink_to(skills_module.VENDOR_SKILLS_DIR)
+        agent, _ = make_agent([model_says("ok")], cwd=str(tmp_path))
+        assert agent._command_touches_third_party("echo x > link/helper/SKILL.md")
+
+    def test_the_command_never_reaches_the_approver_and_nothing_changes(
+        self, home, tmp_path
+    ):
+        sources = skills_module.SKILL_SOURCES_FILE
+        asked: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call(
+                    "run_command", command=f"echo github.com/evil/x >> {sources}"
+                )]),
+                model_says("ok"),
+            ],
+            approve=lambda cmd: asked.append(cmd) or True, cwd=str(tmp_path),
+        )
+        agent.run_task("add a source")
+        assert asked == [], "the approver must never be offered this command"
+        [result] = tool_messages(agent.messages)
+        assert result["content"].startswith("NOT EXECUTED")
+        assert "whether it would read or write" in result["content"]
+        assert "nothing to approve" in result["content"]
+        assert sources.read_text() == "github.com/acme/skills\n"
+
+    def test_the_refusal_is_a_blocked_step(self, home, tmp_path):
+        steps: list = []
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[tool_call(
+                    "run_command", command="cat ~/.config/aish/vendor-skills/helper/SKILL.md"
+                )]),
+                model_says("ok"),
+            ],
+            step_log=steps.append, cwd=str(tmp_path),
+        )
+        agent.run_task("show it")
+        [tool_step] = [s for s in steps if s.get("kind") == "tool"]
+        assert tool_step["ok"] is False
+
+    def test_the_owners_own_bang_command_is_not_fenced(self, home, tmp_path):
+        """`!` commands are his, typed by him, and never pass `_dispatch`."""
+        agent, _ = make_agent([], cwd=str(tmp_path))
+        out = agent.run_user_command("cat ~/.config/aish/skill-sources")
+        assert "github.com/acme/skills" in out
+
+    def test_the_known_gaps_are_not_refused_and_are_named(self, home, tmp_path):
+        """Asserted rather than hidden: an ANCESTOR named with a recursive or
+        relative verb (`git -C <config home> checkout -- <file>`), and a path
+        assembled outside the command text, are not in the text for a fence
+        to find. Invert on purpose if a later fence closes them."""
+        agent, _ = make_agent([model_says("ok")], cwd=str(tmp_path))
+        for command in (
+            "git -C ~/.config/aish checkout -- .",
+            "git -C ~/.config/aish apply /tmp/evil.patch",
+            "echo pwn >> $TARGET",
+        ):
+            assert not agent._command_touches_third_party(command), (
+                f"{command!r} now refuses — good, but invert this test on purpose"
+            )
+
+
 class TestThirdPartyReadsAreChecked:
     """#467 P4 at the one read_file door that still reads the tree — the skill
     runner's (slice 2b; the acting model's refuses it). A bundled file of an

@@ -1057,6 +1057,8 @@ Four nets, each failing towards refusal:
    resolves to nothing.
 2. **Resolved** — every path-shaped token, `~/` and `$HOME` expanded, through
    `files.contains`, so a symlink from a session root answers the same as the store's path.
+   Asked against every directory a `cd` in the command moves to as well (since #467 slice 3),
+   and once a command moves, a token with no `/` is a candidate too.
 3. **Expansion patterns** — the whole command is masked first (`_SUBSTITUTION` → `*`, so a
    substitution spanning a tokeniser boundary stays one token), then each dynamic token's
    directory chain is walked and `fnmatch`ed against the store: **case-insensitively** (the
@@ -1072,6 +1074,12 @@ somewhere gets the looser walk, a read does not, because the same widening refus
 `ls aish/*` — and a fence that fires on ordinary work is one somebody removes rather than
 fixes. Being on `_WRITE_VERBS` only ever makes the fence refuse more; it is not a safety
 claim about the verbs absent from it.
+
+**The same nets fence two more stores.** The automations folder (`_command_touches_automations`)
+and, since #467 slice 3, the third-party skills tree and the owner's `skill-sources`
+(`_command_touches_third_party`, `docs/knowledge-layer.md`), which passes its own containment
+predicate (the case-folding `skills.in_third_party_tree` / `skills.is_sources_file`) and
+compares nets 1 and 4 case-insensitively.
 
 **Read and write are treated differently on purpose.** `read_file` on a charter is not
 refused: reading one authors nothing, and aish answers questions about itself. A shell

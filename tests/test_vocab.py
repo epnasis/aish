@@ -172,6 +172,11 @@ class TestTheCountingChangedNoMatching:
         # (the page-reading tools) and a record's field names — not word lists.
         "aish/agent.py:PAGE_READERS": ["browse", "browse_act", "browse_fill"],
         "aish/agent.py:sandbox_meta": ["confined", "tier"],
+        # #467 slice 3: not a word list — path names of aish's own stores (the
+        # third-party tree, the sources file) and the variable that relocates
+        # them, matched against COMMAND text like `_CHARTER_WORDS`.
+        "aish/agent.py:_THIRD_PARTY_WORDS": ["vendor-skills", "skill-sources",
+                                             "AISH_CONFIG_HOME"],
         # 2026-11-02: matched against mail text; declared and counted.
         "aish/mailcases.py:_KEY_STEMS": ["zamówieni", "zamowieni", "przesyłk", "przesylk",
                                          "paczk", "rezerwacj", "faktur", "rachun"],
