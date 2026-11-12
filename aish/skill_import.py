@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ from .files import contains
 from .paths import state_home
 
 CLONE_TIMEOUT = 120
+LS_REMOTE_TIMEOUT = 60
 
 # Extension → highlight.js language name (for the review card's code blocks).
 _LANG = {
@@ -364,6 +366,30 @@ def _clone(url: str, dest: str) -> None:
         )
 
 
+_COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def _ls_remote(url: str) -> str:
+    """The commit `url`'s default branch points at — the one network step of
+    `aish skill outdated` when nothing changed upstream. The same terms as
+    `_clone`: redirects off (a renamed repository must be approved under its
+    new name), no terminal prompt, a timeout. Raises SkillImportError."""
+    proc = subprocess.run(
+        ["git", "-c", "http.followRedirects=false", "ls-remote", "--", url, "HEAD"],
+        capture_output=True, text=True, timeout=LS_REMOTE_TIMEOUT,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    if proc.returncode != 0:
+        raise SkillImportError(
+            f"git ls-remote of {url} failed (redirects are not followed): {proc.stderr.strip()}"
+        )
+    for line in proc.stdout.splitlines():
+        commit, _, ref = line.partition("\t")
+        if ref.strip() == "HEAD" and _COMMIT.fullmatch(commit.strip()):
+            return commit.strip()
+    raise SkillImportError(f"git ls-remote of {url} named no HEAD commit")
+
+
 def _decodes(data: bytes) -> str | None:
     try:
         return data.decode("utf-8")
@@ -528,6 +554,18 @@ def file_hashes(folder: Path) -> dict[str, str]:
     }
 
 
+def lock_entry(tree: Path, folder: str) -> dict | None:
+    """The lock's entry for the skill installed as `tree/<folder>`, matched
+    case-insensitively for the reason `recorded_hashes` gives; None when
+    there is no lock, no entry, or the entry is not an object."""
+    entries = _lock_entries(tree) or {}
+    entry = entries.get(folder)
+    if entry is None:
+        matching = [v for k, v in entries.items() if str(k).casefold() == folder.casefold()]
+        entry = matching[0] if len(matching) == 1 else None
+    return entry if isinstance(entry, dict) else None
+
+
 def recorded_hashes(tree: Path, folder: str) -> dict[str, str] | None:
     """The hashes recorded for the skill installed as `tree/<folder>`, or None
     when there are none to check against: no lock, no entry (a skill placed
@@ -537,12 +575,8 @@ def recorded_hashes(tree: Path, folder: str) -> dict[str, str] | None:
     `HELPER/x.md` opens `helper/x.md`, and an exact lookup would serve it as
     unchecked. Two entries differing only in case cannot both be installed
     there (`existing_skill` finds the first)."""
-    entries = _lock_entries(tree) or {}
-    entry = entries.get(folder)
-    if entry is None:
-        matching = [v for k, v in entries.items() if str(k).casefold() == folder.casefold()]
-        entry = matching[0] if len(matching) == 1 else None
-    hashes = entry.get("files") if isinstance(entry, dict) else None
+    entry = lock_entry(tree, folder)
+    hashes = entry.get("files") if entry is not None else None
     if not isinstance(hashes, dict):
         return None
     return {str(rel): str(digest) for rel, digest in hashes.items()}
@@ -682,24 +716,122 @@ def stage(
             shutil.rmtree(tmp, ignore_errors=True)
         raise SkillImportError(f"skill name {name!r} is invalid")
 
+    try:
+        files, skipped = collect(skill_dir)
+    except SkillImportError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return name, entry.description, files, skipped, tmp
+
+
+def collect(skill_dir: Path) -> tuple[list[tuple[str, str, bool]], list[str]]:
+    """(files, skipped): every UTF-8 text file under `skill_dir` as
+    (relative path, text, is executable), and the binary files left out. The
+    one reading of a skill folder that an install is made from — the clone at
+    import, the quarantine at `aish skill approve`, a fresh clone in
+    `aish skill outdated` — so all three see the same files. A symlink raises
+    SkillImportError; callers have refused links already, so one here
+    appeared since."""
     files: list[tuple[str, str, bool]] = []
     skipped: list[str] = []
     for p in sorted(skill_dir.rglob("*")):
-        if p.is_symlink():  # appeared after the check above
-            if tmp:
-                shutil.rmtree(tmp, ignore_errors=True)
+        rel_parts = p.relative_to(skill_dir).parts
+        if p.is_symlink():
             raise SkillImportError(
                 f"{p.relative_to(skill_dir)} is a symlink — nothing was imported"
             )
-        if not p.is_file() or ".git" in p.parts:
+        if not p.is_file() or ".git" in rel_parts:
             continue
-        rel = str(p.relative_to(skill_dir))
+        rel = "/".join(rel_parts)
         text = _decodes(p.read_bytes())
         if text is None:
             skipped.append(rel)  # binary asset — not part of the trust surface
             continue
         files.append((rel, text, os.access(p, os.X_OK)))
-    return name, entry.description, files, skipped, tmp
+    return files, skipped
+
+
+@dataclass(frozen=True)
+class InstallFile:
+    data: bytes
+    executable: bool
+
+
+_EXEC_BITS = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+
+
+def install_bytes(files: list[tuple[str, str, bool]]) -> dict[str, InstallFile]:
+    """Exactly what an install writes for each text file: the manifest's
+    keywords cleaned (`english_manifest`), a final newline added to a
+    non-empty file without one, UTF-8, and the executable bit. The ONE
+    definition, so both install paths write the same bytes for the same
+    files and `aish skill outdated` compares upstream against what the lock's
+    hashes describe — a raw upstream-vs-lock comparison would call every
+    cleaned or newline-less file changed forever (#467 slice 4 review, R1).
+    Binary files are not in `files` (see `collect`), so they are never
+    installed or compared."""
+    cleaned, _dropped = english_manifest(files)
+    out: dict[str, InstallFile] = {}
+    for rel, text, is_exec in cleaned:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        out[rel] = InstallFile(text.encode("utf-8"), bool(is_exec))
+    return out
+
+
+def write_install(dest: Path, planned: dict[str, InstallFile]) -> None:
+    """Write `install_bytes`' output under `dest`, byte for byte, adding the
+    executable bits where one is set. Raises OSError; what was written before
+    the failure stays."""
+    for rel, item in planned.items():
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(item.data)
+        if item.executable:
+            target.chmod(target.stat().st_mode | _EXEC_BITS)
+
+
+@dataclass(frozen=True)
+class FileChanges:
+    """How `install_bytes` of a newer copy differs from an installed skill."""
+
+    added: list[str]
+    removed: list[str]
+    modified: list[str]
+    newline_only: list[str]
+    mode: list[str]
+
+    def __bool__(self) -> bool:
+        return bool(self.added or self.removed or self.modified or self.mode)
+
+
+def compare_install(
+    recorded: dict[str, str],
+    installed_exec: dict[str, bool],
+    new: dict[str, InstallFile],
+) -> FileChanges:
+    """`new` against the lock's hashes (`recorded`) and the installed files'
+    executable bits (`installed_exec`, read from disk; a file absent from it
+    has its bit not compared). `newline_only` names the modified files whose
+    new bytes are the recorded ones plus a final newline — what a skill
+    installed by `aish skill approve` before the two install paths were made
+    one shows once."""
+    modified = sorted(
+        rel for rel in set(recorded) & set(new) if _sha256(new[rel].data) != recorded[rel]
+    )
+    return FileChanges(
+        added=sorted(set(new) - set(recorded)),
+        removed=sorted(set(recorded) - set(new)),
+        modified=modified,
+        newline_only=[
+            rel for rel in modified
+            if new[rel].data.endswith(b"\n") and _sha256(new[rel].data[:-1]) == recorded[rel]
+        ],
+        mode=sorted(
+            rel for rel in set(installed_exec) & set(new) & set(recorded)
+            if installed_exec[rel] != new[rel].executable
+        ),
+    )
 
 
 def quarantine_root() -> Path:
@@ -756,12 +888,9 @@ def stage_to_disk(
     try:
         dest = root / name
         shutil.rmtree(dest, ignore_errors=True)
-        for rel, text, is_exec in files:
-            target = dest / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
-            if is_exec:
-                target.chmod(0o755)
+        # The install's own bytes, so what he reads in his editor is what
+        # `approve` installs unless he edits it.
+        write_install(dest, install_bytes(files))
         origin = {
             "source": source_label(repo), "path": lock_path(path), "commit": clone_commit(tmp)
         }
@@ -784,11 +913,14 @@ def pending(root: Path | None = None) -> list[str]:
 
 
 def install(name: str, root: Path | None = None) -> tuple[Path, list[str], str]:
-    """Move a quarantined skill into the third-party tree — always that tree,
-    decided here rather than by the caller (#467). Returns (install path,
-    keywords dropped as not English, a note when the lock could not be
-    written). The quarantine is hand-editable between stage and approve, so
-    the manifest is cleaned again here, at the write."""
+    """Install a quarantined skill into the third-party tree — always that
+    tree, decided here rather than by the caller (#467). Returns (install
+    path, keywords dropped as not English, a note naming binary files left
+    behind, the environment's outcome and a lock that could not be written).
+    The quarantine is hand-editable between stage and approve, so what
+    installs is `install_bytes` of its CURRENT text files — read again here,
+    manifest cleaned again — and a binary file put there is not installed,
+    as `stage` never installs one."""
     from . import skills as sk
 
     # The name becomes a path under the tree, so it must not be able to leave it.
@@ -813,12 +945,20 @@ def install(name: str, root: Path | None = None) -> tuple[Path, list[str], str]:
         raise SkillImportError(already_exists_error(clash))
     tree = sk.VENDOR_SKILLS_DIR
     dest = tree / name
-    shutil.copytree(src, dest)
+    current, binaries = collect(src)
+    current, dropped = english_manifest(current)
+    try:
+        write_install(dest, install_bytes(current))
+    except OSError as exc:
+        raise SkillImportError(
+            f"could not write {dest} ({exc}); whatever was written before the failure is "
+            "there, and the staged copy is kept"
+        ) from None
     shutil.rmtree(src, ignore_errors=True)
-    manifest = dest / MANIFEST
-    text, dropped = english_keywords(manifest.read_text(encoding="utf-8"))
-    if dropped:
-        manifest.write_text(text, encoding="utf-8")
+    binary_note = (
+        f"binary files in the staged copy were not installed: {', '.join(binaries)}"
+        if binaries else ""
+    )
     origin_file = _origin_path(root, name)
     try:
         origin = json.loads(origin_file.read_text(encoding="utf-8"))
@@ -840,7 +980,9 @@ def install(name: str, root: Path | None = None) -> tuple[Path, list[str], str]:
         tree, name, origin.get("source"), str(origin.get("path") or ""), origin.get("commit"),
         env, audit,
     )
-    return dest, dropped, "; ".join(n for n in (skill_env.install_note(env), note) if n)
+    return dest, dropped, "; ".join(
+        n for n in (binary_note, skill_env.install_note(env), note) if n
+    )
 
 
 def install_env(name: str, dest: Path) -> dict:

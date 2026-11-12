@@ -17088,19 +17088,15 @@ class Agent:
             if not decision:
                 return f"Import of {name!r} was denied — nothing was installed."
             # Approved: install all reviewed files at once (the review already
-            # happened; no per-file prompts).
-            for rel, text, is_exec in imported:
-                plan = files.plan_write(str(dest / rel), text, self.cwd)
-                if plan.error:
-                    return f"ERROR importing {rel}: {plan.error}"
-                files.commit(plan)
-                if is_exec:
-                    target = dest / rel
-                    try:
-                        mode = os.stat(target).st_mode
-                        os.chmod(target, mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-                    except OSError:
-                        pass
+            # happened; no per-file prompts), as the one install pipeline's
+            # bytes, which `aish skill approve` writes too.
+            try:
+                skill_import.write_install(dest, skill_import.install_bytes(imported))
+            except OSError as exc:
+                return (
+                    f"ERROR importing {name!r} into {dest}: {exc}. Whatever was written "
+                    "before the failure is there; no lock entry was recorded."
+                )
             env = skill_import.install_env(name, dest)
             lock_note = skill_import.lock_failure_note(
                 tree, name, skill_import.source_label(repo),

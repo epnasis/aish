@@ -734,3 +734,86 @@ class TestAMalformedImportFailsCleanly:
     def test_the_locks_name_is_reserved_in_any_case(self):
         assert skill_import.reserved_name_error(["Skills.LOCK"]) is not None
         assert skill_import.reserved_name_error(["skills-lock"]) is None
+
+
+class TestOneInstallPipeline:
+    """#467 slice 4b, §0: both install paths write exactly `install_bytes`,
+    and the lock's hashes — read back from disk — describe exactly those
+    bytes, so an upstream comparison made through the same function can
+    never report cleaning or a newline as a change."""
+
+    TEXTS = [
+        "no final newline",
+        "has one\n",
+        "",
+        "crlf\r\nlines\r\n",
+        "crlf without end\r\nx",
+        "﻿bom and zażółć",
+    ]
+
+    def test_the_tool_paths_bytes_are_unchanged(self, tmp_path):
+        """Byte identity against what the tool path wrote before: each file
+        through `files.plan_write` + `files.commit`."""
+        from aish import files
+
+        staged = [(f"f{i}.txt", text, False) for i, text in enumerate(self.TEXTS)]
+        for rel, text, _x in staged:
+            files.commit(files.plan_write(str(tmp_path / "old" / rel), text, str(tmp_path)))
+        planned = skill_import.install_bytes(staged)
+        for rel, _text, _x in staged:
+            assert planned[rel].data == (tmp_path / "old" / rel).read_bytes(), rel
+
+    def test_the_manifest_is_cleaned_and_the_bit_carried(self):
+        planned = skill_import.install_bytes([
+            ("SKILL.md", "---\nname: s\nkeywords: a, zażółć\n---\nbody", False),
+            ("run.sh", "#!/bin/sh\n", True),
+        ])
+        assert planned["SKILL.md"].data == b"---\nname: s\nkeywords: a\n---\nbody\n"
+        assert planned["run.sh"].executable and not planned["SKILL.md"].executable
+
+    def test_cleaning_twice_is_cleaning_once(self):
+        """The tool path cleans for its card and `install_bytes` cleans again."""
+        staged = [("SKILL.md", "---\nname: s\nkeywords: a,  b, zażółć\n---\nx", False)]
+        cleaned, _ = skill_import.english_manifest(staged)
+        assert skill_import.install_bytes(cleaned) == skill_import.install_bytes(staged)
+
+    def test_the_cli_path_now_adds_the_final_newline(self, tmp_path, approved_skill_source):
+        """The stated behaviour change: `aish skill approve` used to install a
+        newline-less file as it was; it now installs the tool path's bytes."""
+        make_repo(approved_skill_source.repo)
+        manifest = approved_skill_source.repo / "myskill" / "SKILL.md"
+        manifest.write_text("---\nname: myskill\ndescription: d\n---\nno newline")
+        qroot = tmp_path / "q"
+        _, dest, _ = skill_import.stage_to_disk(URL, "myskill", root=qroot)
+        assert (dest / "SKILL.md").read_bytes().endswith(b"no newline\n")  # what he reviews
+        (dest / "SKILL.md").write_text("---\nname: myskill\ndescription: d\n---\nedited")
+        installed, _, _ = skill_import.install("myskill", root=qroot)
+        assert (installed / "SKILL.md").read_bytes().endswith(b"edited\n")
+
+    def test_the_cli_paths_lock_describes_install_bytes(self, tmp_path, approved_skill_source):
+        make_repo(approved_skill_source.repo)
+        (approved_skill_source.repo / "myskill" / "notes.md").write_text("tail")
+        import shutil
+
+        _, _, staged, _, tmp = skill_import.stage(URL, "myskill")
+        shutil.rmtree(tmp)
+        planned = skill_import.install_bytes(staged)
+        qroot = tmp_path / "q"
+        skill_import.stage_to_disk(URL, "myskill", root=qroot)
+        installed, _, _ = skill_import.install("myskill", root=qroot)
+        lock = json.loads((installed.parent / "skills.lock").read_text())
+        assert lock["skills"]["myskill"]["files"] == {
+            rel: skill_import._sha256(item.data) for rel, item in planned.items()
+        }
+        assert (installed / "scripts" / "run.sh").stat().st_mode & 0o111
+
+    def test_a_binary_file_put_in_the_quarantine_is_not_installed_and_said(
+        self, tmp_path, approved_skill_source
+    ):
+        make_repo(approved_skill_source.repo)
+        qroot = tmp_path / "q"
+        _, dest, _ = skill_import.stage_to_disk(URL, "myskill", root=qroot)
+        (dest / "blob.bin").write_bytes(b"\xff\xfe\x00")
+        installed, _, note = skill_import.install("myskill", root=qroot)
+        assert not (installed / "blob.bin").exists()
+        assert "binary files in the staged copy were not installed: blob.bin" in note

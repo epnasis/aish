@@ -77,7 +77,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `session.py` | `docs/session-log.md` |
 | `server.py`, `pty_session.py`, `email_poll.py`, `schedule.py`, `scheduler.py`, `schedule_task` | `docs/web-server.md` |
 | `aish/static/` (`app.js`, `style.css`, `sw.js`) | `docs/web-frontend.md` |
-| `skills.py`, `embeddings.py`, `curate.py`, `skill_import.py`, `skill_catalog.py`, `skill_runner.py`, `skill_env.py`, `skill_grants.py`, `use_skill`, `entities.py` | `docs/knowledge-layer.md` (+ `docs/sandbox.md` "Tier S" for the runner's profile) |
+| `skills.py`, `embeddings.py`, `curate.py`, `skill_import.py`, `skill_catalog.py`, `skill_outdated.py`, `skill_runner.py`, `skill_env.py`, `skill_grants.py`, `use_skill`, `entities.py` | `docs/knowledge-layer.md` (+ `docs/sandbox.md` "Tier S" for the runner's profile) |
 | `rules.py`, `rule_compiler.py`, `seed_rules`, `_rule_gate` | `docs/rules-engine.md` |
 | `roles.py`, `aish/charters/`, `web_search`'s rendering, anything a role reads or a charter declares | `docs/roles.md` |
 | `objective.py`, the tracker charter, the `objective` record, the objective strip, anything that reads or writes what a chat is FOR | `docs/objective.md` |
@@ -154,7 +154,7 @@ Model execution is **stateless**: every `run_command` runs in the project direct
 - **`entities.py`** — the files on people, organisations, accounts and interests: two sections (*From him* / *Read somewhere*) that only its writer chooses, by whether the CHAT ever read outside content; the name rail preloads *From him* alone, and recall's rendering of the rest taints. → `docs/knowledge-layer.md`
 - **`embeddings.py`** — the semantic layer over retrieval. Lexical word-matching is the guaranteed floor; embeddings are an upgrade, never a dependency. → `docs/knowledge-layer.md`
 - **`curate.py`** — the retrieval self-curation loop; the orchestration lives in the script, not in a model session. → `docs/knowledge-layer.md`
-- **`skill_import.py` + `import_skill`** — import a skill from a git repo or local path under ONE consolidated review. Safety is enforced in code, not by asking the model. → `docs/knowledge-layer.md`
+- **`skill_import.py` + `import_skill`** — import a skill from an approved GitHub source under ONE consolidated review; `aish skill outdated` (`skill_outdated.py`) reports which have moved on upstream. Safety is enforced in code, not by asking the model. → `docs/knowledge-layer.md`
 - **`skill_catalog.py` + `find_skill`** — search the owner's approved skill sources: each cloned through the import's own seam, cached 24 h, ranked lexically on this machine (the query never leaves it). The result is outside content and installs nothing. → `docs/knowledge-layer.md`
 - **`skill_runner.py` + `use_skill`** — a third-party skill run in quarantine (#467): a throwaway conversation of the skill, the brief and the input paths only, a closed three-tool loop whose every command runs under the Tier S sandbox, and a code-composed result. The SECOND execution point (L1); its control is the kernel, and every run is carded unless the owner's standing grant (`skill_grants.py`, bound to the skill's reviewed hashes) covers it. `skill_env.py` derives a skill's packages from its imports and installs them on the import's approval, never at run time. → `docs/knowledge-layer.md`
 - **`rules.py`** — the rules engine (#191): owner-authored turn contracts the harness enforces. Rules only ever RESTRICT, so a bug over-restricts and can never under-restrict. → `docs/rules-engine.md`

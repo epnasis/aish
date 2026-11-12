@@ -589,7 +589,21 @@ thousands of entries without bloating the context.
   `!` commands are not affected. A command that reaches them through a path
   its text does not show (a script that computes it) is not caught. Retiring or removing a third-party skill is
   your own edit. A skill you wrote yourself and want trusted goes into `skills/` by
-  hand, not through import.
+  hand, not through import. Both ways of importing install exactly the same
+  bytes (keywords cleaned, a final newline added to a text file without one);
+  since this version that includes `aish skill approve`, which used to install
+  such a file without the newline. **`aish skill outdated`** reports, per
+  imported skill, whether its source has moved on: "up to date"; "new commits
+  upstream; this skill's files unchanged"; "CHANGED upstream: added / removed /
+  modified / executable bit changed on …"; "its folder is gone upstream"; "no
+  recorded review — delete it and import again"; "source no longer approved —
+  not checked" (a publisher you removed from `skill-sources` is never
+  contacted); or the error the source answered with. It asks each source
+  which commit it is at and makes at most one shallow clone per source; text
+  files are compared, binary files are not. It installs nothing and writes
+  nothing — to take a newer version, delete the skill and import it again.
+  A skill installed with `aish skill approve` before this version shows its
+  files once as "modified … (only a final newline added)".
 - **Plugin tools** — where a skill *teaches*, a tool *does*. A droppable
   `<name>/TOOL.md` the model calls exactly like a built-in tool, choosing from a
   schema instead of improvising a shell command. Reserve one for an operation

@@ -4722,6 +4722,35 @@ class TestSkillImport:
         assert (dest_root / "myskill" / "SKILL.md").exists()
         assert (dest_root / "myskill" / "scripts" / "run.sh").exists()
 
+    def test_the_lock_describes_install_bytes(self, tmp_path, approved_skill_source):
+        """#467 slice 4b: the card path writes exactly `install_bytes`, and
+        the lock's hashes, read back from disk, are of exactly those bytes."""
+        import shutil
+
+        import aish.skills as skills_mod
+        from aish import skill_import
+
+        self._make_repo(approved_skill_source.repo)
+        (approved_skill_source.repo / "myskill" / "notes.md").write_text("no newline")
+        _, _, staged, _, tmp = skill_import.stage(approved_skill_source.url, "myskill")
+        shutil.rmtree(tmp)
+        planned = skill_import.install_bytes(staged)
+        agent, _ = make_agent(
+            [
+                model_says(tool_calls=[self._import(approved_skill_source, "myskill")]),
+                model_says("done"),
+            ],
+            cwd=str(tmp_path), approve_import=lambda **k: True,
+        )
+        agent.run_task("go")
+        tree = skills_mod.VENDOR_SKILLS_DIR
+        assert skill_import.recorded_hashes(tree, "myskill") == {
+            rel: skill_import._sha256(item.data) for rel, item in planned.items()
+        }
+        for rel, item in planned.items():
+            assert (tree / "myskill" / rel).read_bytes() == item.data
+        assert (tree / "myskill" / "scripts" / "run.sh").stat().st_mode & 0o111
+
     def test_import_denied_installs_nothing(self, tmp_path, monkeypatch, approved_skill_source):
         import aish.skills as skills_mod
 

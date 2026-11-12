@@ -2521,7 +2521,7 @@ def _audit_staged(name: str, dest: Path):
 
 
 def _skill_cli(args: list[str]) -> int:
-    """`aish skill <import|approve|list|discard|revoke>` — the review-in-your-editor
+    """`aish skill <import|approve|list|discard|revoke|outdated>` — the review-in-your-editor
     path for skill imports (#139). `import` STAGES to a quarantine dir (nothing
     installed); you review the files with your own tools, then `approve` installs.
     For in-session import with an inline review card, just ask aish to import.
@@ -2529,12 +2529,14 @@ def _skill_cli(args: list[str]) -> int:
     a local path (#467) — because `stage` decides, and both paths reach it.
     `revoke` withdraws an "Always for this skill" grant (slice 2c): it can only
     take a permission away, so it is the one write here the model may also
-    reach (through a carded command) without that mattering."""
+    reach (through a carded command) without that mattering. `outdated`
+    reports which installed third-party skills changed upstream (slice 4b):
+    it reads, asks the approved sources, and installs and writes nothing."""
     from . import skill_grants, skill_import
 
     usage = (
         "usage: aish skill <import https://github.com/OWNER/REPO [PATH] | approve NAME "
-        "| list | discard NAME | revoke NAME>"
+        "| list | discard NAME | revoke NAME | outdated>"
     )
     if not args:
         print(usage)
@@ -2576,6 +2578,19 @@ def _skill_cli(args: list[str]) -> int:
         ok = skill_import.discard(rest[0])
         print(f"discarded {rest[0]}" if ok else f"{rest[0]}: not staged")
         return 0 if ok else 1
+    if cmd == "outdated" and not rest:
+        from . import skill_outdated
+
+        rows = skill_outdated.check()
+        if not rows:
+            print("(no third-party skills installed)")
+            return 0
+        width = max(len(row.name) for row in rows)
+        for row in rows:
+            print(f"{_plain(row.name.ljust(width))}  {_plain(row.line)}")
+        print(f"{DIM}nothing was installed; to take a newer version, delete the skill "
+              f"and import it again{RESET}")
+        return 0
     if cmd == "revoke" and rest:
         before = skill_grants.last_act(rest[0])
         if not skill_grants.revoke(rest[0], "aish skill revoke"):
