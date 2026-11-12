@@ -331,9 +331,13 @@ def search(query: str, catalogs: list[SourceCatalog], top: int = FIND_TOP) -> li
         for row in source.rows:
             if row.error:
                 continue
+            # Matched over what is SHOWN: a description stuffed with every
+            # keyword past the cap could otherwise rank first for any query and
+            # hide the every-name listing (review of d4ced685, note A).
+            shown = row.description[: skills.INDEX_THIRD_PARTY_DESCRIPTION_MAX]
             entries.append(skills.Entry(
-                name=row.name, description=row.description, keywords=[], body="",
-                kind="skill", words=skills._build_words(row.name, row.description),
+                name=row.name, description=shown, keywords=[], body="",
+                kind="skill", words=skills._build_words(row.name, shown),
             ))
             rows.append((row, source))
     tiers = {id(entry): tier for tier, entry in skills.score_entries(entries, query)}

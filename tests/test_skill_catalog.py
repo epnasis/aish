@@ -275,6 +275,25 @@ class TestTheCatalogue:
         assert "pdf-lite — installed" not in result
 
 
+    def test_only_the_shown_description_is_matched(self):
+        """A keyword past the cap on what is shown cannot rank a row (review
+        of d4ced685, note A): a description stuffed with every word would
+        otherwise beat the every-name listing for any query."""
+        from aish import skills as skills_mod
+
+        filler = "x" * skills_mod.INDEX_THIRD_PARTY_DESCRIPTION_MAX
+        catalogs = [skill_catalog.SourceCatalog(
+            source="github.com/acme/skills", repo="acme/skills", commit="c",
+            rows=[skill_catalog.Row(path="skills/stuffed", name="stuffed",
+                         description=f"Does things. {filler} excel spreadsheet"),
+                  skill_catalog.Row(path="skills/xlsx", name="xlsx",
+                         description="Use when working with Excel spreadsheets.")],
+        )]
+        names = [hit.row.name for hit in skill_catalog.search("excel", catalogs)]
+        assert "stuffed" not in names
+        assert names[:1] == ["xlsx"]
+
+
 class TestTheCatalogueCache:
     def test_a_fresh_cache_answers_without_a_clone_and_says_its_age(self, sources):
         write_skill(sources.repo("acme", "skills") / "pdf", "pdf", "PDF tools")
