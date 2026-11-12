@@ -960,7 +960,8 @@ lives. `TestAdmission`, `TestOwnerCases`.
 `roles.Status`'s own word, never matched on error text — means no key, or a call that was
 refused or failed: nothing about the model's quality. The script stops at that case (the
 remaining calls could not be recorded), prints that the run could not complete, leaves
-`admission.json` byte-for-byte as it was, and exits 3 (`EXIT_INCOMPLETE`), distinct from 1
+that charter's record in `admission.json` as it was (in a sweep over several charters, ones
+that completed earlier are still written), and exits 3 (`EXIT_INCOMPLETE`), distinct from 1
 (examined and failed) and 2 (could not start). Found live on 2026-11-12: an all-503 Gemini
 run overwrote the auditor's record for that model with 0/16. An `invalid` answer is the
 model answering badly and IS recorded as a failure. `tests/test_role_admission.py::TestAnIncompleteRun`.
