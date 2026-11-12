@@ -94,6 +94,7 @@ This binds your own diagnoses too: a hypothesis is for designing the experiment 
 | `replay.py`, `replay_driver.py`, `replay_checks.py`, `evals/`, `aish-replay` | `docs/replay.md` |
 | `mailbank.py` (the bank as a settlement source: the daily `bank_sync` run, the read-only ledger, amounts recorded at ingest, the match and the pairing ledger) | `docs/mail-assistant.md` §The bank as a settlement source |
 | `mailindex.py`, `mailgate.py`, `mailcases.py`, `mailreader.py`, `mailverdicts.py`, `mailwatch.py`, `mailsource.py`, `mailtuta.py`, `mailview.py` (`/mail`), `mailbacktest.py`, `mailcasetool.py` (the `cases` tool), `mailprefs.py` (the `inbox_preferences` tool), `mailitems.py` (open items and their settlement), `mailsettle.py` (the settlement judge), `mailitemtool.py` (the `inbox_items` tool), `mailvouch.py` (his settler vouches), the mail-reader and item-settler charters, the `mail_verdict`, `case_act`, `preference_act` and `item_act` records | `docs/mail-assistant.md` |
+| `paynotes.py` (the payment notes index and its invoice facts), `invoicefacts.py`, `aish paynotes` | `docs/payments.md` |
 
 **New rationale goes in the area's doc, never here.** This file spent a year as a decision log — a paragraph per issue — and grew past the 150k-char limit Claude Code warns at, which is the point where the whole thing stops being reliable context. `tests/test_claude_md_size.py` fails if it passes 40k. Add a line here only for a rule that applies to *every* task; everything else belongs in `docs/`.
 

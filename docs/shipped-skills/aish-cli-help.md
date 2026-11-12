@@ -78,7 +78,7 @@ Tab completes them, and an unambiguous prefix works (`/res` for `/resume`).
 - How full the context was on the last model call is shown at the right end of the line under the prompt (`ctx 34% · 68.0k/200.0k`); a leading `~` means estimated from characters, because Ollama does not report the prompt prefix it reused.
 
 ## Payment notes index
-- aish-web keeps an index of the bill notes in the vault's `Payments/` folder, refreshed at start and daily (`AISH_PAYNOTES=0` turns it off). `aish paynotes` prints its counts, age and last outcome — never note content. It only reads the index: the terminal cannot open the vault, so it cannot refresh it.
+- aish-web keeps an index of the bill notes in the vault's `Payments/` folder, refreshed at start and daily (`AISH_PAYNOTES=0` turns it off). `aish paynotes` prints its counts, age and last outcome — never note content. It only reads the index: the terminal cannot open the vault, so it cannot refresh it. It also counts the invoice facts aish-web reads from the notes' attached invoices (attachments listed, read by text layer / OCR, not read with an outcome word, with a valid account, with a payable amount, given up on, found outside the note's own folders, one file behind several notes, remaining) — counts only, never an account or amount; `AISH_PAYNOTES_INVOICES=0` turns that collection off alone.
 
 ## Config
 - Config file: `~/.config/aish/config.toml`. Keys: `vi_mode`, `model`, `num_ctx`, `max_steps`, and an `[aliases]` table. `vi_mode = true` turns on vi editing at the prompt.

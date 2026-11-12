@@ -62,6 +62,8 @@ STARTUP_SECONDS = 20.0
 _POLL_SECONDS = 0.25
 
 _ONE_AT_A_TIME = threading.Lock()
+#: The nice value of a background child: the lowest CPU priority there is.
+LOW_PRIORITY = 19
 
 # Pictures the recognizer reads (macOS ImageIO decodes each; Vision applies a
 # photo's EXIF orientation itself — measured on an iPhone JPEG stored rotated).
@@ -154,6 +156,7 @@ def recognise(
     pictures: dict[int, bytes],
     should_stop: Callable[[], bool] | None = None,
     seconds_each: float | None = None,
+    low_priority: bool = False,
 ) -> Batch:
     """Recognise the text on each picture (page number -> picture bytes: a
     rasterised PDF page, or a picture file's own bytes).
@@ -161,7 +164,11 @@ def recognise(
     Raises OcrUnavailable when recognition cannot run at all. A failure on one
     page, a crashed child or the deadline lands in `Batch.failed` for exactly
     the pages it cost; a Stop leaves the unfinished pages out of both maps and
-    sets `stopped`."""
+    sets `stopped`.
+
+    `low_priority` runs the child at the lowest CPU priority: for unattended
+    background reading (the payment invoices, docs/payments.md), which must
+    yield to the owner's own work and to a local model on the same machine."""
     if reason := unavailable_reason():
         raise OcrUnavailable(reason)
     if not pictures:
@@ -176,11 +183,15 @@ def recognise(
             path = Path(scratch) / f"p{number}{suffix}"
             path.write_bytes(data)
             request[str(number)] = str(path)
-        return run_child(request, deadline, should_stop)
+        return run_child(request, deadline, should_stop, low_priority=low_priority)
 
 
 def run_child(
-    request: dict[str, str], deadline: float, should_stop: Callable[[], bool] | None = None
+    request: dict[str, str],
+    deadline: float,
+    should_stop: Callable[[], bool] | None = None,
+    *,
+    low_priority: bool = False,
 ) -> Batch:
     """Run the worker over `request` (page -> picture path) and collect what it
     printed, whatever way it ended."""
@@ -195,6 +206,13 @@ def run_child(
         # lose every page already finished.
         errors="replace",
     )
+    if low_priority:
+        # After the spawn rather than in a preexec_fn, which is unsafe in a
+        # threaded server; the child's first moments run at normal priority.
+        try:
+            os.setpriority(os.PRIO_PROCESS, child.pid, LOW_PRIORITY)
+        except OSError:
+            pass
     started = time.monotonic()
     payload: str | None = json.dumps({"pages": request})
     ended = ""  # "", "deadline" or "stopped"

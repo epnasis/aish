@@ -126,6 +126,11 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `mailcases._IDENTITY_MARKERS` | PL + EN + DE | breaks | yes | `_identifier_shaped`: a token that is a reference by its own shape needs no marker | 5 |
 | `mailcases._KEY_CONNECTORS` | EN + PL | breaks | yes | none — the pre-existing connectors of the key pattern | 3 |
 | `mailcases._CURRENCY_WORDS` | currency signs and ISO codes | breaks | yes | — | 10 |
+| `invoicefacts._PAYABLE_WORDS` | PL + EN | breaks | yes | none — every amount is extracted whatever its line says; the list only flags | 10 |
+| `invoicefacts._DUE_WORDS` | PL + EN | breaks | yes | none — every date is extracted; the list only flags | 7 |
+| `invoicefacts._INVOICE_WORDS` | PL + EN | breaks | yes | — | 13 |
+| `invoicefacts._ACCOUNT_WORDS` | PL + EN | breaks | yes | the mod-97 checksum decides what IS an account; the list only says it sits near a payment word | 12 |
+| `invoicefacts._MONTHS` | PL month names | breaks | yes | numeric dates need no word | 24 |
 | `signin._SECOND_LEVEL` | public suffixes | friction | **no** | — | 10 |
 | `web._NOT_BUYABLE` | schema.org enum | breaks | **no** | subset of `web._AVAILABILITY`, tested at the same call site | 3 |
 
@@ -144,6 +149,16 @@ into `<state>/mail/runs-YYYYMMDD.jsonl` in the `vocab` record shape, and `vocab.
 files beside the session logs.
 
 `mailreport._ONE_TIME_CODE_PHRASES` came later still (2026-10-28, the daily inbox report): matched word-bounded against the folded Reader `kind` and the subject. `friction`: a miss puts one code mail in the report, and a false match hides a mail from the report — COUNTED there as a one-time code, the mail itself untouched. `mailreader._DOCUMENT_SUFFIXES` came later (2026-10-27, the keeper clamp). It is `breaks`, not `permits`, because the clamp only ever keeps a mail visible: a miss loses one keeper signal and the mail is filed as the Reader answered, and nothing is ever let through by it.
+
+### The invoice-facts lists (2026-11-12)
+
+Five lists arrived with the invoice facts (`docs/payments.md`, "Invoice facts"). They are matched against an invoice's text — its text layer or OCR — in aish-web's background refresh.
+
+**They flag; they never select.** Every amount, date and checksum-valid account is extracted whatever its line says, so a miss leaves a fact unflagged and never drops one. That makes each list `breaks`, not `permits`, and none is demanded: most lines of an invoice carry none of these words.
+
+Each list is folded on both sides — diacritics off, `ł` to `l`, case folded — so `NALEZNOSC`, `należność` and `Należność` are one entry. They are consulted once per document per list. The refresh has no session, so the tallies drain into whichever session flushes next, like any process-wide consultation.
+
+Every entry must start at a word start and may run on with no right boundary. So the stem `wpłat` in `_ACCOUNT_WORDS` finds `wpłata` and `wpłaty`, and `total` also finds `totals`. `_MONTHS` is a dict (name → month number) holding the nominative and genitive forms.
 
 ### The entries worth arguing about
 

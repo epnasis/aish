@@ -2258,7 +2258,10 @@ class WebServer:
         if paynotes.enabled():
             cwd = self.base_cwd or str(self.state_dir)
             self.paynotes = paynotes.Refresher(
-                self.state_dir, make_runner=lambda: paynotes.plugin_runner(cwd)
+                self.state_dir, make_runner=lambda: paynotes.plugin_runner(cwd),
+                # Read from the refresher's thread: a snapshot of plain bools,
+                # and a stale answer only defers or allows one attachment.
+                busy=lambda: any(s.busy for s in list(self.sessions.values())),
             )
             self.paynotes_task = asyncio.ensure_future(self.paynotes.run())
 

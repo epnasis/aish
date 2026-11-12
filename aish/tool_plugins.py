@@ -34,6 +34,8 @@ import os
 import re
 import shutil
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -706,6 +708,7 @@ def execute(
     store_dir=None,
     extra_env: dict | None = None,
     downloads_dir=None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> ToolOutcome:
     """Run the tool: validated args as JSON on stdin, raw output + exit code
     back. No shell — the args never pass through shell word-splitting.
@@ -742,7 +745,12 @@ def execute(
     never into args, so a value can't leak into logs or the model's context. A
     declared-but-unset secret is a hard error rather than a silent empty env;
     an unavailable OPTIONAL secret is left out and named, with what the store
-    reported, in OPTIONAL_SECRETS_UNAVAILABLE."""
+    reported, in OPTIONAL_SECRETS_UNAVAILABLE.
+
+    ``should_stop`` (optional; no interactive caller passes it) is polled while
+    the wrapper runs, and a True kills it: an unattended background caller
+    (the payment invoices) must not hold a shutdown for the tool's whole
+    timeout. Without it the run is exactly the plain `subprocess.run`."""
     exe = resolve_executable(tool.dir, tool.executable)
     if exe is None:
         return ToolOutcome(
@@ -787,14 +795,24 @@ def execute(
             env = dict(os.environ)
         _inject_optional_secrets(tool, env, get_secret)
     try:
-        proc = subprocess.run(
-            [exe],
-            input=json.dumps(args),
-            capture_output=True,
-            text=True,
-            timeout=tool.timeout,
-            cwd=cwd,
-            env=env,
+        if should_stop is None:
+            proc = subprocess.run(
+                [exe],
+                input=json.dumps(args),
+                capture_output=True,
+                text=True,
+                timeout=tool.timeout,
+                cwd=cwd,
+                env=env,
+            )
+        else:
+            proc = _run_stoppable(exe, json.dumps(args), tool.timeout, cwd, env, should_stop)
+    except _Stopped:
+        return ToolOutcome(
+            f"ERROR: tool {tool.name!r} was stopped",
+            status=STATUS_FAILED,
+            verdict_by=VERDICT_EXCEPTION,
+            error="stopped",
         )
     except subprocess.TimeoutExpired:
         return ToolOutcome(
@@ -830,6 +848,37 @@ def execute(
         store_dir,
         required=None if tool.returns is None else list(tool.returns),
     )
+
+
+class _Stopped(Exception):
+    """`should_stop` said so while the wrapper ran; the wrapper was killed."""
+
+
+def _run_stoppable(
+    exe: str, payload: str, timeout: float, cwd: str, env, should_stop: Callable[[], bool]
+) -> subprocess.CompletedProcess:
+    """`subprocess.run` with the same timeout, polling `should_stop` every
+    quarter second and killing the wrapper when it says so."""
+    child = subprocess.Popen(
+        [exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, cwd=cwd, env=env,
+    )
+    started = time.monotonic()
+    pending: str | None = payload
+    while True:
+        try:
+            out, err = child.communicate(pending, timeout=0.25)
+            return subprocess.CompletedProcess([exe], child.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            pending = None
+            if should_stop():
+                child.kill()
+                child.communicate()
+                raise _Stopped from None
+            if time.monotonic() - started > timeout:
+                child.kill()
+                child.communicate()
+                raise
 
 
 def envelope(

@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import stat
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
@@ -22,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from aish import paynotes, tool_plugins
+from aish import invoicefacts, paynotes, tool_plugins
 
 NOW = datetime(2026, 11, 12, 9, 0, 0)
 ACCOUNT_SPACED = "72 1240 6960 1701 0800 0024 2857"
@@ -51,7 +52,12 @@ def _hit(name: str, modified: str = "2026-11-01 10:00", size: int = 900,
 
 
 class FakeVault:
-    """The two plugin tools over an in-memory folder."""
+    """The three plugin tools over an in-memory folder.
+
+    `obsidian_attachment` is mirrored from its wrapper: the copy lands in
+    `AISH_TOOL_DOWNLOADS_DIR` (which `execute` sets from `downloads_dir`)
+    under the attachment's basename, and stdout is attachlib.saved_entry's
+    row plus `from_vault` and `vault`."""
 
     def __init__(self) -> None:
         self.hits: list[dict] = []
@@ -59,6 +65,10 @@ class FakeVault:
         self.errors: dict[str, str] = {}
         self.calls: list[tuple[str, dict]] = []
         self.list_error = ""
+        self.files: dict[tuple[str, str], bytes] = {}
+        self.file_errors: dict[tuple[str, str], str] = {}
+        self.downloads: list[Path | None] = []
+        self.on_fetch = None
 
     def add(self, name: str, frontmatter: dict, content: str = "", **hit) -> None:
         h = _hit(name, **hit)
@@ -68,8 +78,35 @@ class FakeVault:
     def reads(self) -> list[str]:
         return [a["note"] for n, a in self.calls if n == paynotes.READ_TOOL]
 
-    def __call__(self, name: str, args: dict) -> str:
+    def fetches(self) -> list[tuple[str, str]]:
+        return [(a["note"], a["name"]) for n, a in self.calls if n == paynotes.INVOICE_TOOL]
+
+    def attach(self, note: str, name: str, data: bytes) -> None:
+        self.files[(f"Payments/{note}.md", name)] = data
+
+    def _fetch(self, name: str, args: dict, downloads_dir: Path | None) -> str:
+        self.downloads.append(downloads_dir)
+        if self.on_fetch is not None:
+            self.on_fetch(args)
+        key = (args["note"], args["name"])
+        if key in self.file_errors:
+            return _err(name, self.file_errors[key])
+        if key not in self.files:
+            return _err(name, f"no attachment named {args['name']!r} found anywhere in the vault")
+        directory = Path(downloads_dir) if downloads_dir else Path(tempfile.mkdtemp())
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / Path(args["name"]).name
+        target.write_bytes(self.files[key])
+        return _ok(name, {"filename": target.name, "path": str(target),
+                          "bytes": target.stat().st_size, "mime": None,
+                          "from_vault": f"Payments/attachments/{args['name']}",
+                          "vault": "Main"})
+
+    def __call__(self, name: str, args: dict, downloads_dir: Path | None = None,
+                 should_stop=None) -> str:
         self.calls.append((name, dict(args)))
+        if name == paynotes.INVOICE_TOOL:
+            return self._fetch(name, args, downloads_dir)
         if name == paynotes.LIST_TOOL:
             if self.list_error:
                 return _err(name, self.list_error)
@@ -671,3 +708,859 @@ class TestPaynotesCli:
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
         cli._paynotes_cli([])
         assert os.listdir(tmp_path) == []
+
+
+# ------------------------------------------------------------ invoice facts
+
+INVOICE_TEXT = (
+    "Faktura VAT nr FV/123/2026\n"
+    f"Numer rachunku: {ACCOUNT_SPACED}\n"
+    "Razem do zapłaty: 496,33 zł\n"
+    "Termin płatności: 24.11.2026\n"
+)
+
+
+class FakeReader:
+    """The reader child's seam: `invoicereader.run_reader`'s answer shape,
+    per-page facts and never text. Answers by the file's bytes (a dict, or a
+    callable of the `skip` set); `calls` records what it was handed."""
+
+    def __init__(self) -> None:
+        self.answers: dict = {}
+        self.calls: list[tuple[Path, Path, set, float]] = []
+        self.active = 0
+        self.max_active = 0
+        self.raise_on: set[bytes] = set()
+        self.on_read = None
+
+    def __call__(self, source: Path, store: Path, skip: set, seconds: float,
+                 should_stop) -> dict:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            self.calls.append((source, store, set(skip), seconds))
+            data = source.read_bytes()
+            if self.on_read is not None:
+                self.on_read(source)
+            if data in self.raise_on:
+                raise RuntimeError("the pipeline broke on " + source.name)
+            answer = self.answers.get(data)
+            if callable(answer):
+                return answer(skip)
+            return answer or text_answer(INVOICE_TEXT)
+        finally:
+            self.active -= 1
+
+
+def text_answer(*pages: str) -> dict:
+    return {"kind": "pdf", "pages_total": len(pages),
+            "pages": {i: {"how": "text", "facts": invoicefacts.page_facts(t)}
+                      for i, t in enumerate(pages, start=1)}}
+
+
+def _invoice_vault(*names: str) -> FakeVault:
+    """Notes in listing order (newest first), each with one PDF attached."""
+    v = FakeVault()
+    for i, name in enumerate(names):
+        attachment = f"{name}.pdf"
+        v.add(name, _fm(attachments=[f"[[{attachment}]]"]),
+              modified=f"2026-11-{12 - i:02d} 10:00")
+        v.attach(name, attachment, f"%PDF-1.7 {name}".encode())
+    return v
+
+
+def _invoices(state_dir: Path) -> dict[str, dict]:
+    lines = paynotes.invoices_path(state_dir).read_text().splitlines()
+    return {r["name"]: r for r in map(json.loads, lines)}
+
+
+def _both(v, state_dir: Path, reader=None, **kwargs) -> dict:
+    paynotes.refresh(v, state_dir, NOW)
+    return paynotes.refresh_invoices(v, state_dir, NOW, read=reader or FakeReader(), **kwargs)
+
+
+class TestInvoiceFetch:
+    def test_the_plugins_real_arguments_and_the_scratch_downloads_dir(self, tmp_path):
+        v = _invoice_vault("2026-11 E.ON")
+        _both(v, tmp_path)
+        assert v.fetches() == [("Payments/2026-11 E.ON.md", "2026-11 E.ON.pdf")]
+        ((_, args),) = [c for c in v.calls if c[0] == paynotes.INVOICE_TOOL]
+        assert args == {"note": "Payments/2026-11 E.ON.md", "name": "2026-11 E.ON.pdf",
+                        "wait": paynotes.INVOICE_FETCH_WAIT}
+        assert v.downloads == [paynotes.scratch_dir(tmp_path) / "fetch"]
+
+    def test_the_copy_is_read_inside_the_private_scratch_and_deleted(self, tmp_path):
+        v = _invoice_vault("2026-11 E.ON")
+        seen: list[tuple[str, int]] = []
+        reader = FakeReader()
+        reader.on_read = lambda source: seen.append(
+            (str(source), stat.S_IMODE(source.parent.parent.stat().st_mode)))
+        _both(v, tmp_path, reader)
+        scratch = paynotes.scratch_dir(tmp_path)
+        assert seen == [(str(scratch / "fetch" / "2026-11 E.ON.pdf"), 0o700)]
+        assert reader.calls[0][1] == scratch / "renditions"
+        assert reader.calls[0][2] == set()  # nothing read before: no page skipped
+        assert not scratch.exists()
+        assert sorted(os.listdir(paynotes.payments_dir(tmp_path))) == [
+            "index.json", "invoices.jsonl", "notes.jsonl"]
+
+    def test_deleted_on_every_failure_path(self, tmp_path, monkeypatch):
+        v = _invoice_vault("2026-11 A", "2026-11 B", "2026-11 C", "2026-11 D")
+        v.file_errors[("Payments/2026-11 A.md", "2026-11 A.pdf")] = (
+            "'2026-11 A.pdf' is offloaded to iCloud and did not finish downloading within 60s.")
+        reader = FakeReader()
+        reader.raise_on.add(b"%PDF-1.7 2026-11 B")
+        reader.answers[b"%PDF-1.7 2026-11 C"] = {
+            "kind": "other", "pages_total": 0, "pages": {},
+            "reason_class": paynotes.NOT_A_DOCUMENT, "reason": "neither"}
+        v.files[("Payments/2026-11 D.md", "2026-11 D.pdf")] = b"x" * 64
+        monkeypatch.setattr(paynotes, "MAX_ATTACHMENT_BYTES", 32)
+        _both(v, tmp_path, reader)
+        recs = _invoices(tmp_path)
+        assert (recs["2026-11 A.pdf"]["status"], recs["2026-11 A.pdf"]["reason_class"]) == (
+            "unread", "fetch failed")
+        assert recs["2026-11 A.pdf"]["reason"].startswith("ERROR: '2026-11 A.pdf' is offloaded")
+        assert (recs["2026-11 B.pdf"]["reason_class"], recs["2026-11 B.pdf"]["reason"]) == (
+            "error", "RuntimeError")
+        assert recs["2026-11 C.pdf"]["reason_class"] == "not a pdf or picture"
+        assert recs["2026-11 D.pdf"]["reason_class"] == "too large"
+        assert all(r["read_as"] == "not read" for r in recs.values())
+        assert not paynotes.scratch_dir(tmp_path).exists()
+
+    def test_a_reported_path_outside_the_scratch_is_never_read_nor_deleted(self, tmp_path,
+                                                                         monkeypatch):
+        # pytest's tmp_path is itself under the system temp dir, where a stray
+        # copy WOULD be removed (TestInvoiceStrayCopy); point that elsewhere.
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "systemp"))
+        v = _invoice_vault("2026-11 E.ON")
+        elsewhere = tmp_path / "elsewhere.pdf"
+        elsewhere.write_bytes(b"%PDF-1.7 elsewhere")
+
+        def lying(name, args, downloads_dir=None, should_stop=None):
+            text = v(name, args, downloads_dir)
+            if name == paynotes.INVOICE_TOOL:
+                reported = str(Path(downloads_dir) / "2026-11 E.ON.pdf")
+                text = text.replace(json.dumps(reported)[1:-1], str(elsewhere))
+            return text
+
+        reader = FakeReader()
+        state = tmp_path / "state"
+        paynotes.refresh(v, state, NOW)
+        paynotes.refresh_invoices(lying, state, NOW, read=reader)
+        rec = _invoices(state)["2026-11 E.ON.pdf"]
+        assert (rec["status"], rec["reason_class"]) == ("unread", "fetch failed")
+        assert reader.calls == [] and elsewhere.exists()
+        assert not paynotes.scratch_dir(state).exists()
+
+    def test_through_execute_the_wrapper_is_handed_the_scratch_dir(self, tmp_path):
+        """The real runner: `downloads_dir` reaches the wrapper as
+        AISH_TOOL_DOWNLOADS_DIR, which is where obsidian_attachment copies to
+        (attachlib.download_dir); without it the copy would go to a temp dir
+        nothing deletes."""
+        tool_dir = tmp_path / "tools" / paynotes.INVOICE_TOOL
+        tool_dir.mkdir(parents=True)
+        wrapper = tool_dir / "wrapper"
+        wrapper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "args = json.load(sys.stdin)\n"
+            "d = os.environ['AISH_TOOL_DOWNLOADS_DIR']\n"
+            "p = os.path.join(d, args['name'])\n"
+            "open(p, 'wb').write(b'%PDF-1.7 x')\n"
+            "print(json.dumps({'filename': args['name'], 'path': p, 'bytes': 10,\n"
+            "                  'mime': None, 'from_vault': 'Payments/attachments/x',\n"
+            "                  'vault': 'Main'}, indent=2))\n"
+        )
+        wrapper.chmod(0o755)
+        schema = {k: {"type": t} for k, t in (("note", "string"), ("name", "string"),
+                                              ("wait", "number"), ("vault", "string"))}
+        tool = tool_plugins.Tool(name=paynotes.INVOICE_TOOL, description="",
+                                 executable="./wrapper", mutating=False, schema=schema,
+                                 timeout=30, body="", dir=tool_dir)
+        runner = paynotes.PluginRunner({paynotes.INVOICE_TOOL: tool}, str(tmp_path))
+        fetch_dir, _store = paynotes._fresh_scratch(paynotes.scratch_dir(tmp_path))
+        payload, why = paynotes._call_json(
+            runner, paynotes.INVOICE_TOOL, {"note": "n", "name": "a.pdf", "wait": 60},
+            downloads_dir=fetch_dir)
+        assert why == "" and payload is not None
+        assert Path(payload["path"]) == fetch_dir / "a.pdf"
+        assert (fetch_dir / "a.pdf").read_bytes() == b"%PDF-1.7 x"
+
+    def test_plugin_runner_treats_a_mutating_attachment_tool_as_absent(self, monkeypatch):
+        from types import SimpleNamespace
+
+        def tools(mutating: bool):
+            return [SimpleNamespace(name=n, mutating=m) for n, m in (
+                (paynotes.LIST_TOOL, False), (paynotes.READ_TOOL, False),
+                (paynotes.INVOICE_TOOL, mutating))], []
+
+        monkeypatch.setattr(tool_plugins, "discover", lambda cwd: tools(False))
+        assert paynotes.INVOICE_TOOL in paynotes.plugin_runner("/x").tools
+        monkeypatch.setattr(tool_plugins, "discover", lambda cwd: tools(True))
+        runner = paynotes.plugin_runner("/x")
+        assert runner is not None and paynotes.INVOICE_TOOL not in runner.tools
+
+    def test_no_attachment_tool_is_an_outcome(self, tmp_path):
+        v = _invoice_vault("2026-11 E.ON")
+        paynotes.refresh(v, tmp_path, NOW)
+        runner = paynotes.PluginRunner({}, str(tmp_path))
+        section = paynotes.refresh_invoices(runner, tmp_path, NOW, read=FakeReader())
+        assert section["outcome"] == "no tool"
+        assert not paynotes.invoices_path(tmp_path).exists()
+        assert not paynotes.load_invoices(tmp_path).available
+
+    def test_no_notes_index_is_an_outcome(self, tmp_path):
+        section = paynotes.refresh_invoices(FakeVault(), tmp_path, NOW, read=FakeReader())
+        assert section["outcome"] == "no notes"
+
+
+def _pdf(path: Path, *, text_pages: list[str], scan_pages: int = 0) -> Path:
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = pymupdf.open()
+    for text in text_pages:
+        doc.new_page().insert_textbox(pymupdf.Rect(50, 50, 545, 700), text, fontsize=11)
+    if scan_pages:
+        src = pymupdf.open()
+        page = src.new_page()
+        page.insert_textbox(pymupdf.Rect(50, 50, 545, 700), "SCANNED. " * 200)
+        picture = page.get_pixmap(dpi=100).tobytes("png")
+        src.close()
+        for _ in range(scan_pages):
+            doc.new_page().insert_image(pymupdf.Rect(0, 0, 595, 842), stream=picture)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+PDF_TEXT = ("Faktura VAT nr FV/7/2026\nNumer rachunku: " + ACCOUNT_SPACED +
+            "\nRazem do zaplaty: 496,33 zl\n" + "Pozycja uslugi " * 10)
+
+
+class TestInvoiceReading:
+    """Through the REAL reader child (aish/invoicereader.py) with OCR off, as
+    the suite has it (`AISH_OCR=0`, inherited by the child)."""
+
+    def _through_refresh(self, path: Path, state: Path) -> tuple[dict, dict]:
+        v = FakeVault()
+        v.add("2026-11 E.ON", _fm(attachments=[f"[[{path.name}]]"]))
+        v.attach("2026-11 E.ON", path.name, path.read_bytes())
+        paynotes.refresh(v, state, NOW)
+        section = paynotes.refresh_invoices(v, state, NOW)
+        return _invoices(state)[path.name], section
+
+    def test_a_text_page_beside_an_unread_scan_is_partial(self, tmp_path):
+        """The hollow-extraction case: the text page's facts are kept, and the
+        record never claims the document was read whole."""
+        path = _pdf(tmp_path / "m.pdf", text_pages=[PDF_TEXT], scan_pages=1)
+        rec, _ = self._through_refresh(path, tmp_path / "state")
+        assert (rec["status"], rec["read_as"], rec["reason_class"]) == (
+            "partial", "text layer", "ocr unavailable")
+        assert (rec["pages"], rec["pages_text"], rec["pages_unread"]) == (2, 1, 1)
+        assert rec["facts"]["accounts"][0]["account"] == ACCOUNT
+        assert rec["page_detail"]["2"]["how"] == "unread"
+
+    def test_a_scan_with_nothing_read_keeps_no_facts(self, tmp_path):
+        path = _pdf(tmp_path / "s.pdf", text_pages=[], scan_pages=1)
+        rec, section = self._through_refresh(path, tmp_path / "state")
+        assert (rec["status"], rec["read_as"], rec["facts"]) == ("unread", "not read", None)
+        assert section["counts"]["not_read_reasons"] == {"ocr unavailable": 1}
+
+
+def _pages_answer(read: dict[int, str], total: int, unread_reason: str = "pages not read"):
+    """A reader answer for `total` pages of which `read` (number -> text) were
+    read; the rest unread."""
+    pages: dict[int, dict] = {}
+    for number in range(1, total + 1):
+        if number in read:
+            pages[number] = {"how": "ocr", "facts": invoicefacts.page_facts(read[number])}
+        else:
+            pages[number] = {"how": "unread", "reason_class": unread_reason,
+                             "reason": "the deadline came first"}
+    return {"kind": "pdf", "pages_total": total, "pages": pages}
+
+
+class TestInvoiceRetry:
+    def test_a_permanent_failure_is_given_up_after_three_fruitless_visits(self, tmp_path):
+        v = _invoice_vault("2026-11 A")
+        reader = FakeReader()
+        reader.answers[b"%PDF-1.7 2026-11 A"] = {
+            "kind": "pdf", "pages_total": 0, "pages": {},
+            "reason_class": paynotes.CONVERSION_FAILED, "reason": "broken"}
+        for _ in range(5):
+            _both(v, tmp_path, reader)
+        assert len(reader.calls) == paynotes.MAX_FRUITLESS_VISITS == 3
+        rec = _invoices(tmp_path)["2026-11 A.pdf"]
+        assert rec["gave_up"] == "gave up after 3 attempts without progress"
+        assert rec["reason_class"] == "conversion failed"
+        section = json.loads(paynotes.index_path(tmp_path).read_text())["invoices"]
+        assert section["counts"]["gave_up"] == 1 and section["outcome"] == "ok"
+        # A changed note gives it a fresh start.
+        v.add("2026-11 A", _fm(attachments=["[[2026-11 A.pdf]]"]), modified="2026-11-20 10:00")
+        _both(v, tmp_path, reader)
+        assert len(reader.calls) == 4
+        assert "gave_up" not in _invoices(tmp_path)["2026-11 A.pdf"]
+
+    def test_a_long_scan_adds_pages_visit_by_visit_and_never_rereads_one(self, tmp_path):
+        v = _invoice_vault("2026-11 A")
+        reader = FakeReader()
+        texts = {1: "Strona 1", 2: f"Rachunek {ACCOUNT_SPACED}", 3: "Do zapłaty 496,33 zł"}
+
+        def one_more_page(skip: set) -> dict:
+            todo = [n for n in sorted(texts) if n not in skip][:1]
+            answer = _pages_answer({n: texts[n] for n in todo}, 3)
+            for n in skip:
+                del answer["pages"][n]  # the child is never asked for them
+            return answer
+
+        reader.answers[b"%PDF-1.7 2026-11 A"] = one_more_page
+        sections = [_both(v, tmp_path, reader) for _ in range(3)]
+        assert [c[2] for c in reader.calls] == [set(), {1}, {1, 2}]
+        assert [s["counts"]["read_ok_this_run"] for s in sections] == [1, 1, 1]
+        rec = _invoices(tmp_path)["2026-11 A.pdf"]
+        assert (rec["status"], rec["pages_read"], rec["fruitless"]) == ("read", 3, 0)
+        assert rec["facts"]["accounts"][0]["account"] == ACCOUNT
+        assert {"minor": 49633, "currency": "PLN"}.items() <= rec["facts"]["amounts"][0].items()
+
+    def test_a_partial_that_reads_nothing_new_is_not_progress(self, tmp_path):
+        v = _invoice_vault("2026-11 A")
+        reader = FakeReader()
+        reader.answers[b"%PDF-1.7 2026-11 A"] = lambda skip: {
+            **_pages_answer({1: "Strona"} if not skip else {}, 2),
+            "pages": {} if skip else _pages_answer({1: "Strona"}, 2)["pages"]}
+        first = _both(v, tmp_path, reader)
+        second = _both(v, tmp_path, reader)
+        assert first["counts"]["read_ok_this_run"] == 1
+        assert second["counts"]["read_ok_this_run"] == 0
+        assert paynotes.next_wait({"outcome": "ok", "invoices": second}) == \
+            paynotes.REFRESH_EVERY
+        rec = _invoices(tmp_path)["2026-11 A.pdf"]
+        assert (rec["status"], rec["pages_read"], rec["fruitless"]) == ("partial", 1, 1)
+
+    def test_a_changed_file_starts_its_pages_afresh(self, tmp_path):
+        v = _invoice_vault("2026-11 A")
+        reader = FakeReader()
+        reader.answers[b"%PDF-1.7 2026-11 A"] = _pages_answer({1: "Strona"}, 2)
+        _both(v, tmp_path, reader)
+        v.attach("2026-11 A", "2026-11 A.pdf", b"%PDF-1.7 corrected")
+        v.add("2026-11 A", _fm(attachments=["[[2026-11 A.pdf]]"]), modified="2026-11-20 10:00")
+        _both(v, tmp_path, reader)
+        assert reader.calls[-1][2] == set()
+
+
+class TestInvoiceProvenance:
+    @pytest.mark.parametrize("from_vault, elsewhere", [
+        ("Payments/attachments/2026-11 A.pdf", False),
+        ("Payments/2026-11 A.pdf", False),
+        ("attachments/2026-11 A.pdf", False),
+        ("Archive/2019/attachments/2026-11 A.pdf", True),
+        ("Other/2026-11 A.pdf", True),
+    ])
+    def test_where_the_plugin_found_the_file_is_kept_and_judged(self, tmp_path, from_vault,
+                                                               elsewhere):
+        v = _invoice_vault("2026-11 A")
+
+        def answer(name, args, downloads_dir=None, should_stop=None):
+            text = v(name, args, downloads_dir)
+            return text.replace("Payments/attachments/2026-11 A.pdf", from_vault)
+
+        paynotes.refresh(v, tmp_path, NOW)
+        section = paynotes.refresh_invoices(answer, tmp_path, NOW, read=FakeReader())
+        rec = _invoices(tmp_path)["2026-11 A.pdf"]
+        assert (rec["from_vault"], rec["fetched_elsewhere"]) == (from_vault, elsewhere)
+        assert rec["facts"] is not None  # kept, under the flag
+        assert section["counts"]["fetched_elsewhere"] == int(elsewhere)
+
+    def test_one_vault_file_behind_two_notes_is_flagged_on_both(self, tmp_path):
+        v = _invoice_vault("2026-11 A", "2026-10 B", "2026-09 C")
+
+        def answer(name, args, downloads_dir=None, should_stop=None):
+            text = v(name, args, downloads_dir)
+            if name == paynotes.INVOICE_TOOL and args["name"] in ("2026-11 A.pdf",
+                                                                   "2026-10 B.pdf"):
+                text = text.replace(f"Payments/attachments/{args['name']}",
+                                    "Payments/attachments/scan.pdf")
+            return text
+
+        paynotes.refresh(v, tmp_path, NOW)
+        section = paynotes.refresh_invoices(answer, tmp_path, NOW, read=FakeReader())
+        recs = _invoices(tmp_path)
+        assert [recs[n]["shared_file"] for n in ("2026-11 A.pdf", "2026-10 B.pdf",
+                                                 "2026-09 C.pdf")] == [True, True, False]
+        assert section["counts"]["shared_file"] == 2
+
+
+class TestInvoiceStrayCopy:
+    def _lying(self, v, target: Path):
+        def answer(name, args, downloads_dir=None, should_stop=None):
+            text = v(name, args, downloads_dir)
+            if name == paynotes.INVOICE_TOOL:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"%PDF-1.7 stray")
+                reported = str(Path(downloads_dir) / args["name"])
+                text = text.replace(json.dumps(reported)[1:-1], str(target))
+            return text
+        return answer
+
+    def test_a_copy_left_in_the_system_temp_is_deleted_with_its_empty_dir(self, tmp_path,
+                                                                          monkeypatch):
+        systemp = tmp_path / "systemp"
+        systemp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(systemp))
+        v = _invoice_vault("2026-11 A")
+        stray = systemp / "aish-obsidian-x1" / "2026-11 A.pdf"
+        paynotes.refresh(v, tmp_path / "state", NOW)
+        paynotes.refresh_invoices(self._lying(v, stray), tmp_path / "state", NOW,
+                                  read=FakeReader())
+        rec = _invoices(tmp_path / "state")["2026-11 A.pdf"]
+        assert (rec["reason_class"], rec["stray_removed"]) == ("fetch failed", True)
+        assert not stray.exists() and not stray.parent.exists() and systemp.exists()
+
+    def test_nothing_outside_the_system_temp_is_ever_deleted(self, tmp_path, monkeypatch):
+        systemp = tmp_path / "systemp"
+        systemp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(systemp))
+        v = _invoice_vault("2026-11 A")
+        elsewhere = tmp_path / "Documents" / "2026-11 A.pdf"
+        paynotes.refresh(v, tmp_path / "state", NOW)
+        paynotes.refresh_invoices(self._lying(v, elsewhere), tmp_path / "state", NOW,
+                                  read=FakeReader())
+        assert elsewhere.exists()
+        rec = _invoices(tmp_path / "state")["2026-11 A.pdf"]
+        assert "stray_removed" not in rec and rec["stray_copy_may_exist"] is True
+
+    @pytest.mark.parametrize("relative", [
+        "foo.lock",  # directly in the temp dir
+        "other-tool-x1/2026-11 A.pdf",  # a mkdtemp of somebody else's
+        "aish-obsidian-x1/deeper/2026-11 A.pdf",  # not directly under it
+    ])
+    def test_only_the_plugins_own_fallback_shape_is_deleted(self, tmp_path, monkeypatch,
+                                                            relative):
+        systemp = tmp_path / "systemp"
+        systemp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(systemp))
+        v = _invoice_vault("2026-11 A")
+        target = systemp / relative
+        paynotes.refresh(v, tmp_path / "state", NOW)
+        paynotes.refresh_invoices(self._lying(v, target), tmp_path / "state", NOW,
+                                  read=FakeReader())
+        assert target.exists()
+        rec = _invoices(tmp_path / "state")["2026-11 A.pdf"]
+        assert "stray_removed" not in rec and rec["stray_copy_may_exist"] is True
+
+
+class TestInvoiceStaleFacts:
+    """A changed attachment whose new visit cannot establish its bytes must not
+    keep the OLD bytes' digest, facts and pages beside the new visit."""
+
+    def _changed_then(self, tmp_path, monkeypatch, ending: str) -> dict:
+        v = _invoice_vault("2026-11 A")
+        reader = FakeReader()
+        _both(v, tmp_path, reader)
+        assert _invoices(tmp_path)["2026-11 A.pdf"]["facts"]
+        v.attach("2026-11 A", "2026-11 A.pdf", b"%PDF-1.7 a different, larger file")
+        v.add("2026-11 A", _fm(attachments=["[[2026-11 A.pdf]]"]), modified="2026-11-20 10:00")
+        if ending == "too large":
+            monkeypatch.setattr(paynotes, "MAX_ATTACHMENT_BYTES", 20)
+        elif ending == "fetch failed":
+            v.file_errors[("Payments/2026-11 A.md", "2026-11 A.pdf")] = "did not finish"
+        else:
+            reader.raise_on.add(b"%PDF-1.7 a different, larger file")
+        _both(v, tmp_path, reader)
+        return _invoices(tmp_path)["2026-11 A.pdf"]
+
+    @pytest.mark.parametrize("ending, reason_class", [
+        ("too large", "too large"), ("fetch failed", "fetch failed"), ("error", "error"),
+    ])
+    def test_old_facts_are_dropped_and_said(self, tmp_path, monkeypatch, ending, reason_class):
+        rec = self._changed_then(tmp_path, monkeypatch, ending)
+        assert rec["reason_class"] == reason_class and rec["status"] == "unread"
+        assert rec["stale_facts_dropped"] is True
+        for key in ("sha256", "facts", "page_detail"):
+            assert key not in rec
+
+    def test_a_good_read_of_the_new_file_clears_the_mark(self, tmp_path, monkeypatch):
+        self._changed_then(tmp_path, monkeypatch, "fetch failed")
+        v = _invoice_vault("2026-11 A")
+        v.attach("2026-11 A", "2026-11 A.pdf", b"%PDF-1.7 a different, larger file")
+        v.add("2026-11 A", _fm(attachments=["[[2026-11 A.pdf]]"]), modified="2026-11-21 10:00")
+        _both(v, tmp_path)
+        rec = _invoices(tmp_path)["2026-11 A.pdf"]
+        assert rec["status"] == "read" and "stale_facts_dropped" not in rec and rec["facts"]
+
+
+class TestInvoiceCadence:
+    @pytest.fixture(autouse=True)
+    def paynotes_on(self, monkeypatch):
+        monkeypatch.delenv("AISH_PAYNOTES")
+
+    def test_the_backlog_gap_is_fifteen_minutes(self):
+        assert paynotes.BACKLOG_EVERY == timedelta(minutes=15)
+
+    def test_no_invoice_run_starts_while_a_chat_is_busy(self, tmp_path, monkeypatch):
+        v = _invoice_vault("2026-11 A")
+        monkeypatch.setattr(paynotes, "read_document", FakeReader())
+        r = paynotes.Refresher(tmp_path, make_runner=lambda: v, clock=lambda: NOW,
+                               busy=lambda: True)
+        waits = _run_refresher(r, 1)
+        assert v.fetches() == [] and v.reads() != []
+        section = json.loads(paynotes.index_path(tmp_path).read_text())["invoices"]
+        assert (section["outcome"], section["deferred"]) == ("deferred", True)
+        assert waits == [paynotes.BACKLOG_EVERY.total_seconds()]
+
+    def test_a_chat_turning_busy_stops_the_run_between_attachments(self, tmp_path):
+        v = _invoice_vault("2026-11 A", "2026-10 B", "2026-09 C")
+        working = threading.Event()
+        reader = FakeReader()
+        reader.on_read = lambda source: working.set()
+        section = _both(v, tmp_path, reader, busy=working.is_set)
+        assert len(reader.calls) == 1
+        assert (section["remaining"], section["deferred"]) == (2, True)
+        assert paynotes.next_wait({"outcome": "ok", "invoices": section}) == \
+            paynotes.BACKLOG_EVERY
+
+    def test_the_server_hands_the_refresher_its_sessions_busy_flags(self, tmp_path,
+                                                                  monkeypatch):
+        from tests.test_server import connected, make_client
+
+        monkeypatch.setattr(paynotes, "plugin_runner", lambda cwd: None)
+        env = _app_env(tmp_path)
+        client, _ = make_client(env, [])
+        with client, connected(client):
+            server = client.app.state.server
+            assert server.paynotes.busy() is False
+            next(iter(server.sessions.values())).busy = True
+            assert server.paynotes.busy() is True
+            next(iter(server.sessions.values())).busy = False
+
+
+class TestInvoiceStoppableFetch:
+    def _tool(self, tmp_path: Path, body: str, timeout: int = 30) -> tool_plugins.Tool:
+        tool_dir = tmp_path / "tools" / "slow"
+        tool_dir.mkdir(parents=True)
+        wrapper = tool_dir / "wrapper"
+        wrapper.write_text("#!/usr/bin/env python3\nimport sys, time\nsys.stdin.read()\n" + body)
+        wrapper.chmod(0o755)
+        return tool_plugins.Tool(name="slow", description="", executable="./wrapper",
+                                 mutating=False, schema={}, timeout=timeout, body="",
+                                 dir=tool_dir)
+
+    def test_a_running_wrapper_is_killed_when_stop_is_set(self, tmp_path):
+        tool = self._tool(tmp_path, "time.sleep(30)\n")
+        started = time.monotonic()
+        out = tool_plugins.execute(tool, {}, str(tmp_path),
+                                   should_stop=lambda: time.monotonic() - started > 0.5)
+        assert time.monotonic() - started < 5
+        assert "was stopped" in str(out)
+
+    def test_with_should_stop_the_output_and_timeout_are_as_before(self, tmp_path):
+        tool = self._tool(tmp_path, "print('{\"ok\": 1}')\n")
+        out = tool_plugins.execute(tool, {}, str(tmp_path), should_stop=lambda: False)
+        assert '"ok": 1' in str(out) and "[exit code: 0]" in str(out)
+        slow = self._tool(tmp_path / "t", "time.sleep(30)\n", timeout=1)
+        started = time.monotonic()
+        out = tool_plugins.execute(slow, {}, str(tmp_path), should_stop=lambda: False)
+        assert "timed out after 1s" in str(out) and time.monotonic() - started < 5
+
+    def test_the_refresh_hands_its_stop_flag_to_the_fetch(self, tmp_path):
+        v = _invoice_vault("2026-11 A")
+        handed = []
+
+        def runner(name, args, downloads_dir=None, should_stop=None):
+            if name == paynotes.INVOICE_TOOL:
+                handed.append(should_stop)
+            return v(name, args, downloads_dir)
+
+        stop = threading.Event()
+        paynotes.refresh(v, tmp_path, NOW)
+        paynotes.refresh_invoices(runner, tmp_path, NOW, read=FakeReader(), stop=stop)
+        assert handed == [stop.is_set]
+
+
+class TestInvoiceRefresh:
+    def test_facts_are_stored_typed_and_counted(self, tmp_path):
+        section = _both(_invoice_vault("2026-11 E.ON"), tmp_path)
+        assert section["outcome"] == "ok"
+        c = section["counts"]
+        assert (c["listed"], c["read"], c["by_text_layer"], c["with_account"],
+                c["with_payable_amount"]) == (1, 1, 1, 1, 1)
+        rec = _invoices(tmp_path)["2026-11 E.ON.pdf"]
+        assert rec["path"] == "Payments/2026-11 E.ON.md"
+        assert rec["extractor"] == paynotes.invoicefacts.EXTRACTOR_VERSION
+        assert rec["note_marker"] == {"modified": "2026-11-12 10:00", "size": 900,
+                                      "offloaded": False}
+        (inv,) = paynotes.load_invoices(tmp_path, NOW).invoices
+        assert isinstance(inv, paynotes.InvoiceRecord)
+        assert inv.accounts[0]["account"] == ACCOUNT
+        assert {"minor": 49633, "currency": "PLN", "currency_source": "written", "count": 1,
+                "payable": "line", "currency_seen": True,
+                "ambiguous_grouping": False} in inv.amounts
+        assert inv.invoice_numbers == [{"value": "FV/123/2026", "where": "line"}]
+
+    def test_unchanged_attachments_are_not_fetched_again(self, tmp_path):
+        v = _invoice_vault("2026-11 A", "2026-11 B")
+        _both(v, tmp_path)
+        v.calls.clear()
+        reader = FakeReader()
+        section = _both(v, tmp_path, reader)
+        assert v.fetches() == [] and reader.calls == []
+        assert section["counts"]["read"] == 2 and section["outcome"] == "ok"
+
+    def test_a_changed_note_refetches_and_an_unchanged_file_is_not_read_again(self, tmp_path):
+        v = _invoice_vault("2026-11 A")
+        _both(v, tmp_path)
+        v.calls.clear()
+        v.add("2026-11 A", _fm(attachments=["[[2026-11 A.pdf]]"], paid="true"),
+              modified="2026-11-13 08:00", size=950)
+        reader = FakeReader()
+        _both(v, tmp_path, reader)
+        assert v.fetches() == [("Payments/2026-11 A.md", "2026-11 A.pdf")]
+        assert reader.calls == []  # same bytes, same extractor: the facts stand
+        rec = _invoices(tmp_path)["2026-11 A.pdf"]
+        assert rec["status"] == "read" and rec["note_marker"]["size"] == 950
+        # A changed file IS read.
+        v.attach("2026-11 A", "2026-11 A.pdf", b"%PDF-1.7 corrected")
+        v.add("2026-11 A", _fm(attachments=["[[2026-11 A.pdf]]"]), modified="2026-11-14 08:00")
+        reader = FakeReader()
+        _both(v, tmp_path, reader)
+        assert len(reader.calls) == 1
+
+    def test_an_extractor_change_reads_everything_once_more(self, tmp_path, monkeypatch):
+        v = _invoice_vault("2026-11 A")
+        _both(v, tmp_path)
+        monkeypatch.setattr(paynotes.invoicefacts, "EXTRACTOR_VERSION", 99)
+        reader = FakeReader()
+        _both(v, tmp_path, reader)
+        assert len(reader.calls) == 1
+        assert _invoices(tmp_path)["2026-11 A.pdf"]["extractor"] == 99
+
+    def test_per_run_bound_newest_first_and_the_rest_pending(self, tmp_path):
+        v = _invoice_vault("2026-11 A", "2026-10 B", "2026-09 C")
+        section = _both(v, tmp_path, max_reads=2)
+        assert v.fetches() == [("Payments/2026-11 A.md", "2026-11 A.pdf"),
+                               ("Payments/2026-10 B.md", "2026-10 B.pdf")]
+        assert (section["outcome"], section["remaining"]) == ("partial", 1)
+        assert _invoices(tmp_path)["2026-09 C.pdf"]["status"] == "pending"
+        v.calls.clear()
+        section = _both(v, tmp_path, max_reads=2)
+        assert v.fetches() == [("Payments/2026-09 C.md", "2026-09 C.pdf")]
+        assert section["outcome"] == "ok"
+
+    def test_the_wall_clock_budget_is_checked_between_attachments(self, tmp_path):
+        v = _invoice_vault("2026-11 A", "2026-10 B", "2026-09 C")
+        clock = [0.0]
+        reader = FakeReader()
+        reader.on_read = lambda source: clock.__setitem__(0, clock[0] + 400)
+        section = _both(v, tmp_path, reader, budget=timedelta(seconds=600),
+                        monotonic=lambda: clock[0])
+        assert len(reader.calls) == 2 and section["remaining"] == 1
+
+    def test_strictly_one_at_a_time_and_the_stop_flag_between_attachments(self, tmp_path):
+        v = _invoice_vault("2026-11 A", "2026-10 B", "2026-09 C")
+        stop = threading.Event()
+        reader = FakeReader()
+        reader.on_read = lambda source: stop.set()
+        section = _both(v, tmp_path, reader, stop=stop)
+        assert len(reader.calls) == 1 and reader.max_active == 1
+        assert section["remaining"] == 2
+
+    def test_a_failed_attachment_is_retried_after_never_tried_ones(self, tmp_path):
+        v = _invoice_vault("2026-11 A")
+        v.file_errors[("Payments/2026-11 A.md", "2026-11 A.pdf")] = "did not finish downloading"
+        _both(v, tmp_path)
+        v.add("2026-12 New", _fm(attachments=["[[new.pdf]]"]), modified="2026-12-01 10:00")
+        v.attach("2026-12 New", "new.pdf", b"%PDF-1.7 new")
+        v.calls.clear()
+        _both(v, tmp_path, max_reads=1)
+        assert v.fetches() == [("Payments/2026-12 New.md", "new.pdf")]
+        assert _invoices(tmp_path)["2026-11 A.pdf"]["status"] == "pending"
+        del v.file_errors[("Payments/2026-11 A.md", "2026-11 A.pdf")]
+        v.calls.clear()
+        _both(v, tmp_path)
+        rec = _invoices(tmp_path)["2026-11 A.pdf"]
+        assert rec["status"] == "read" and rec["attempts"] == 2
+
+    def test_files_are_owner_only_and_digest_checked(self, tmp_path):
+        _both(_invoice_vault("2026-11 A"), tmp_path)
+        assert stat.S_IMODE(paynotes.invoices_path(tmp_path).stat().st_mode) == 0o600
+        assert stat.S_IMODE(paynotes.payments_dir(tmp_path).stat().st_mode) == 0o700
+        with paynotes.invoices_path(tmp_path).open("a") as fh:
+            fh.write("{}\n")
+        loaded = paynotes.load_invoices(tmp_path)
+        assert not loaded.available and "does not match" in loaded.reason
+
+    def test_no_facts_file_is_not_zero_invoices(self, tmp_path):
+        assert "no index" in paynotes.load_invoices(tmp_path).reason
+        paynotes.refresh(FakeVault(), tmp_path, NOW)
+        loaded = paynotes.load_invoices(tmp_path)
+        assert not loaded.available and "none collected" in loaded.reason
+
+    def test_the_notes_refresh_keeps_the_invoice_section(self, tmp_path):
+        v = _invoice_vault("2026-11 A")
+        _both(v, tmp_path)
+        paynotes.refresh(v, tmp_path, NOW + timedelta(days=1))
+        assert paynotes.load_invoices(tmp_path).available
+        v.list_error = "no folder"
+        paynotes.refresh(v, tmp_path, NOW + timedelta(days=2))
+        assert paynotes.load_invoices(tmp_path).available
+
+    def test_a_raising_run_is_recorded_and_the_scratch_emptied(self, tmp_path, monkeypatch):
+        v = _invoice_vault("2026-11 A")
+        paynotes.refresh(v, tmp_path, NOW)
+
+        def explode(*a, **k):
+            paynotes._fresh_scratch(paynotes.scratch_dir(tmp_path))
+            raise OSError("disk full")
+
+        monkeypatch.setattr(paynotes, "refresh_invoices", explode)
+        section = paynotes.refresh_invoices_recorded(v, tmp_path, NOW)
+        assert (section["outcome"], section["error"]) == ("error", "OSError")
+        assert not paynotes.scratch_dir(tmp_path).exists()
+
+    def test_removed_attachments_leave_the_file(self, tmp_path):
+        v = _invoice_vault("2026-11 A", "2026-10 B")
+        _both(v, tmp_path)
+        v.hits.pop()
+        section = _both(v, tmp_path)
+        assert section["counts"]["removed"] == 1
+        assert list(_invoices(tmp_path)) == ["2026-11 A.pdf"]
+
+
+def _run_refresher(refresher: paynotes.Refresher, ticks: int) -> list[float]:
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+        if len(waits) >= ticks:
+            raise asyncio.CancelledError
+
+    refresher.sleep = sleep
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(refresher.run())
+    return waits
+
+
+class TestInvoiceRefresher:
+    @pytest.fixture(autouse=True)
+    def paynotes_on(self, monkeypatch):
+        # The suite turns the whole feature off (`no_background_paynotes`);
+        # the Refresher itself never reads that switch, the invoice half does.
+        monkeypatch.delenv("AISH_PAYNOTES")
+
+    def test_invoices_follow_the_notes_on_the_refreshers_own_thread(self, tmp_path,
+                                                                    monkeypatch):
+        v = _invoice_vault("2026-11 A")
+        threads: list[str] = []
+        reader = FakeReader()
+        reader.on_read = lambda source: threads.append(threading.current_thread().name)
+        monkeypatch.setattr(paynotes, "read_document", reader)
+        r = paynotes.Refresher(tmp_path, make_runner=lambda: v, clock=lambda: NOW)
+        _run_refresher(r, 1)
+        assert [n for n, _ in v.calls] == ["obsidian_find", "obsidian_read",
+                                           "obsidian_attachment"]
+        assert threads and threads[0].startswith("aish-paynotes")
+        assert paynotes.load_invoices(tmp_path).available
+
+    def test_the_invoice_kill_switch(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AISH_PAYNOTES_INVOICES", "0")
+        v = _invoice_vault("2026-11 A")
+        r = paynotes.Refresher(tmp_path, make_runner=lambda: v, clock=lambda: NOW)
+        _run_refresher(r, 1)
+        assert v.fetches() == [] and v.reads() != []
+        assert "invoices" not in json.loads(paynotes.index_path(tmp_path).read_text())
+        monkeypatch.setenv("AISH_PAYNOTES_INVOICES", "1")
+        assert paynotes.invoices_enabled()
+        monkeypatch.setenv("AISH_PAYNOTES", "0")
+        assert not paynotes.invoices_enabled()
+
+    def test_an_invoice_backlog_brings_the_next_run_sooner_only_while_progressing(
+        self, tmp_path, monkeypatch
+    ):
+        v = _invoice_vault("2026-11 A", "2026-10 B", "2026-09 C")
+        monkeypatch.setattr(paynotes, "MAX_INVOICES_PER_RUN", 2)
+        monkeypatch.setattr(paynotes, "read_document", FakeReader())
+        r = paynotes.Refresher(tmp_path, make_runner=lambda: v, clock=lambda: NOW)
+        assert _run_refresher(r, 2) == [paynotes.BACKLOG_EVERY.total_seconds(),
+                                        paynotes.REFRESH_EVERY.total_seconds()]
+
+        stuck = _invoice_vault("2026-11 A", "2026-10 B", "2026-09 C")
+        for key in stuck.files:
+            stuck.file_errors[key] = "did not finish downloading within 60s"
+        r = paynotes.Refresher(tmp_path / "2", make_runner=lambda: stuck, clock=lambda: NOW)
+        assert _run_refresher(r, 2) == [paynotes.REFRESH_EVERY.total_seconds()] * 2
+        assert len(stuck.fetches()) == 4  # two a run, never a tight loop
+
+    def test_next_wait_reads_both_halves(self):
+        soon, day = paynotes.BACKLOG_EVERY, paynotes.REFRESH_EVERY
+        done = {"outcome": "ok", "counts": {"read_ok_this_run": 0}}
+        assert paynotes.next_wait({**done, "invoices": {
+            "outcome": "partial", "counts": {"read_ok_this_run": 3}}}) == soon
+        assert paynotes.next_wait({**done, "invoices": {
+            "outcome": "partial", "counts": {"read_ok_this_run": 0}}}) == day
+
+    def test_nothing_from_an_invoice_reaches_the_log(self, tmp_path, monkeypatch, capsys):
+        v = _invoice_vault("2026-11 E.ON")
+        reader = FakeReader()
+        reader.raise_on.add(b"%PDF-1.7 2026-11 E.ON")
+        monkeypatch.setattr(paynotes, "read_document", reader)
+        _run_refresher(paynotes.Refresher(tmp_path, make_runner=lambda: v,
+                                          clock=lambda: NOW), 1)
+        reader.raise_on.clear()
+        _run_refresher(paynotes.Refresher(tmp_path / "2", make_runner=lambda: v,
+                                          clock=lambda: NOW), 1)
+        err = capsys.readouterr().err
+        assert "invoices" in err
+        for secret in ("E.ON", "1240", "496", "FV/123", ACCOUNT):
+            assert secret not in err
+
+
+class TestInvoiceServer:
+    def test_a_stuck_fetch_never_holds_the_server_or_its_shutdown(self, tmp_path,
+                                                                 monkeypatch):
+        from tests.test_server import connected, make_client, recv_until
+
+        monkeypatch.delenv("AISH_PAYNOTES")
+        release = threading.Event()
+        entered = threading.Event()
+        v = _invoice_vault("2026-11 A")
+
+        def stuck(args):
+            entered.set()
+            release.wait(10)
+
+        v.on_fetch = stuck
+        monkeypatch.setattr(paynotes, "plugin_runner", lambda cwd: v)
+        monkeypatch.setattr(paynotes, "read_document", FakeReader())
+        env = _app_env(tmp_path)
+        client, _ = make_client(env, [])
+        try:
+            started = time.monotonic()
+            with client, connected(client) as (ws, hello, _):
+                assert hello["type"] == "hello"
+                assert entered.wait(5)
+                ws.send_json({"type": "trash"})
+                recv_until(ws, "trash_list")
+                assert not release.is_set()
+            # The client's exit ran the server's shutdown while the fetch was
+            # still stuck in its thread.
+            assert not release.is_set() and time.monotonic() - started < 9
+        finally:
+            release.set()
+
+
+class TestInvoiceCli:
+    def test_prints_counts_and_outcome_words_only(self, tmp_path, monkeypatch, capsys):
+        from aish import cli
+
+        v = _invoice_vault("2026-11 E.ON", "2026-10 PGNiG")
+        v.file_errors[("Payments/2026-10 PGNiG.md", "2026-10 PGNiG.pdf")] = (
+            "'2026-10 PGNiG.pdf' is offloaded to iCloud and did not finish downloading")
+        paynotes.refresh(v, tmp_path, datetime.now())
+        paynotes.refresh_invoices(v, tmp_path, datetime.now(), read=FakeReader())
+        monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
+        assert cli._paynotes_cli([]) == 0
+        out = capsys.readouterr().out
+        assert "attachments listed: 2" in out and "read by text layer: 1" in out
+        assert "with a valid account: 1" in out and "with a payable amount: 1" in out
+        assert "fetch failed: 1" in out and "remaining: 0" in out
+        for secret in ("E.ON", "PGNiG", "1240", "496", "FV/123", "offloaded", "2857"):
+            assert secret not in out

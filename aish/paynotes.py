@@ -28,6 +28,12 @@ fill each other's gaps; where both are present and disagree the field is
 null and the disagreement is a `conflicts` entry, because which one is right
 is the owner's call, not this module's.
 
+**Invoice facts ride the same run.** After the notes, each indexed note's
+attachments are fetched through `obsidian_attachment` into a private scratch
+directory, read by the document pipeline, reduced to typed facts by
+`invoicefacts`, and deleted — bounded per run, one at a time
+(`refresh_invoices`, docs/payments.md "Invoice facts").
+
 The files hold the owner's financial data: `<state>/payments/`, mode 0600,
 never rendered to a model by this module, and nothing here logs a note's
 content or an account number.
@@ -39,9 +45,13 @@ import asyncio
 import hashlib
 import json
 import os
+import posixpath
 import re
+import shutil
 import sys
+import tempfile
 import threading
+import time
 import unicodedata
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -50,10 +60,11 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import atomic_write, mailcases, tool_plugins
+from . import atomic_write, files, invoicefacts, invoicereader, mailcases, tool_plugins
 
 LIST_TOOL = "obsidian_find"
 READ_TOOL = "obsidian_read"
+INVOICE_TOOL = "obsidian_attachment"
 FOLDER = "Payments"
 SCHEMA = 1
 #: Bumped whenever parsing changes, so every note is re-read once under the
@@ -78,7 +89,7 @@ REASON_CAP = 300
 
 REFRESH_EVERY = timedelta(days=1)
 #: While reads remain after a bounded run, the next one comes this soon.
-BACKLOG_EVERY = timedelta(minutes=5)
+BACKLOG_EVERY = timedelta(minutes=15)
 
 ENV_SWITCH = "AISH_PAYNOTES"
 
@@ -89,7 +100,8 @@ NO_TOOL = "no tool"
 LIST_FAILED = "list failed"
 ERROR = "error"
 
-RunTool = Callable[[str, dict], str]
+#: (tool name, args[, downloads_dir=]) -> the `execute` envelope text.
+RunTool = Callable[..., str]
 
 
 # ------------------------------------------------------------------ paths
@@ -114,28 +126,49 @@ def enabled() -> bool:
 # ------------------------------------------------------------ the tool seam
 
 
-def plugin_runner(cwd: str) -> RunTool | None:
-    """`run_tool` over the owner's installed plugins, or None when either tool
-    is absent. A tool that declares itself mutating is treated as absent: the
-    refresh runs unattended and may only ever read."""
-    tools, _warnings = tool_plugins.discover(cwd)
-    by_name = {t.name: t for t in tools}
-    for name in (LIST_TOOL, READ_TOOL):
-        if name not in by_name or by_name[name].mutating:
-            return None
+class PluginRunner:
+    """`run_tool` over the owner's installed plugins. `tools` names the ones
+    this refresh may call: present and not declaring themselves mutating."""
 
-    def run(name: str, args: dict) -> str:
-        tool = by_name[name]
+    def __init__(self, by_name: dict[str, tool_plugins.Tool], cwd: str) -> None:
+        self.by_name = by_name
+        self.cwd = cwd
+        self.tools = frozenset(by_name)
+
+    def __call__(self, name: str, args: dict, downloads_dir: Path | None = None,
+                 should_stop: Callable[[], bool] | None = None) -> str:
+        tool = self.by_name[name]
         problem = tool_plugins.validate_args(tool, args)
         if problem:
             return str(tool_plugins.envelope(name, problem + "\n", 2))
         return str(
             tool_plugins.execute(
-                tool, args, cwd, caps=(OUTPUT_CAP, OUTPUT_CAP), cap_source="paynotes"
+                tool, args, self.cwd, caps=(OUTPUT_CAP, OUTPUT_CAP), cap_source="paynotes",
+                downloads_dir=downloads_dir, should_stop=should_stop,
             )
         )
 
-    return run
+
+def plugin_runner(cwd: str) -> PluginRunner | None:
+    """`run_tool` over the owner's installed plugins, or None when either note
+    tool is absent. A tool that declares itself mutating is treated as absent:
+    the refresh runs unattended and may only ever read. The attachment tool is
+    optional — without it the invoice half records `no tool` on its own."""
+    tools, _warnings = tool_plugins.discover(cwd)
+    by_name = {t.name: t for t in tools
+               if t.name in (LIST_TOOL, READ_TOOL, INVOICE_TOOL) and not t.mutating}
+    if LIST_TOOL not in by_name or READ_TOOL not in by_name:
+        return None
+    return PluginRunner(by_name, cwd)
+
+
+def _tool_available(run_tool: RunTool | None, name: str) -> bool:
+    """A runner that names its tools is asked; any other callable (a test's
+    fake) is taken to have them all."""
+    if run_tool is None:
+        return False
+    names = getattr(run_tool, "tools", None)
+    return names is None or name in names
 
 
 _EXIT_RE = re.compile(r"\n?\[exit code: (-?\d+)\]")
@@ -150,10 +183,12 @@ def _split_envelope(text: str) -> tuple[int | None, str]:
     return int(last.group(1)), text[: last.start()].strip()
 
 
-def _call_json(run_tool: RunTool, name: str, args: dict) -> tuple[dict | None, str]:
+def _call_json(
+    run_tool: RunTool, name: str, args: dict, **kwargs: Any
+) -> tuple[dict | None, str]:
     """(payload, "") on success, (None, reason) otherwise. The reason is the
     plugin's own words, capped."""
-    exit_code, body = _split_envelope(run_tool(name, args))
+    exit_code, body = _split_envelope(run_tool(name, args, **kwargs))
     if exit_code != 0:
         why = body or f"{name} exited {exit_code} with no output"
         return None, _cap(why, REASON_CAP)
@@ -564,6 +599,7 @@ def _failed(state_dir: Path, previous_index: dict, now: datetime, outcome: str, 
     the notes file (untouched) still describes."""
     index = {key: previous_index[key] for key in (
         "notes_written_at", "notes_sha256", "counts", "reads_remaining", "listing_truncated",
+        "invoices",
     ) if key in previous_index}
     index.update({
         "schema": SCHEMA,
@@ -687,6 +723,9 @@ def refresh(
         "listing_truncated": truncated,
         "notes_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
     }
+    if "invoices" in previous_index:
+        # The invoice half's own section: this half does not own it.
+        index["invoices"] = previous_index["invoices"]
     _write_index(state_dir, index)
     return index
 
@@ -710,15 +749,561 @@ def refresh_recorded(
             return {"outcome": ERROR, "error": type(exc).__name__}
 
 
+# --------------------------------------------------------- invoice facts
+#
+# The notes carry the bill; the attached invoice carries the facts a bank
+# payment can be matched on: the account to pay and the amount. So each
+# indexed note's attachments are fetched through the owner's own read-only
+# `obsidian_attachment` plugin, read in a child process by the repo's document
+# pipeline (`invoicereader`), reduced to FACTS per page by `invoicefacts`, and
+# deleted. Only the facts are kept (docs/payments.md, "Invoice facts").
+
+INVOICE_ENV_SWITCH = "AISH_PAYNOTES_INVOICES"
+#: Attachments one run may fetch and read. Small: a scanned page is ~1 s and
+#: ~150 MB of OCR (docs/documents-and-pdf.md), and this machine also runs a
+#: local model.
+MAX_INVOICES_PER_RUN = 25
+#: Wall clock one run may spend on invoices, checked BETWEEN attachments.
+INVOICE_RUN_BUDGET = timedelta(minutes=10)
+#: Wall clock one attachment's reading may take (conversion and OCR, in the
+#: reader child, which is killed at it), and the least it is given when the
+#: run's budget is nearly spent.
+ATTACHMENT_SECONDS = 180.0
+ATTACHMENT_MIN_SECONDS = 30.0
+#: Seconds the plugin may wait for iCloud to download an offloaded file (its
+#: own default for attachments).
+INVOICE_FETCH_WAIT = 60
+#: A fetched copy above this is not read. Invoices are kilobytes to a few MB;
+#: the bound keeps an arbitrary file from being loaded whole to be hashed.
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+#: Visits in a row that read no new page before an attachment is given up on.
+#: A choice: a permanent failure (a broken PDF, a page OCR cannot read) would
+#: otherwise be fetched and read again on every run, for ever. A changed note
+#: or a new extractor version gives it a fresh start.
+MAX_FRUITLESS_VISITS = 3
+
+# Outcome words for one attachment that was not (fully) read. Words, never the
+# pipeline's sentence, because these are what `aish paynotes` prints; the
+# sentence is kept in the record's `reason`.
+FETCH_FAILED = "fetch failed"
+TOO_LARGE = "too large"
+NOT_A_DOCUMENT = invoicereader.NOT_A_DOCUMENT
+CONVERSION_FAILED = invoicereader.CONVERSION_FAILED
+OCR_UNAVAILABLE = invoicereader.OCR_UNAVAILABLE
+OCR_FAILED = invoicereader.OCR_FAILED
+PAGES_NOT_READ = invoicereader.PAGES_NOT_READ
+INVOICE_ERROR = "error"
+
+# How an attachment's words were obtained.
+READ_TEXT = "text layer"
+READ_OCR = "ocr"
+READ_MIXED = "mixed"
+NOT_READ = "not read"
+
+NO_NOTES = "no notes"
+DEFERRED = "deferred"
+
+
+def invoices_path(state_dir: Path) -> Path:
+    return payments_dir(state_dir) / "invoices.jsonl"
+
+
+def scratch_dir(state_dir: Path) -> Path:
+    """The ONE place a fetched invoice copy and its rendition ever exist:
+    private (0700) and emptied before and after every attachment."""
+    return payments_dir(state_dir) / "invoice-scratch"
+
+
+def invoices_enabled() -> bool:
+    return enabled() and os.environ.get(INVOICE_ENV_SWITCH, "1").strip() != "0"
+
+
+#: (file, private rendition store, pages already read, seconds, should_stop)
+#: -> `invoicereader.run_reader`'s answer: per-page facts, never text.
+ReadDocument = Callable[[Path, Path, set[int], float, Callable[[], bool]], dict]
+
+
+def read_document(source: Path, store: Path, skip: set[int], seconds: float,
+                  should_stop: Callable[[], bool]) -> dict:
+    """The file through the repo's one document pipeline, in a child process
+    at the lowest priority, killed at `seconds` or on Stop
+    (`invoicereader`)."""
+    return invoicereader.run_reader(source, store, skip, seconds, should_stop)
+
+
+def _read_as(pages: dict[int, dict]) -> str:
+    hows = {p.get("how") for p in pages.values()}
+    by_text = "text" in hows
+    by_ocr = bool(hows & {"ocr", "ocr_empty"})
+    if by_text and by_ocr:
+        return READ_MIXED
+    if by_text:
+        return READ_TEXT
+    if by_ocr:
+        return READ_OCR
+    return NOT_READ
+
+
+def _empty_scratch(scratch: Path) -> None:
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _fresh_scratch(scratch: Path) -> tuple[Path, Path]:
+    """(fetch dir, rendition store), both new and empty, under a 0700 root."""
+    _empty_scratch(scratch)
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(scratch.parent, 0o700)
+    scratch.mkdir(mode=0o700)
+    os.chmod(scratch, 0o700)
+    fetch, store = scratch / "fetch", scratch / "renditions"
+    fetch.mkdir(mode=0o700)
+    store.mkdir(mode=0o700)
+    return fetch, store
+
+
+def _sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+#: The plugin's fallback directory: `attachlib.download_dir(prefix=...)` is a
+#: `mkdtemp` directly in the system temp dir with this prefix.
+STRAY_DIR_PREFIX = "aish-obsidian-"
+
+
+def _remove_stray(path: Path) -> bool:
+    """Delete a copy the plugin left OUTSIDE the scratch — its fallback is a
+    fresh `mkdtemp` that nothing else deletes — but only in exactly that
+    shape: a regular file (not a symlink) in a `aish-obsidian-*` directory
+    that sits directly in the system temp dir; then that directory if it is
+    now empty. Nothing else is ever deleted."""
+    temp = files.resolved(tempfile.gettempdir())
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        resolved = files.resolved(path)
+    except OSError:
+        return False
+    if temp is None or resolved is None:
+        return False
+    parent = resolved.parent
+    if parent.parent != temp or not parent.name.startswith(STRAY_DIR_PREFIX):
+        return False
+    try:
+        resolved.unlink()
+        if not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        return False
+    return True
+
+
+def _fetched_elsewhere(note_path: str, from_vault: str) -> bool:
+    """Did the plugin's resolver find the file somewhere other than where the
+    note's own attachments live — the note's folder, its `attachments/`, or
+    the vault root's `attachments/`? Its last resort is a vault-wide search by
+    name, and a same-named file elsewhere may belong to another bill."""
+    note_dir = posixpath.dirname(note_path)
+    allowed = {note_dir, posixpath.join(note_dir, "attachments"), "attachments"}
+    return posixpath.dirname(from_vault.strip("/")) not in allowed
+
+
+def _page_summary(pages: dict[int, dict], total: int) -> dict[str, int]:
+    hows = [p.get("how") for p in pages.values()]
+    done = sum(1 for h in hows if h != "unread")
+    return {
+        "pages": total,
+        "pages_read": done,
+        "pages_text": hows.count("text"),
+        "pages_ocr": hows.count("ocr"),
+        "pages_ocr_empty": hows.count("ocr_empty"),
+        "pages_unread": max(0, total - done),
+    }
+
+
+def _process_attachment(
+    run_tool: RunTool,
+    read: ReadDocument,
+    scratch: Path,
+    note_path: str,
+    name: str,
+    previous: dict | None,
+    stop: threading.Event | None,
+    seconds: float,
+) -> dict:
+    """Fetch, read the pages not read before, extract, delete. Returns the
+    record's outcome fields plus `progressed` (popped by the caller). Every
+    path through here leaves the scratch directory empty."""
+    fetch_dir, store = _fresh_scratch(scratch)
+    should_stop = stop.is_set if stop is not None else (lambda: False)
+    failed = {"status": "unread", "read_as": NOT_READ, "progressed": False}
+    try:
+        payload, why = _call_json(
+            run_tool, INVOICE_TOOL,
+            {"note": note_path, "name": name, "wait": INVOICE_FETCH_WAIT},
+            downloads_dir=fetch_dir, should_stop=should_stop,
+        )
+        if payload is None:
+            return {**failed, "fetch": "failed", "reason_class": FETCH_FAILED, "reason": why}
+        # The plugin's report is a claim; the file on disk, inside the
+        # scratch directory, is the evidence.
+        reported = Path(str(payload.get("path") or ""))
+        inside = bool(payload.get("path")) and files.contains(fetch_dir, reported, strict=True)
+        if not inside or not reported.is_file():
+            outside = bool(payload.get("path")) and not inside
+            stray = outside and _remove_stray(reported)
+            return {**failed, "fetch": "failed", "reason_class": FETCH_FAILED,
+                    "reason": "the plugin reported no file inside aish's scratch directory",
+                    **({"stray_removed": True} if stray else {}),
+                    # Not in the plugin's fallback shape: left alone, and said.
+                    **({"stray_copy_may_exist": True} if outside and not stray else {})}
+        from_vault = str(payload.get("from_vault") or "").strip("/") or None
+        where = {"from_vault": from_vault,
+                 "fetched_elsewhere": bool(from_vault) and _fetched_elsewhere(
+                     note_path, from_vault or "")}
+        size = reported.stat().st_size
+        if size > MAX_ATTACHMENT_BYTES:
+            return {**failed, **where, "fetch": "ok", "bytes": size, "reason_class": TOO_LARGE,
+                    "reason": f"{size} bytes, above the {MAX_ATTACHMENT_BYTES} bytes read"}
+        digest = _sha256_of(reported)
+        same_file = (previous is not None and previous.get("sha256") == digest
+                     and previous.get("extractor") == invoicefacts.EXTRACTOR_VERSION)
+        if same_file and previous is not None and previous.get("status") == "read":
+            # The note changed, its attachment did not: the facts stand.
+            kept = {k: v for k, v in previous.items() if k not in ("path", "name")}
+            return {**kept, **where, "fetch": "ok", "unchanged": True, "progressed": False}
+        before: dict[int, dict] = {}
+        if same_file and previous is not None:
+            before = {int(k): v for k, v in (previous.get("page_detail") or {}).items()}
+        done_before = {n for n, p in before.items() if p.get("how") != "unread"}
+        answer = read(reported, store, done_before, seconds, should_stop)
+        pages = dict(before)
+        for number, page in (answer.get("pages") or {}).items():
+            if int(number) not in done_before:
+                pages[int(number)] = page
+        # A killed reader answers no page count; a continued visit knows it.
+        known = (previous or {}) if same_file else {}
+        total = int(answer.get("pages_total") or known.get("pages") or 0)
+        summary = _page_summary(pages, total)
+        read_pages = summary["pages_read"]
+        if total and read_pages >= total:
+            status = "read"
+        elif read_pages:
+            status = "partial"
+        else:
+            status = "unread"
+        unread = [pages[n] for n in sorted(pages) if pages[n].get("how") == "unread"]
+        reason_class = answer.get("reason_class") or (unread[0].get("reason_class")
+                                                      if unread else None)
+        reason = answer.get("reason") or (unread[0].get("reason") if unread else None)
+        if status != "read" and not reason_class:
+            reason_class = PAGES_NOT_READ
+        facts = invoicefacts.merge(
+            [pages[n]["facts"] for n in sorted(pages) if pages[n].get("facts") is not None]
+        ) if read_pages else None
+        return {
+            "status": status, "fetch": "ok", "bytes": size, "sha256": digest, **where,
+            "kind": answer.get("kind") or known.get("kind"),
+            "read_as": _read_as({n: p for n, p in pages.items() if p.get("how") != "unread"}),
+            **summary,
+            "page_detail": {str(n): pages[n] for n in sorted(pages)},
+            "reason_class": None if status == "read" else reason_class,
+            "reason": None if status == "read" else reason,
+            "facts": facts,
+            "progressed": read_pages > len(done_before),
+        }
+    finally:
+        _empty_scratch(scratch)
+
+
+#: What a record knows only from one particular file's bytes.
+_BYTES_FACTS = ("sha256", "facts", "page_detail")
+
+
+def _changed(previous: dict, note_marker: dict | None) -> bool:
+    return (previous.get("extractor") != invoicefacts.EXTRACTOR_VERSION
+            or previous.get("note_marker") != note_marker)
+
+
+def _invoice_needs_read(previous: dict | None, note_marker: dict | None) -> bool:
+    if previous is None or _changed(previous, note_marker):
+        return True
+    if previous.get("status") == "read":
+        return False
+    return int(previous.get("fruitless") or 0) < MAX_FRUITLESS_VISITS
+
+
+def _invoice_priority(previous: dict | None) -> int:
+    """Never tried first, then changed ones, then those whose last read did
+    not complete — the notes refresh's order, for the same reason."""
+    if previous is None or (previous.get("status") == "pending"
+                            and not previous.get("tried_at")):
+        return 0
+    if previous.get("status") == "read":
+        return 1
+    return 2
+
+
+def _read_previous_invoices(state_dir: Path) -> dict[tuple[str, str], dict]:
+    records: dict[tuple[str, str], dict] = {}
+    try:
+        for line in invoices_path(state_dir).read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                record = json.loads(line)
+                if (isinstance(record, dict) and isinstance(record.get("path"), str)
+                        and isinstance(record.get("name"), str)):
+                    records[(record["path"], record["name"])] = record
+    except (OSError, ValueError):
+        records = {}
+    return records
+
+
+def _current_index(state_dir: Path) -> dict:
+    try:
+        index = json.loads(index_path(state_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return index if isinstance(index, dict) else {}
+
+
+def _write_invoice_section(state_dir: Path, section: dict) -> dict:
+    """index.json with this half's section replaced and the notes half's
+    fields untouched."""
+    index = _current_index(state_dir)
+    index["invoices"] = section
+    _write_index(state_dir, index)
+    return section
+
+
+def _invoices_failed(state_dir: Path, now: datetime, outcome: str, why: str | None,
+                     **extra: Any) -> dict:
+    previous = _current_index(state_dir).get("invoices") or {}
+    section = {key: previous[key] for key in (
+        "written_at", "invoices_sha256", "counts", "remaining", "extractor",
+    ) if key in previous}
+    section.update({"refreshed_at": _stamp(now), "outcome": outcome, "error": why, **extra})
+    return _write_invoice_section(state_dir, section)
+
+
+def invoices_deferred(state_dir: Path, now: datetime) -> dict:
+    """A run that did not start because a chat was busy: recorded, the facts
+    file untouched, and the next run comes after the backlog gap."""
+    return _invoices_failed(state_dir, now, DEFERRED, None, deferred=True)
+
+
+def invoice_counts(records: list[dict]) -> dict[str, Any]:
+    def status(name: str) -> int:
+        return sum(1 for r in records if r.get("status") == name)
+
+    done = [r for r in records if r.get("status") in ("read", "partial")]
+    reasons: dict[str, int] = {}
+    for r in records:
+        if r.get("status") in ("unread", "partial") and r.get("reason_class"):
+            reasons[r["reason_class"]] = reasons.get(r["reason_class"], 0) + 1
+
+    def facts(r: dict) -> dict:
+        return r.get("facts") or {}
+
+    return {
+        "listed": len(records),
+        "read": status("read"),
+        "partial": status("partial"),
+        "unread": status("unread"),
+        "pending": status("pending"),
+        "gave_up": sum(1 for r in records if r.get("gave_up")),
+        "by_text_layer": sum(1 for r in done if r.get("read_as") == READ_TEXT),
+        "by_ocr": sum(1 for r in done if r.get("read_as") == READ_OCR),
+        "by_mixed": sum(1 for r in done if r.get("read_as") == READ_MIXED),
+        "not_read_reasons": dict(sorted(reasons.items())),
+        "with_account": sum(1 for r in done if facts(r).get("accounts")),
+        "with_payable_amount": sum(
+            1 for r in done if any(a.get("payable") for a in facts(r).get("amounts") or [])
+        ),
+        "fetched_elsewhere": sum(1 for r in records if r.get("fetched_elsewhere")),
+        "shared_file": sum(1 for r in records if r.get("shared_file")),
+    }
+
+
+def refresh_invoices(
+    run_tool: RunTool | None,
+    state_dir: Path,
+    now: datetime,
+    *,
+    max_reads: int | None = None,
+    budget: timedelta | None = None,
+    stop: threading.Event | None = None,
+    busy: Callable[[], bool] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    read: ReadDocument | None = None,
+) -> dict:
+    """Fetch and read the attachments of the indexed notes that are new,
+    changed or unfinished, at most `max_reads` and for at most `budget` of
+    wall clock, one at a time, stopping early on `stop` or when `busy` says a
+    chat is working; write invoices.jsonl and index.json's `invoices`
+    section. Returns that section."""
+    state_dir = Path(state_dir)
+    if not _tool_available(run_tool, INVOICE_TOOL):
+        return _invoices_failed(state_dir, now, NO_TOOL,
+                                f"{INVOICE_TOOL} is not installed as a read-only plugin")
+    assert run_tool is not None  # _tool_available said so
+    loaded = load(state_dir, now)
+    if not loaded.available:
+        return _invoices_failed(state_dir, now, NO_NOTES, loaded.reason)
+    reader = read or read_document
+    scratch = scratch_dir(state_dir)
+    _empty_scratch(scratch)  # whatever a crashed run left behind
+    previous = _read_previous_invoices(state_dir)
+
+    # Listing order is the notes file's order: the vault listing's, newest
+    # modified first.
+    listed: list[tuple[str, str, dict | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for note in loaded.notes:
+        marker = note.raw.get("marker") if isinstance(note.raw.get("marker"), dict) else None
+        for name in note.attachments:
+            key = (note.path, name)
+            if key not in seen:
+                seen.add(key)
+                listed.append((note.path, name, marker))
+    wanted = [(p, n) for p, n, m in listed if _invoice_needs_read(previous.get((p, n)), m)]
+    wanted.sort(key=lambda key: _invoice_priority(previous.get(key)))  # stable
+
+    bound = MAX_INVOICES_PER_RUN if max_reads is None else max_reads
+    allowed = (INVOICE_RUN_BUDGET if budget is None else budget).total_seconds()
+    started = monotonic()
+    markers = {(p, n): m for p, n, m in listed}
+    results: dict[tuple[str, str], dict] = {}
+    progressed = 0
+    deferred = False
+    for key in wanted:
+        left = allowed - (monotonic() - started)
+        if len(results) >= bound or left <= 0:
+            break
+        if stop is not None and stop.is_set():
+            break
+        if busy is not None and busy():
+            deferred = True
+            break
+        path, name = key
+        before = previous.get(key)
+        seconds = max(ATTACHMENT_MIN_SECONDS, min(ATTACHMENT_SECONDS, left))
+        try:
+            outcome = _process_attachment(run_tool, reader, scratch, path, name, before, stop,
+                                          seconds)
+        except Exception as exc:  # noqa: BLE001 — one attachment never ends the run
+            outcome = {"status": "unread", "reason_class": INVOICE_ERROR,
+                       "reason": type(exc).__name__, "read_as": NOT_READ, "progressed": False}
+        moved = outcome.pop("progressed", False)
+        progressed += int(bool(moved))
+        fresh = before is None or _changed(before, markers[key])
+        fruitless = 0 if (moved or outcome.get("status") == "read") else (
+            (0 if fresh else int((before or {}).get("fruitless") or 0)) + 1)
+        kept = dict(before or {})
+        for stale in ("unchanged", "gave_up", "stray_removed", "stray_copy_may_exist",
+                      "stale_facts_dropped"):
+            kept.pop(stale, None)
+        if "sha256" not in outcome and any(k in kept for k in _BYTES_FACTS):
+            # This visit could not establish the bytes are the ones the kept
+            # facts came from (a failed fetch, a too-large copy, an error):
+            # facts of possibly other bytes are not kept beside the new visit.
+            for k in _BYTES_FACTS:
+                kept.pop(k, None)
+            outcome["stale_facts_dropped"] = True
+        record = {
+            **kept, **outcome, "path": path, "name": name, "note_marker": markers[key],
+            "extractor": invoicefacts.EXTRACTOR_VERSION, "tried_at": _stamp(now),
+            "attempts": int((before or {}).get("attempts") or 0) + 1,
+            "fruitless": fruitless,
+        }
+        if moved:
+            record["read_at"] = _stamp(now)
+        if record["status"] != "read" and fruitless >= MAX_FRUITLESS_VISITS:
+            record["gave_up"] = f"gave up after {fruitless} attempts without progress"
+        results[key] = record
+    _empty_scratch(scratch)
+
+    records: list[dict] = []
+    wanted_set = set(wanted)
+    for path, name, _marker_now in listed:
+        key = (path, name)
+        if key in results:
+            records.append(results[key])
+        elif key not in wanted_set:
+            records.append(previous[key])
+        else:
+            # Whatever an earlier read made of it is kept, but not counted as
+            # read: it changed since, or was never finished.
+            records.append({**(previous.get(key) or {}), "path": path, "name": name,
+                            "status": "pending"})
+
+    # The same vault file behind two notes' attachments: a matcher must not
+    # count it as evidence for both bills.
+    notes_by_file: dict[str, set[str]] = {}
+    for r in records:
+        if r.get("from_vault"):
+            notes_by_file.setdefault(r["from_vault"], set()).add(r["path"])
+    for r in records:
+        if r.get("from_vault"):
+            r["shared_file"] = len(notes_by_file[r["from_vault"]]) > 1
+
+    text = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in records)
+    _publish(invoices_path(state_dir), text)
+    counts = invoice_counts(records)
+    counts["read_this_run"] = len(results)
+    counts["read_ok_this_run"] = progressed
+    counts["removed"] = len(set(previous) - seen)
+    section = {
+        "refreshed_at": _stamp(now),
+        "written_at": _stamp(now),
+        "outcome": PARTIAL if counts["pending"] else OK,
+        "error": None,
+        "counts": counts,
+        "remaining": counts["pending"],
+        "deferred": deferred,
+        "extractor": invoicefacts.EXTRACTOR_VERSION,
+        "invoices_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+    return _write_invoice_section(state_dir, section)
+
+
+def refresh_invoices_recorded(
+    run_tool: RunTool | None, state_dir: Path, now: datetime, **kwargs: Any
+) -> dict:
+    """`refresh_invoices`, with an unexpected exception recorded as outcome
+    `error` (its TYPE only: a message could quote an invoice) — and the
+    scratch directory emptied whatever happened."""
+    try:
+        return refresh_invoices(run_tool, state_dir, now, **kwargs)
+    except Exception as exc:  # noqa: BLE001 — the server outlives any refresh
+        print(f"[paynotes] invoice refresh failed: {type(exc).__name__}", file=sys.stderr)
+        try:
+            return _invoices_failed(Path(state_dir), now, ERROR, type(exc).__name__)
+        except Exception as again:  # noqa: BLE001
+            print(f"[paynotes] could not record the failure: {type(again).__name__}",
+                  file=sys.stderr)
+            return {"outcome": ERROR, "error": type(exc).__name__}
+    finally:
+        _empty_scratch(scratch_dir(Path(state_dir)))
+
+
 # --------------------------------------------------------------- the loop
 
 
 def next_wait(index: dict) -> timedelta:
     """Sooner only while a backlog is being worked off: a partial run that
     made no successful read (iCloud offline, every read failing) waits the
-    full day, or it would spend its whole budget on failures every 5 minutes."""
-    progressed = (index.get("counts") or {}).get("read_ok_this_run", 0) > 0
-    if index.get("outcome") == PARTIAL and progressed:
+    full day, or it would spend its whole budget on failures every 15 minutes.
+    The notes and the invoices are two backlogs under the one rule: either
+    one progressing brings the next run sooner."""
+    for half in (index, index.get("invoices") or {}):
+        progressed = (half.get("counts") or {}).get("read_ok_this_run", 0) > 0
+        if half.get("outcome") == PARTIAL and progressed:
+            return BACKLOG_EVERY
+    if (index.get("invoices") or {}).get("deferred"):
+        # A busy chat put the invoices off: back after the gap, not a day.
         return BACKLOG_EVERY
     return REFRESH_EVERY
 
@@ -727,7 +1312,9 @@ class Refresher:
     """One per aish-web. Refreshes at start, then daily — sooner while reads
     remain. The work runs on its OWN single thread: it is a chain of wrapper
     subprocesses that can take minutes, and the default executor is for
-    short calls a client needs (docs/web-server.md, L3)."""
+    short calls a client needs (docs/web-server.md, L3). The invoice half runs
+    after the notes half of the same run, on the same thread, so attachments
+    are read strictly one at a time."""
 
     def __init__(
         self,
@@ -736,8 +1323,12 @@ class Refresher:
         make_runner: Callable[[], RunTool | None],
         clock: Callable[[], datetime] = datetime.now,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+        busy: Callable[[], bool] = lambda: False,
     ) -> None:
         self.state_dir = Path(state_dir)
+        #: Is any chat working? The invoice half does not start while one is,
+        #: and stops between attachments when one starts.
+        self.busy = busy
         self.make_runner = make_runner
         self.clock = clock
         self.sleep = sleep
@@ -753,7 +1344,15 @@ class Refresher:
             print(f"[paynotes] {why}", file=sys.stderr)
             _, previous_index = _read_previous(self.state_dir)
             return _failed(self.state_dir, previous_index, now, ERROR, why)
-        return refresh_recorded(runner, self.state_dir, now, stop=self.stop)
+        index = refresh_recorded(runner, self.state_dir, now, stop=self.stop)
+        if invoices_enabled() and not self.stop.is_set():
+            if self.busy():
+                section = invoices_deferred(self.state_dir, now)
+            else:
+                section = refresh_invoices_recorded(runner, self.state_dir, now,
+                                                    stop=self.stop, busy=self.busy)
+            index = {**index, "invoices": section}
+        return index
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -770,6 +1369,10 @@ class Refresher:
                 print(f"[paynotes] {outcome}: {(index.get('counts') or {}).get('listed', 0)} "
                       f"listed, {index.get('reads_remaining', 0)} reads remaining",
                       file=sys.stderr)
+                if invoices := index.get("invoices"):
+                    print(f"[paynotes] invoices {invoices.get('outcome')}: "
+                          f"{(invoices.get('counts') or {}).get('read_this_run', 0)} read this "
+                          f"run, {invoices.get('remaining', 0)} remaining", file=sys.stderr)
                 await self.sleep(next_wait(index).total_seconds())
         finally:
             self.stop.set()
@@ -874,6 +1477,115 @@ def load(state_dir: Path, now: datetime | None = None) -> Loaded:
     return Loaded(True, "", notes, index, age)
 
 
+@dataclass
+class InvoiceRecord:
+    """One attachment's facts. Only `status` read or partial carries facts
+    this run established; an unread record keeps an earlier read's facts, if
+    any, the way an unread note keeps its earlier parse."""
+
+    path: str  # the note's vault path
+    name: str  # the attachment's name, as the note lists it
+    status: str  # read | partial | unread | pending
+    read_as: str | None = None  # text layer | ocr | mixed | not read
+    reason_class: str | None = None
+    accounts: list[dict] = field(default_factory=list)
+    amounts: list[dict] = field(default_factory=list)
+    dates: list[dict] = field(default_factory=list)
+    invoice_numbers: list[dict] = field(default_factory=list)
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_record(cls, record: dict) -> InvoiceRecord:
+        facts = record.get("facts") or {}
+        return cls(
+            path=str(record.get("path")),
+            name=str(record.get("name")),
+            status=str(record.get("status")),
+            read_as=record.get("read_as"),
+            reason_class=record.get("reason_class"),
+            accounts=list(facts.get("accounts") or []),
+            amounts=list(facts.get("amounts") or []),
+            dates=list(facts.get("dates") or []),
+            invoice_numbers=list(facts.get("invoice_numbers") or []),
+            raw=record,
+        )
+
+
+@dataclass
+class LoadedInvoices:
+    """What `load_invoices` found. `available` False means NO facts file —
+    never zero invoices."""
+
+    available: bool
+    reason: str = ""
+    invoices: list[InvoiceRecord] = field(default_factory=list)
+    section: dict = field(default_factory=dict)
+    age: timedelta | None = None
+
+
+def load_invoices(state_dir: Path, now: datetime | None = None) -> LoadedInvoices:
+    state_dir = Path(state_dir)
+    try:
+        index = json.loads(index_path(state_dir).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return LoadedInvoices(False, "no index: aish-web has not written one yet")
+    except (OSError, ValueError) as exc:
+        return LoadedInvoices(False, f"index unreadable: {type(exc).__name__}")
+    section = index.get("invoices") if isinstance(index, dict) else None
+    if not isinstance(section, dict):
+        return LoadedInvoices(False, "no invoice facts: none collected yet")
+    digest = section.get("invoices_sha256")
+    if not digest:
+        last = section.get("outcome") or "unknown"
+        return LoadedInvoices(
+            False, f"no invoice facts: never collected successfully (last attempt: {last})",
+            section=section)
+    try:
+        data = invoices_path(state_dir).read_bytes()
+    except OSError as exc:
+        return LoadedInvoices(False, f"invoices file unreadable: {type(exc).__name__}",
+                              section=section)
+    if hashlib.sha256(data).hexdigest() != digest:
+        return LoadedInvoices(False, "invoices file does not match the index", section=section)
+    invoices = [InvoiceRecord.from_record(json.loads(line))
+                for line in data.decode("utf-8").splitlines() if line.strip()]
+    age = None
+    try:
+        age = (now or datetime.now()) - datetime.fromisoformat(str(section.get("written_at")))
+    except ValueError:
+        pass
+    return LoadedInvoices(True, "", invoices, section, age)
+
+
+def _invoice_summary(state_dir: Path, now: datetime | None) -> list[str]:
+    """Counts and outcome words only: the facts file holds payee accounts."""
+    loaded = load_invoices(state_dir, now)
+    lines = ["invoice facts (from the notes' attachments)"]
+    section = loaded.section
+    if section.get("refreshed_at"):
+        lines.append(f"last collection attempt: {section['refreshed_at']} — outcome: "
+                     f"{section.get('outcome')}")
+    if not loaded.available:
+        lines.append(loaded.reason)
+        return lines
+    counts = section.get("counts") or {}
+    for key, label in (("listed", "attachments listed"), ("by_text_layer", "read by text layer"),
+                       ("by_ocr", "read by OCR"), ("by_mixed", "read by text layer and OCR"),
+                       ("partial", "partly read"), ("unread", "not read"),
+                       ("with_account", "with a valid account"),
+                       ("with_payable_amount", "with a payable amount"),
+                       ("gave_up", "given up on"),
+                       ("fetched_elsewhere", "found outside the note's own folders"),
+                       ("shared_file", "one file behind several notes"),
+                       ("read_this_run", "read this run")):
+        if key in counts:
+            lines.append(f"  {label}: {counts[key]}")
+    for reason, number in (counts.get("not_read_reasons") or {}).items():
+        lines.append(f"    not (fully) read — {reason}: {number}")
+    lines.append(f"  remaining: {section.get('remaining', 0)}")
+    return lines
+
+
 def summary(state_dir: Path, now: datetime | None = None) -> str:
     """The owner's `aish paynotes`: counts, age and outcome — no note content."""
     loaded = load(state_dir, now)
@@ -885,7 +1597,7 @@ def summary(state_dir: Path, now: datetime | None = None) -> str:
                      f"{index.get('outcome')}")
     if not loaded.available:
         lines.append(loaded.reason)
-        return "\n".join(lines)
+        return "\n".join(lines + _invoice_summary(state_dir, now))
     if loaded.age is not None:
         hours = loaded.age.total_seconds() / 3600
         lines.append(f"notes written: {index.get('notes_written_at')} ({hours:.1f} h ago)")
@@ -898,4 +1610,4 @@ def summary(state_dir: Path, now: datetime | None = None) -> str:
     lines.append(f"  reads remaining: {index.get('reads_remaining', 0)}")
     if index.get("listing_truncated"):
         lines.append("  the listing came back cut: some notes are not in the index")
-    return "\n".join(lines)
+    return "\n".join(lines + _invoice_summary(state_dir, now))

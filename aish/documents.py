@@ -61,6 +61,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import atomic_write, media, ocr, provenance
 
@@ -1109,6 +1110,7 @@ def recognise_scans(
     pdf_path: Path | str,
     priority: list[int] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    low_priority: bool = False,
 ) -> Rendition:
     """Read the words of the rendition's unread scan pages by OCR, write them
     into the rendition, and return it as now stored — with `unread_reason`
@@ -1116,7 +1118,8 @@ def recognise_scans(
 
     `priority` pages (the ones a pages=/section= call asked for) go first, so
     the cap can never leave the very page that was asked for unread while
-    reading others. At most `OCR_PAGES_PER_CALL` pages per call."""
+    reading others. At most `OCR_PAGES_PER_CALL` pages per call.
+    `low_priority` is `ocr.recognise`'s, for unattended background reading."""
     fresh = _read_cached(rendition.path, rendition.source) or rendition
     if not _needs_recognition(fresh):
         return fresh  # nothing to do takes no lock
@@ -1140,7 +1143,11 @@ def recognise_scans(
                 unrendered[number] = f"the page could not be rendered for recognition ({exc})"
         try:
             # A picture file may be read in bands, so it gets their time.
-            more = {"seconds_each": ocr.PICTURE_SECONDS} if current.kind == "picture" else {}
+            more: dict[str, Any] = (
+                {"seconds_each": ocr.PICTURE_SECONDS} if current.kind == "picture" else {}
+            )
+            if low_priority:
+                more["low_priority"] = True
             batch = ocr.recognise(pictures, should_stop, **more)
         except ocr.OcrUnavailable as exc:
             return dataclasses.replace(current, unread_reason=str(exc))

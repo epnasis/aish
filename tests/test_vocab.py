@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from aish import agent as agent_module
-from aish import approval, browse, browser, provenance, ratelimit, usage, vocab, web
+from aish import approval, browse, browser, invoicefacts, provenance, ratelimit, usage, vocab, web
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -639,6 +639,10 @@ class TestTheCatalogueIsTheInventory:
     def test_the_recorded_size_matches_the_real_list(self):
         assert vocab.CATALOGUE["browse._MUTATING_WORDS"].size == len(browse._MUTATING_WORDS)
         assert vocab.CATALOGUE["approval.SAFE_COMMANDS"].size == len(approval.SAFE_COMMANDS)
+        # Imported above so its declarations are in the catalogue whatever
+        # order the suite runs in: the sweep finds its call sites from source.
+        assert vocab.CATALOGUE["invoicefacts._PAYABLE_WORDS"].size == len(
+            invoicefacts._PAYABLE_WORDS)
 
     def test_every_entry_declares_what_a_miss_costs(self):
         assert all(v.on_miss in vocab.VERDICTS for v in vocab.CATALOGUE.values())

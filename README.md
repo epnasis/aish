@@ -1200,7 +1200,12 @@ older `/session` still works), `/help`, `/quit`.
 `aish paynotes` (the payment notes index aish-web builds from the vault's
 `Payments/` folder: counts, age and last outcome only; it reads the index and
 cannot refresh it — only aish-web can open the vault; `AISH_PAYNOTES=0` stops
-aish-web building it).
+aish-web building it). It also counts the invoice facts aish-web collects from
+the notes' attached invoices — attachments listed, read by text layer or by
+OCR, not read and why (an outcome word), with a valid account, with a payable
+amount, given up on, found outside the note's own folders, one file behind
+several notes, remaining — and never prints an account, an amount or a name;
+`AISH_PAYNOTES_INVOICES=0` stops that collection alone.
 
 **Config** — `~/.config/aish/config.toml`: `model`, `num_ctx`, `max_steps`,
 `vi_mode`, and an `[aliases]` table (aish-level aliases, since commands run
