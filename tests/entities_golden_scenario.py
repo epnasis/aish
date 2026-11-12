@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
+from aish import agent as agent_module
 from aish import skills
 from tests.test_agent import make_agent, model_says
 
@@ -32,7 +33,17 @@ def _normalised(chat, agent, tmp_path) -> list:
     text = text.replace(str(agent.scratch_dir), "SCRATCH")
     text = text.replace(str(tmp_path), "CWD")
     text = text.replace(os.environ["AISH_CONFIG_HOME"], "CONFIG")
-    return json.loads(text)
+    return json.loads(machine_neutral(text))
+
+
+def machine_neutral(text: str) -> str:
+    """The prompt names the account's owner and the platform's userland; the
+    golden was recorded on one machine and CI runs on another."""
+    text = re.sub(r"You are aish, .*?'s personal agent",
+                  "You are aish, OWNER's personal agent", text)
+    for note in agent_module._PLATFORM_NOTES.values():
+        text = text.replace(note, "USERLAND")
+    return text
 
 
 def _clear_memory() -> None:
