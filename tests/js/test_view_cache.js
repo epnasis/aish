@@ -34,6 +34,7 @@ const sandbox = {
   currentSession: "",
   pendingCards: 0,
   clientBusy: false,
+  currentTrace: null,
   pendingSends: [], // un-acknowledged send bubbles ([PENDING-SEND])
   offlineViewing: false,
   renderedAnswers: 0,
@@ -110,6 +111,7 @@ check("only a clean idle view is stashable", () => {
   assert(!viewStashable({ ...clean, dirty: true }));        // events since replay
   assert(!viewStashable({ ...clean, pendingCards: 1 }));    // card mid-decision
   assert(!viewStashable({ ...clean, busy: true }));         // task running
+  assert(!viewStashable({ ...clean, liveTrace: true }));    // a live card is on screen
   assert(!viewStashable({ ...clean, offlineViewing: true })); // mirror truncates
   // An un-acknowledged send bubble ([PENDING-SEND]) is DOM the server never
   // sent — filing it under a server fingerprint would cache a message that may

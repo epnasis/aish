@@ -407,4 +407,55 @@ function aIsWorking(w) {
   ok("A finished while away: back in A, no live card", w.liveCards().length === 0 && s.currentTrace === null);
 }
 
+// ---- 6. Two chats BOTH working, warm switches between them -------------------
+// Reported 2026-11-13 with two chats running at once: back in a running chat,
+// its card was a FINISHED "Worked for 4m 55s · 7 steps" with a second, live
+// card under it at 0:05. The incoming chat's hello stashed the view the warm
+// peek had just painted — a view holding that chat's live card — because the
+// stash's busy guard read `clientBusy`, which the switch had already dropped
+// (#407) and the hello restates only after the stash. Leaving the chat then
+// finished that card in place (resetLiveTurn), and the return reused the stash:
+// the finished card came back, and the landing built a fresh one at 0:00.
+{
+  const w = world();
+  const s = w.sandbox;
+  aIsWorking(w);
+  const TB = T0 + 30_000; // B's turn started 30 s after A's
+  const B_RUNNING = [
+    { type: "user", text: "b slow question", turn: "b2", ts: TB / 1000, at: TB / 1000 },
+    { type: "step", kind: "thinking_start" },
+  ];
+  // Warm switch to B, which is running too.
+  s.recentSessions = [{ name: "B", title: "B" }];
+  w.deliver({ type: "peek", name: "B", events: B_RUNNING, truncated: false });
+  s.resumeSession("B");
+  w.hello("B", true);
+  w.deliver({ type: "replay", events: B_RUNNING, truncated: false });
+  ok("B (busy) has one live card", w.liveCards().length === 1);
+  ok("…and B's live view was not stashed (it holds a running turn)", !s.viewCache.has("B"));
+
+  // Warm switch back to A, then to B again — neither transcript moved meanwhile.
+  w.clock.now = T0 + 150_000;
+  s.recentSessions = [{ name: "A", title: "A" }];
+  w.deliver({ type: "peek", name: "A", events: A_RUNNING, truncated: false });
+  s.resumeSession("A");
+  w.hello("A", true);
+  w.deliver({ type: "replay", events: A_RUNNING, truncated: false });
+  ok("A has one live card", w.liveCards().length === 1);
+  ok("…and A's live view was not stashed either", !s.viewCache.has("A"));
+
+  w.clock.now = T0 + 180_000;
+  s.recentSessions = [{ name: "B", title: "B" }];
+  w.deliver({ type: "peek", name: "B", events: B_RUNNING, truncated: false });
+  s.resumeSession("B");
+  w.hello("B", true);
+  w.deliver({ type: "replay", events: B_RUNNING, truncated: false });
+  const traces = w.messagesEl.children.filter((c) => c.classList && c.classList.contains("trace"));
+  ok("back in B: exactly ONE trace card, no finished copy of the running turn",
+    traces.length === 1);
+  ok("…it is live", w.liveCards().length === 1 && s.currentTrace !== null);
+  ok("…counting B's real elapsed time (2:30), not restarting at 0:00",
+    s.currentTrace.startedAt === TB && w.sub(w.liveCards()[0]).startsWith("2:30"));
+}
+
 report("test_choreo_idle_switch.js");

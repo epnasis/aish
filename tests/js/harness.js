@@ -444,6 +444,7 @@ function sessionWorld({ visible = true, storageThrows = false, globals = {} } = 
       serverPainted: false,
       pendingCards: 0,
       clientBusy: false,
+      currentTrace: null, // the live turn card; the stash refuses a view holding one
       renderedAnswers: 0,
       // Un-acknowledged send bubbles ([PENDING-SEND]): the view-cache decisions
       // read the count, and the replay paths reconcile them. Stubbed here —

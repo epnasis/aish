@@ -1925,13 +1925,19 @@ function replayFp(event) {
 
 // A view is only worth stashing when its DOM is a pure function of the replay
 // it was built from: nothing arrived since (dirty), nothing is mid-flight
-// (busy / pending approval cards / an un-acknowledged send bubble the server
-// has never confirmed), and it wasn't painted from the mirror's truncated copy
-// (offlineViewing).
+// (busy / a live turn card / pending approval cards / an un-acknowledged send
+// bubble the server has never confirmed), and it wasn't painted from the
+// mirror's truncated copy (offlineViewing).
+//
+// `liveTrace` is not redundant with `busy`: busy is dropped on every switch and
+// restated by the incoming chat's hello only AFTER that hello's stash, so a warm
+// paint of a RUNNING chat read as idle there and was stashed with its live card.
+// Leaving the chat then finished that card in place, and the return reused it —
+// a "Worked for …" card over a fresh one at 0:00.
 function viewStashable(state) {
   return Boolean(
     state.name && state.fp && !state.dirty && !state.pendingCards &&
-    !state.busy && !state.offlineViewing && !state.pendingSends
+    !state.busy && !state.liveTrace && !state.offlineViewing && !state.pendingSends
   );
 }
 
@@ -2154,6 +2160,7 @@ function stashCurrentView() {
     dirty: viewDirty,
     pendingCards,
     busy: clientBusy,
+    liveTrace: currentTrace !== null,
     offlineViewing,
     pendingSends: pendingSends.length,
   });
