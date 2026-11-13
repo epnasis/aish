@@ -259,9 +259,22 @@ class TestApply:
         _change_upstream(installed.repo)
         applied = skill_update.apply(skill_update.prepare("myskill"))
         after = skill_import.recorded_hashes(installed.tree, "myskill")
-        assert skill_grants.standing("myskill", recorded) is not None  # the old review
+        assert skill_grants.standing("myskill", recorded) is None  # withdrawn, not only lapsed
         assert skill_grants.standing("myskill", after) is None
-        assert "no longer covers it" in applied.grant
+        assert "withdrawn by the update" in applied.grant
+        assert skill_grants.last_act("myskill") == "revoked"
+
+    def test_an_executable_bit_only_update_still_withdraws_the_grant(self, installed):
+        """Bits are not hashed, so hash-matching alone would carry Always over
+        an update that only made a file executable. Any update withdraws it."""
+        recorded = skill_import.recorded_hashes(installed.tree, "myskill")
+        assert skill_grants.record(skill_grants.Offer("myskill", recorded), "test")
+        (installed.repo / "myskill" / "scripts" / "run.sh").chmod(0o644)
+        applied = skill_update.apply(skill_update.prepare("myskill"))
+        after = skill_import.recorded_hashes(installed.tree, "myskill")
+        assert after == recorded  # no byte changed
+        assert skill_grants.standing("myskill", after) is None
+        assert "withdrawn by the update" in applied.grant
 
 
 def _agent(tmp_path, decision, **kwargs):

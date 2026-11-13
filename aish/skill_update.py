@@ -408,12 +408,17 @@ def apply(prepared: Prepared, audit: Any = None) -> Applied:
     notes = [n for n in (skill_env.install_note(env), lock_note) if n]
     grant = ""
     if grant_before is not None:
-        after = skill_import.recorded_hashes(tree, name)
+        # Any update ends the grant, not only one that changed bytes: Always was
+        # given to what the owner reviewed then, and an update is a new review —
+        # an executable-bit-only change keeps every hash, so hash-matching alone
+        # would carry the grant over it.
+        revoked = skill_grants.revoke(prepared.old_name, "updated")
         grant = (
-            "its standing approval (Always for this skill) still covers it: the files' "
-            "bytes are unchanged"
-            if skill_grants.standing(prepared.declared, after) is not None else
-            "its standing approval (Always for this skill) no longer covers it: its next "
-            "run asks on a card"
+            "its standing approval (Always for this skill) was withdrawn by the update: "
+            "its next run asks on a card"
+            if revoked else
+            "its standing approval (Always for this skill) could not be withdrawn (the "
+            "grants file could not be written); its next run asks on a card only if the "
+            "files changed"
         )
     return Applied(notes=notes, grant=grant)

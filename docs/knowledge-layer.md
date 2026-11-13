@@ -375,7 +375,7 @@ Each skill costs only its own row when anything about it raises ("could not be c
 
 **Residuals, named.**
 - **A run in flight can mix versions.** A runner that started on the old version holds the old `SKILL.md` body; its later `read_file` of the skill's folder is refused during the window and, after the lock is written, served the NEW file, verified. Nothing stops or waits for runs.
-- **An executable-bit-only update keeps a standing grant**, because the lock records no bits and the grant binds to hashes; the result says the grant still covers it.
+- **Any update withdraws a standing grant** (an `updated` revocation is appended): Always was given to what was reviewed then, and an executable-bit-only change keeps every hash, so matching hashes alone would have carried the grant over it. If the grants file cannot be written, the result says so, and the grant then lapses only when hashes changed.
 - **The lock race is import's**: an update and an import (or two updates) at once can each read the old lock, and the later write drops the earlier entry — that skill is then served with the unchecked line.
 - **A crash leaves a folder under `.updates/`**; nothing reads it and nothing removes it.
 - **Not on the menu structurally.** `update_skill` is ranked against the task like any non-core tool; a menu that does not carry it still runs a call to it (`off_menu`).
