@@ -1692,6 +1692,22 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "update_skill",
+            "description": (
+                "Update an installed third-party skill to its source's current version. "
+                "aish shows the user a diff of every changed file for approval; the "
+                "source comes from the install record."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_skill",
             "description": (
                 "Search the user's approved skill sources for a skill to install. "

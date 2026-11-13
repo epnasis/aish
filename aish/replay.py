@@ -146,6 +146,7 @@ _NOT_A_TOOL_CARD = {
     "schedule_task": _WRITE_CARD,
     "read_file": "raises a read card, which a comment rule never answers",
     "import_skill": "raises an import card, which a comment rule never answers",
+    "update_skill": "raises an import card, which a comment rule never answers",
 }
 
 

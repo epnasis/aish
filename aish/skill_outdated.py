@@ -18,7 +18,6 @@ Each skill costs only its own row when anything about it fails.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import tempfile
@@ -70,19 +69,7 @@ def _installed_names(tree: Path) -> list[str]:
     return names
 
 
-def _installed_exec(folder: Path, recorded: dict[str, str]) -> dict[str, bool]:
-    """The executable bit of each recorded file as it is on disk now. The
-    lock records no bits, so this is the installed state, unverified; a file
-    missing or not a regular file is left out and its bit is not compared."""
-    out: dict[str, bool] = {}
-    for rel in recorded:
-        path = folder / rel
-        if path.is_file() and not path.is_symlink():
-            out[rel] = os.access(path, os.X_OK)
-    return out
-
-
-def _changes_line(changes: skill_import.FileChanges) -> str:
+def changes_line(changes: skill_import.FileChanges) -> str:
     parts: list[str] = []
     if changes.added:
         parts.append(f"added {', '.join(changes.added)}")
@@ -166,11 +153,12 @@ def _check_one(
         )
     new_files, _binaries = skill_import.collect(skill_dir)
     changes = skill_import.compare_install(
-        recorded, _installed_exec(tree / name, recorded), skill_import.install_bytes(new_files)
+        recorded, skill_import.installed_exec(tree / name, recorded),
+        skill_import.install_bytes(new_files),
     )
     if not changes:
         return f"new commits upstream ({moved}); this skill's files unchanged ({NOT_COMPARED})"
-    return f"CHANGED upstream ({moved}): {_changes_line(changes)} ({NOT_COMPARED})"
+    return f"CHANGED upstream ({moved}): {changes_line(changes)} ({NOT_COMPARED})"
 
 
 def check(tree: Path | None = None) -> list[Row]:

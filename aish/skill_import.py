@@ -413,25 +413,40 @@ def symlinks_in(directory: Path) -> list[str]:
     return sorted(found)
 
 
-def existing_skill(names: list[str]) -> Path | None:
+def _within(path: Path, folder: Path) -> bool:
+    """`path` is `folder` or under it, compared by position and
+    case-insensitively — the owner's disk is, so `VENDOR/Helper` is
+    `VENDOR/helper`."""
+    head = [p.casefold() for p in path.parts[: len(folder.parts)]]
+    return head == [p.casefold() for p in folder.parts]
+
+
+def existing_skill(names: list[str], excluding: Path | None = None) -> Path | None:
     """Where a skill answering to any of `names` already lives — in the
     owner's tree or the third-party one — or None. An import must never
     replace one (#466), and must never land beside an owner's skill of the
     same name either (#467): his would win every read, so the import would sit
     there unreachable. Checked: the folder by that name, the flat `<name>.md`,
     and any entry whose frontmatter `name:` matches (the frontmatter wins over
-    the path, so a different folder can still collide)."""
+    the path, so a different folder can still collide).
+
+    `excluding` is the one folder an UPDATE replaces (#467 slice 4c): the
+    skill being updated does not clash with itself, and nothing else is
+    exempt. An import never passes it."""
     from . import skills as sk
+
+    def exempt(path: Path) -> bool:
+        return excluding is not None and _within(path, excluding)
 
     trees = [sk.GLOBAL_SKILLS_DIR, sk.VENDOR_SKILLS_DIR]
     for skills_dir in trees:
         for name in names:
             for candidate in (skills_dir / name, skills_dir / f"{name}.md"):
-                if candidate.exists() or candidate.is_symlink():
+                if (candidate.exists() or candidate.is_symlink()) and not exempt(candidate):
                     return candidate
     for skills_dir in trees:
         for entry in sk._dir_entries(skills_dir, "skill"):
-            if entry.name in names and entry.path is not None:
+            if entry.name in names and entry.path is not None and not exempt(entry.path):
                 return entry.path
     return None
 
@@ -508,18 +523,26 @@ def record_import(
     hashes: dict[str, str],
     env: dict | None = None,
     audit: dict | None = None,
+    previous: dict | None = None,
 ) -> None:
     """Add `name` to the tree's lock. The ONE writer, called by both install
-    paths after the files are in place. Atomic against a torn write only: two
-    processes importing at once can each read the old lock, and the later
-    write drops the earlier entry, whose skill is then served as unchecked.
-    Raises OSError; an unreadable lock is replaced rather than trusted."""
+    paths and by an update after the files are in place. Atomic against a
+    torn write only: two processes importing at once can each read the old
+    lock, and the later write drops the earlier entry, whose skill is then
+    served as unchecked. Raises OSError; an unreadable lock is replaced
+    rather than trusted.
+
+    `previous` is the entry an update replaces (#467 slice 4c): its
+    `imported_at` is kept and `updated_at` says when the update was."""
     entries = _lock_entries(tree) or {}
+    today = date.today().isoformat()
+    first = previous.get("imported_at") if previous else None
     entries[name] = {
         "source": source,
         "path": sub_path,
         "commit": commit,
-        "imported_at": date.today().isoformat(),
+        "imported_at": first if isinstance(first, str) and first else today,
+        **({"updated_at": today} if previous is not None else {}),
         "files": hashes,
         **({"env": env} if env else {}),
         **({"audit": audit} if audit else {}),
@@ -834,6 +857,18 @@ def compare_install(
     )
 
 
+def installed_exec(folder: Path, recorded: dict[str, str]) -> dict[str, bool]:
+    """The executable bit of each recorded file as it is on disk now. The
+    lock records no bits, so this is the installed state, unverified; a file
+    missing or not a regular file is left out and its bit is not compared."""
+    out: dict[str, bool] = {}
+    for rel in recorded:
+        path = folder / rel
+        if path.is_file() and not path.is_symlink():
+            out[rel] = os.access(path, os.X_OK)
+    return out
+
+
 def quarantine_root() -> Path:
     """Where staged imports wait for review — resolved at CALL time through
     `paths.state_home` (#399), so a run that moved its state tree stages into
@@ -1009,7 +1044,7 @@ def install_env(name: str, dest: Path) -> dict:
 
 def lock_failure_note(
     tree: Path, name: str, source: str | None, sub_path: str, commit: str | None,
-    env: dict | None = None, audit: Any = None,
+    env: dict | None = None, audit: Any = None, previous: dict | None = None,
 ) -> str:
     """`record_import` with the hashes of what is now on disk, and a failure
     turned into the sentence both install paths say: the skill is installed
@@ -1027,7 +1062,7 @@ def lock_failure_note(
             else {"status": skillaudit.NOT_RUN, "covers": "nothing",
                   "why": "no audit was recorded when this skill was staged"}
         )
-        record_import(tree, name, source, sub_path, commit, hashes, env, entry)
+        record_import(tree, name, source, sub_path, commit, hashes, env, entry, previous)
     except OSError as exc:
         return (
             f"where it came from and its file hashes were NOT recorded in "

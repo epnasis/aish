@@ -1868,12 +1868,15 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
             return Approved(comment) if comment else True
         return Denied(comment) if comment else False
 
-    def approve_import(name, description, files, skipped, flags, dest, audit=None):
+    def approve_import(name, description, files, skipped, flags, dest, audit=None, update=None):
         # One consolidated review of the WHOLE skill (#139): every file's
         # contents (rendered syntax-highlighted by app.js) + risk flags, one
         # decision. Untrusted code is reviewed as whole files, not diffs.
         # `audit` is the import auditor's block (#467 slice 3), composed by
         # `skillaudit.Audit.card`: aish's headline and the model's findings.
+        # `update` (#467 slice 4c, `skill_update.Prepared.card`) makes it an
+        # update's card: what it replaces and a diff per changed file, drawn
+        # by app.js as text.
         request: dict[str, Any] = {
             "type": "approval_request",
             "kind": "import",
@@ -1886,13 +1889,15 @@ def make_web_approvers(bridge, logref, allow_path, deny_path, ask_all, get_scope
         }
         if audit is not None:
             request["audit"] = audit
+        if update is not None:
+            request["update"] = update
         carry_intent(request)
         answer = bridge.ask(request)
         approved = answer.get("action") == "approve"
         comment = str(answer.get("comment") or "").strip()
         decision = "approved" if approved else "denied"
         record(
-            f"import skill {name}",
+            f"{'update' if update is not None else 'import'} skill {name}",
             f"{decision} (feedback: {comment})" if comment else decision,
             card=answer,
             asked_by=ASKED_BY_IMPORT,

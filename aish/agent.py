@@ -74,6 +74,7 @@ from . import (
     skill_grants,
     skill_import,
     skill_runner,
+    skill_update,
     skillaudit,
     skills,
     token_ratio,
@@ -1443,6 +1444,13 @@ USE_SKILL_DENIED = "use_skill was DENIED by the user: nothing ran."
 FIND_SKILL_UNATTENDED = (
     "NOT SEARCHED: find_skill runs only in a chat a person started (this chat's "
     "origin is {origin!r}). Nothing was fetched."
+)
+# update_skill's refusal outside a chat a person started (#467 slice 4c): an
+# update replaces reviewed third-party text, so it is his decision, asked on a
+# card he is there to read — import_skill's and use_skill's precedent.
+UPDATE_SKILL_UNATTENDED = (
+    "NOT UPDATED: update_skill runs only in a chat a person started (this chat's "
+    "origin is {origin!r}). Nothing was changed."
 )
 USE_SKILL_NO_APPROVER = (
     "NOT RUN: no approval card is available here, and every use_skill run is "
@@ -9090,6 +9098,10 @@ class Agent:
             # (#467 4a). By name, like use_skill — NOT through EGRESS_TOOLS,
             # whose gate would read its args as a destination.
             return True
+        if name == "update_skill":
+            # Its success is aish's counts, but a refusal can carry git's
+            # stderr from the clone or a publisher's declared name (#467 4c).
+            return True
         if name in MAIL_STORE_TOOLS:
             # The case store quotes mail (#142 W5): every result, read or
             # change, carries text a stranger wrote or a model read from one;
@@ -9177,7 +9189,7 @@ class Agent:
             return str(a.get("about") or a.get("name") or "memory")
         if name == "create_skill":
             return str(a.get("name") or "skill")
-        if name == "use_skill":
+        if name in ("use_skill", "update_skill"):
             return str(a.get("name") or "skill")
         if name == "find_skill":
             return str(a.get("query") or "")
@@ -15959,6 +15971,9 @@ class Agent:
         if name == "find_skill":
             return self._find_skill(args)
 
+        if name == "update_skill":
+            return self._update_skill(args)
+
         if name == "use_skill":
             # The second execution point (docs/agent-core.md L1): entered only
             # here, carded, and every command it runs is in the kernel's sandbox.
@@ -17119,6 +17134,69 @@ class Agent:
             f"{skipped_note}{keywords_note}{env_note}{lock_note} It is third-party: from "
             "the next task it is listed as such and never preloaded; use_skill(<name>) "
             "runs it in an isolated runner."
+        )
+
+    def _update_skill(self, args: dict) -> str | tools.ToolOutcome:
+        """Update one installed third-party skill (#467 slice 4c,
+        `skill_update`): the import card, with a diff of the installed bytes
+        — verified against the lock first — against the bytes that will
+        install, and the auditor's reading of the new bundle. The result is
+        aish's counts only: the diff, the file names and the auditor's
+        findings reach the owner's card, never the model."""
+        name = str(args.get("name", "") or "").strip()
+        if self.origin != "user":
+            return _gate_outcome(UPDATE_SKILL_UNATTENDED.format(origin=self.origin),
+                                 decision="blocked")
+        if not name:
+            return "ERROR: update_skill needs the installed skill's name."
+        if self.approve_import is None:
+            return "ERROR: no import reviewer available; cannot update a skill."
+        try:
+            prepared = skill_update.prepare(name)
+        except skill_import.SkillImportError as exc:
+            return f"ERROR: {exc}"
+        name = prepared.name
+        files_payload = [
+            {"path": rel, "content": text, "lang": skill_import.lang_for(rel),
+             "executable": is_exec}
+            for rel, text, is_exec in prepared.files
+        ]
+        audit = self._audit_import(name, prepared.files)
+        self._note(f"→ reviewing an update of skill '{name}' ({prepared.counts()})")
+        decision = self.approve_import(
+            name=name, description=prepared.description, files=files_payload,
+            skipped=prepared.skipped, flags=prepared.flags(),
+            dest=str(prepared.folder), audit=audit.card(), update=prepared.card(),
+        )
+        said = f"update {name} ({prepared.commits()})"
+        if isinstance(decision, Denied):
+            self._arm_stop_gate(decision.comment)
+            return _gate_outcome(
+                _with_feedback(
+                    f"Update of {name!r} was DENIED — nothing was changed.",
+                    decision.comment, card_said=said,
+                ),
+                decision="denied", comment=decision.comment,
+            )
+        if isinstance(decision, Approved):
+            # A comment HOLDS the update, as on every other card (#81).
+            return _gate_outcome(
+                _tool_held("update_skill", decision.comment, card_said=said),
+                decision="held", comment=decision.comment,
+            )
+        if not decision:
+            return f"Update of {name!r} was denied — nothing was changed."
+        try:
+            applied = skill_update.apply(prepared, audit)
+        except skill_import.SkillImportError as exc:
+            return f"ERROR: {exc}"
+        self._note(f"→ updated skill '{name}'")
+        notes = "".join(
+            f" {n[0].upper()}{n[1:]}." for n in (*applied.notes, applied.grant) if n
+        )
+        return (
+            f"Updated third-party skill {name!r} ({prepared.commits()}): "
+            f"{prepared.counts()}.{notes} It is still third-party; use_skill(<name>) runs it."
         )
 
     def _audit_import(

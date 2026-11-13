@@ -8743,7 +8743,7 @@ function buildImportCard(card, event) {
   htext.className = "card-htext";
   const htitle = document.createElement("span");
   htitle.className = "card-htitle";
-  htitle.textContent = "Import skill";
+  htitle.textContent = event.update ? "Update skill" : "Import skill";
   const hsub = document.createElement("span");
   hsub.className = "card-hsub mono";
   hsub.textContent = event.skill;
@@ -8763,6 +8763,7 @@ function buildImportCard(card, event) {
   meta.className = "import-meta";
   meta.textContent = `${files.length} file${files.length === 1 ? "" : "s"} → ${event.dest || ""}`;
   card.appendChild(meta);
+  if (event.update) card.appendChild(importUpdateBlock(event.update));
 
   if ((event.flags || []).length) {
     const warn = document.createElement("div");
@@ -8814,7 +8815,7 @@ function buildImportCard(card, event) {
   const approveBtn = document.createElement("button");
   approveBtn.type = "button";
   approveBtn.className = "approve";
-  approveBtn.textContent = "Install";
+  approveBtn.textContent = event.update ? "Update" : "Install";
   approveBtn.onclick = () => answerCard(event.id, "approve", feedbackExtra(feedback));
   const denyBtn = document.createElement("button");
   denyBtn.type = "button";
@@ -8848,6 +8849,47 @@ function importAuditBlock(audit) {
     quote.textContent = `quoted from the skill: “${f.quote}”`;
     row.append(what, quote);
     box.appendChild(row);
+  }
+  return box;
+}
+
+// An update's part of the import card (#467 slice 4c): what it replaces
+// (aish's sentence), the package delta, what is not compared, then one diff
+// per changed file — installed bytes against the bytes that will install.
+// File names and diff lines are the publisher's text: every one is set as
+// textContent (renderDiff draws each line that way), never as markup. The new
+// files follow whole, below, as on an import card.
+function importUpdateBlock(update) {
+  const box = document.createElement("div");
+  box.className = "import-update";
+  const head = document.createElement("div");
+  head.className = "import-update-title";
+  head.textContent = update.summary || "";
+  box.appendChild(head);
+  if (update.changes) {
+    const changes = document.createElement("div");
+    changes.className = "import-update-changes";
+    changes.textContent = update.changes;
+    box.appendChild(changes);
+  }
+  for (const line of update.packages || []) {
+    const row = document.createElement("div");
+    row.className = "import-update-package";
+    row.textContent = line;
+    box.appendChild(row);
+  }
+  if (update.binaries) {
+    const bin = document.createElement("div");
+    bin.className = "import-skipped";
+    bin.textContent = update.binaries;
+    box.appendChild(bin);
+  }
+  for (const d of update.diffs || []) {
+    const fileHead = document.createElement("div");
+    fileHead.className = "import-file-head mono";
+    fileHead.textContent = `${d.status}: ${d.path}` + (d.note ? `  (${d.note})` : "");
+    box.appendChild(fileHead);
+    if (d.diff) box.appendChild(renderDiff(d.diff));
   }
   return box;
 }

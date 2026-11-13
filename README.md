@@ -183,6 +183,7 @@ unless you explicitly *Share* a selection.
 | `create_skill` | save or update a **skill** playbook — aish locates and composes the file itself, and a new name too similar to an existing skill is refused with that skill's name | **diff + y/N** |
 | `create_tool` | author a reusable **plugin tool** (validated `TOOL.md` + wrapper) | **diff + y/N**; refuses to write an invalid manifest |
 | `import_skill` | install a skill from a GitHub repo on your approved sources list (`~/.config/aish/skill-sources`); anything else, a local path included, is refused before it is fetched | **one consolidated review** of the whole skill + risk flags |
+| `update_skill` | replace an installed third-party skill with its source's current version — source and folder from the install record, installed files hash-checked first | **one review: diff of every changed file + the new files**; refused in a chat you did not start |
 | `find_skill` | search the skills your approved sources publish ("find me a skill for PDF forms"): each source is cloned and its skills' names and descriptions are cached for 24 h (`refresh` re-reads them); the sources are fetched without your search words and matching happens on your machine, so the search itself sends them nowhere. Matching is by words, not meaning: skills holding all your words rank first, then those holding some; when nothing matches that well, the answer also lists every skill your sources publish by name, so the assistant can pick by meaning (`xlsx` for "excel") and look that one up by name. Each result names the skill, its description (the publisher's own words, marked as such and capped), its repository and folder, and whether you already have it installed; every source is named with how old its listing is, or the error that kept it from being read. Installing one is a separate `import_skill`, with its usual review | auto (echoed); installs nothing; not available in scheduled or mail-started chats; its result counts as content from outside this machine |
 | `read_tool_output` | read the next page of a **truncated** tool result, from cache | auto (never re-runs the tool) |
 | _plugin tools_ | any `TOOL.md` you or the model add — called like a built-in | read-only auto; **mutating ones prompt** |
@@ -601,9 +602,22 @@ thousands of entries without bloating the context.
   contacted); or the error the source answered with. It asks each source
   which commit it is at and makes at most one shallow clone per source; text
   files are compared, binary files are not. It installs nothing and writes
-  nothing — to take a newer version, delete the skill and import it again.
-  A skill installed with `aish skill approve` before this version shows its
-  files once as "modified … (only a final newline added)".
+  nothing. A skill installed with `aish skill approve` before this version
+  shows its files once as "modified … (only a final newline added)".
+  **`aish skill update NAME`** (or asking aish to update a skill —
+  `update_skill`) takes the source's current version through one review: the
+  import card plus "replaces NAME (commit a → b)", the package changes, and a
+  diff of every changed file — what is installed now against what will
+  install — with the new files in full below. The source and folder are the
+  ones recorded at import; the installed files are checked against their
+  recorded hashes first, and a skill whose files changed, or that has no
+  recorded review, is refused ("delete it and import again"). Nothing changes
+  unless you approve; on approval the folder is replaced, its Python
+  environment is installed again, and then the record is written — until
+  then, runs of it are refused. An "Always for this skill" approval does not
+  carry over to changed files. The terminal command needs a terminal to answer
+  on: piped input is refused. In a chat you did not start, `update_skill` is
+  refused.
 - **Plugin tools** — where a skill *teaches*, a tool *does*. A droppable
   `<name>/TOOL.md` the model calls exactly like a built-in tool, choosing from a
   schema instead of improvising a shell command. Reserve one for an operation

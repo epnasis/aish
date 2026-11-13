@@ -72,8 +72,8 @@ GLOBAL_TOOLS_DIR = config_home() / "tools"
 # `inbox_preferences` (epic #142 W5), and to 33 by the native `inbox_items`
 # (epic #142 W5, the settlement redesign), and to 34 by the native
 # `use_skill` (epic #467 slice 2b), and to 35 by the native `find_skill`
-# (epic #467 slice 4a).
-TOOL_BUDGET = 35
+# (epic #467 slice 4a), and to 36 by the native `update_skill` (slice 4c).
+TOOL_BUDGET = 36
 NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FIELD_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")

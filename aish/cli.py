@@ -810,19 +810,45 @@ def print_audit(audit: dict) -> None:
         print(f"{DIM}      quoted from the skill: “{_plain(str(f.get('quote', '')))}”{RESET}")
 
 
+def print_update(update: dict) -> None:
+    """An update's own part of the import card (#467 slice 4c): what it
+    replaces, the package delta, what is not compared, and a diff per changed
+    file. File names and diffs are the publisher's text, so every field goes
+    through `_plain` (colorize_diff sanitises the diff per line)."""
+    print(f"{YELLOW}  ↻ {_plain(str(update.get('summary', '')))}{RESET}")
+    if update.get("changes"):
+        print(f"{DIM}  {_plain(str(update['changes']))}{RESET}")
+    for line in update.get("packages") or ():
+        print(f"{DIM}  • {_plain(str(line))}{RESET}")
+    print(f"{DIM}  ({_plain(str(update.get('binaries', '')))}){RESET}")
+    for d in update.get("diffs") or ():
+        note = f"  ({_plain(str(d.get('note')))})" if d.get("note") else ""
+        print(f"\n{CYAN}{BOLD}── {_plain(str(d.get('status', '')))}: "
+              f"{_plain(str(d.get('path', '')))}{RESET}{DIM}{note}{RESET}")
+        if d.get("diff"):
+            print(colorize_diff(str(d["diff"])))
+
+
 def make_import_approver(log, get_intent=None):
     """Consolidated review for a skill import (#139): the WHOLE skill in one
     decision — name, description, risk flags, and every file's contents — so
-    untrusted code is reviewed properly, not rubber-stamped file-by-file."""
+    untrusted code is reviewed properly, not rubber-stamped file-by-file.
+    With `update` (#467 slice 4c) the same review is of an update: what it
+    replaces and a diff of every changed file, then the new files whole."""
 
-    def approve_import(name, description, files, skipped, flags, dest, audit=None) -> bool:
+    def approve_import(
+        name, description, files, skipped, flags, dest, audit=None, update=None
+    ) -> bool:
         said = (get_intent() if get_intent else "") or ""
         print_intent(said)
+        verb = "update skill" if update else "import skill"
         # Attacker-authored by construction — that is what this review reads.
         # Every field is sanitised, not just the file bodies (#327).
-        print(f"\n{YELLOW}{BOLD}▶ import skill?{RESET} {BOLD}{_plain(str(name))}{RESET}")
+        print(f"\n{YELLOW}{BOLD}▶ {verb}?{RESET} {BOLD}{_plain(str(name))}{RESET}")
         print(f"{DIM}  {_plain(str(description))}{RESET}")
         print(f"{DIM}  → {_plain(str(dest))}  ({len(files)} files){RESET}")
+        if update:
+            print_update(update)
         if flags:
             print(f"{RED}  ⚠ review closely:{RESET}")
             for flag in flags:
@@ -835,14 +861,15 @@ def make_import_approver(log, get_intent=None):
             print(f"\n{CYAN}{BOLD}── {_plain(str(f['path']))}{RESET}"
                   f"{DIM}{'  (executable)' if f.get('executable') else ''}{RESET}")
             print(_plain(f["content"]).rstrip("\n"))
+        question = "replace it with this version?" if update else "install this skill?"
         try:
-            answer = input(f"\n{YELLOW}install this skill? [y/N]{RESET} ").strip().lower()
+            answer = input(f"\n{YELLOW}{question} [y/N]{RESET} ").strip().lower()
         except EOFError:
             answer = ""
         approved = answer in ("y", "yes")
         if log:
             log.command(
-                f"import skill {name}", "approved" if approved else "denied", said,
+                f"{verb} {name}", "approved" if approved else "denied", said,
                 asked_by=ASKED_BY_IMPORT,
             )
         return approved
@@ -2492,36 +2519,85 @@ def _personal_cli(args: list[str]) -> int:
     return 2
 
 
-def _audit_staged(name: str, dest: Path):
-    """`aish skill import`'s audit of the bytes it just staged (#467 slice 3).
-    No session log exists here, so the role's R7 record goes to its own file
-    (`skillaudit.records_path`); the reading waits beside the quarantine for
-    `approve`, which records in the lock whether it covers what installed."""
-    from . import skill_import, skillaudit
+def _audit_files(name: str, files: list[tuple[str, str]]):
+    """The auditor over a skill's text files from the terminal, which has no
+    session log: the role's R7 record goes to its own file
+    (`skillaudit.records_path`)."""
+    from . import skillaudit
     from .paths import state_home
 
     state = state_home()
-    audit, charter, result = skillaudit.audit(
-        name, skill_import.staged_files(dest), state_dir=state
-    )
+    audit, charter, result = skillaudit.audit(name, files, state_dir=state)
     record = (
         skillaudit.role_record(charter, result) if charter is not None and result is not None
         else {"kind": "role", "charter": skillaudit.AUDITOR, "status": audit.status,
               "why": audit.why, "model": audit.model}
     )
-    for write, what in (
-        (lambda: skillaudit.append_record(state, record), "its record"),
-        (lambda: skill_import.save_audit(name, audit), "its reading for `approve`"),
-    ):
-        try:
-            write()
-        except OSError as exc:
-            print(f"{DIM}  (the auditor's {what} could not be written: {_plain(str(exc))}){RESET}")
+    try:
+        skillaudit.append_record(state, record)
+    except OSError as exc:
+        print(f"{DIM}  (the auditor's record could not be written: {_plain(str(exc))}){RESET}")
     return audit
 
 
+def _audit_staged(name: str, dest: Path):
+    """`aish skill import`'s audit of the bytes it just staged (#467 slice 3);
+    the reading waits beside the quarantine for `approve`, which records in
+    the lock whether it covers what installed."""
+    from . import skill_import
+
+    audit = _audit_files(name, skill_import.staged_files(dest))
+    try:
+        skill_import.save_audit(name, audit)
+    except OSError as exc:
+        print(f"{DIM}  (the auditor's reading for `approve` could not be written: "
+              f"{_plain(str(exc))}){RESET}")
+    return audit
+
+
+def _skill_update_cli(name: str) -> int:
+    """`aish skill update NAME` (#467 slice 4c): the update card in this
+    terminal — what it replaces, a diff per changed file, the new files
+    whole, the flags and the auditor — and one y/N. The answer must come
+    from a terminal: piped input (`echo y | aish skill update x`, which the
+    model could run behind one generic command card) would approve a diff
+    nobody read, so without a tty nothing is asked and nothing changes."""
+    from . import skill_import, skill_update
+
+    if not sys.stdin.isatty():
+        print("error: NOT updated: the update's review is answered on a terminal, and "
+              "this one has none. Nothing was changed.")
+        return 1
+    try:
+        prepared = skill_update.prepare(name)
+    except skill_import.SkillImportError as exc:
+        print(f"error: {_plain(str(exc))}")
+        return 1
+    audit = _audit_files(prepared.name, [(rel, text) for rel, text, _x in prepared.files])
+    approved = make_import_approver(None)(
+        name=prepared.name, description=prepared.description,
+        files=[{"path": rel, "content": text, "executable": is_exec}
+               for rel, text, is_exec in prepared.files],
+        skipped=prepared.skipped, flags=prepared.flags(), dest=str(prepared.folder),
+        audit=audit.card(), update=prepared.card(),
+    )
+    if not approved:
+        print(f"not updated: {prepared.name} is unchanged")
+        return 1
+    try:
+        applied = skill_update.apply(prepared, audit)
+    except skill_import.SkillImportError as exc:
+        print(f"error: {_plain(str(exc))}")
+        return 1
+    print(f"updated {prepared.name} ({prepared.commits()}): {prepared.counts()} (third-party)")
+    for note in (*applied.notes, applied.grant):
+        if note:
+            print(f"  {_plain(note)}")
+    return 0
+
+
 def _skill_cli(args: list[str]) -> int:
-    """`aish skill <import|approve|list|discard|revoke|outdated>` — the review-in-your-editor
+    """`aish skill <import|approve|list|discard|revoke|outdated|update>` — the review-in-your-editor
     path for skill imports (#139). `import` STAGES to a quarantine dir (nothing
     installed); you review the files with your own tools, then `approve` installs.
     For in-session import with an inline review card, just ask aish to import.
@@ -2531,12 +2607,14 @@ def _skill_cli(args: list[str]) -> int:
     take a permission away, so it is the one write here the model may also
     reach (through a carded command) without that mattering. `outdated`
     reports which installed third-party skills changed upstream (slice 4b):
-    it reads, asks the approved sources, and installs and writes nothing."""
+    it reads, asks the approved sources, and installs and writes nothing.
+    `update` replaces one with its source's current version after a reviewed
+    diff (slice 4c)."""
     from . import skill_grants, skill_import
 
     usage = (
         "usage: aish skill <import https://github.com/OWNER/REPO [PATH] | approve NAME "
-        "| list | discard NAME | revoke NAME | outdated>"
+        "| list | discard NAME | revoke NAME | outdated | update NAME>"
     )
     if not args:
         print(usage)
@@ -2588,9 +2666,11 @@ def _skill_cli(args: list[str]) -> int:
         width = max(len(row.name) for row in rows)
         for row in rows:
             print(f"{_plain(row.name.ljust(width))}  {_plain(row.line)}")
-        print(f"{DIM}nothing was installed; to take a newer version, delete the skill "
-              f"and import it again{RESET}")
+        print(f"{DIM}nothing was installed; to take a newer version: aish skill update "
+              f"NAME{RESET}")
         return 0
+    if cmd == "update" and len(rest) == 1:
+        return _skill_update_cli(rest[0])
     if cmd == "revoke" and rest:
         before = skill_grants.last_act(rest[0])
         if not skill_grants.revoke(rest[0], "aish skill revoke"):

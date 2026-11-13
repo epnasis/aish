@@ -104,7 +104,11 @@ from aish import tools
 # measured, 42,290 -> 42,886; epic #467 slice 4a). The owner asked aish to find
 # him a skill and then propose installing it; without a tool the model could
 # only guess repository paths for import_skill, or browse GitHub as web pages.
-MAX_MENU_CHARS = 42_900
+# Raised 42,900 -> 43,300 on 2026-11-13 for ONE new tool, update_skill (+337 chars
+# measured, 42,886 -> 43,223; epic #467 slice 4c). Without it a newer version of
+# an installed skill is taken only by the owner deleting it by hand and the
+# model importing it again — with no diff against what he reviewed before.
+MAX_MENU_CHARS = 43_300
 
 # One tool's description. The longest survivor of the cut (read_media) is 771;
 # a description that needs more than this is an essay wanting to be a doc.
