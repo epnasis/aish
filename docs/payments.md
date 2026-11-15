@@ -26,7 +26,7 @@ Both are written whole through `atomic_write.publish`. A run that fails writes n
 
 ## The laws
 
-**Parsing records, it never resolves.** Amounts become integer minor units plus a currency (default PLN, said so in `currency_source`); `496.33`, `496,33`, `3 264,00`, `3264,00 PLN` are accepted, and anything ambiguous (`1,234`) or not an amount (`TBD`) is null with the raw text kept, capped. `paid` takes any spelling of true/false; an empty one is `unknown`. Frontmatter and the body's bullets (`Kwota`, `Termin płatności`, `Rachunek`, `Faktura`) fill each other's gaps; where both are present and DISAGREE the field is null, its `_source` says `conflict`, and both values are in `conflicts` — which one is right is the owner's call. A paid line beside `paid: false` is a conflict too. A paid line is "Zapłacono" in any case after a heading marker, a ✅, or both — plain prose mentioning it is not one. An invoice number is accepted only when the WHOLE value is one token (`FV/123/2026`, or `nr 245750201495` in the body); `FV 123/2026` is unparsed with its raw text, never cut to `FV`. The month comes from frontmatter, else the file name's `YYYY-MM`.
+**Parsing records, it never resolves.** Amounts become integer minor units plus a currency (default PLN, said so in `currency_source`); `496.33`, `496,33`, `3 264,00`, `3264,00 PLN` are accepted, and anything ambiguous (`1,234`) or not an amount (`TBD`) is null with the raw text kept, capped. `paid` takes any spelling of true/false; an empty one is `unknown`. Frontmatter and the body's bullets (`Kwota`, `Termin płatności`, `Rachunek`, `Faktura`) fill each other's gaps; where both are present and DISAGREE the field is null, its `_source` says `conflict`, and both values are in `conflicts` — which one is right is the owner's call. A paid line beside `paid: false` is a conflict too. A paid line is "Zapłacono" in any case after a heading marker, a ✅, or both — plain prose mentioning it is not one. An invoice number is accepted only when the WHOLE value is one token (`FV/123/2026`, or `nr 900000000123` in the body); `FV 123/2026` is unparsed with its raw text, never cut to `FV`. The month comes from frontmatter, else the file name's `YYYY-MM`.
 
 **No index is not zero bills.** `load` answers `available: False` with a reason when there is no index, it cannot be read, no refresh ever succeeded, or the notes file does not match it. An empty folder is an index with zero notes.
 
@@ -209,6 +209,136 @@ Invoice facts:
 
 The fake plugin builds its answers in the plugin's real output shapes through the runtime's own `tool_plugins.envelope`.
 
-## Not verified
+## Not verified (the index)
 
 Nothing here has run against the real vault: the formats above come from the plugin's source. In particular, what an offloaded note's listed `modified` and `size` are (the placeholder's, by the plugin's `stat` of the `.icloud` file) and whether every one of the ~500 notes follows the bullet labels above are read from code and from the owner's description, not observed.
+
+# Matching bills to payments
+
+`paysig.py`, `aish paysig`, `tests/test_paysig.py`. The owner, 2026-11-12: *"I usually pay exactly the same way. Once you figure out how to match each invoice for a given provider and type of payment, it would repeat every single time."* And, binding, 2026-11-13: *"Account or org name is to be matched, not names in Obsidian. The garage and the flat have different accounts and transfer titles. A telecom has three accounts and three contracts."*
+
+So **the payee account is the bill.** A note's wording never identifies a bill, and a bill exists whether or not a note does: the bills are learned by code from the bank ledger alone, and each note attaches to one. Nothing the owner sees changes except the read-only `aish paysig`; bills in the brief are a later slice.
+
+## Scars: what identified a bill before, and failed
+
+Three matchers built on the note's words were measured on his data and dropped:
+
+- **Bills keyed by the note's file-name words, then an account learned per key** (2026-11-12). Notes are free writing, so one bill splits into many keys (`prad lipowa`, `rozliczeniowa lipowa`, `lipowa`; a misspelling of the street; `Gazex Gazex` apart from `Gazex Lipowa` — the street and provider here invented), and few keys keep 3 note-months. Measured: 3 of 165 keys learned (131 of 494 notes).
+- **Payee profiles with word overlap** (a prototype, never built). Measured on 183 paid notes: 92 attached to one account, 72 tied (42 of them the electricity supplier's notes across its accounts), 19 shared no word with the payee; at least 4 attachments were wrong.
+- **Word-keyed associations** (built 2026-11-12, removed 2026-11-13). The invoice matcher learned `(provider words, purpose words) → account` from its A pairings and used it for notes with no invoice account. Measured on the full data (596 invoices read, 465 paid notes): usable 5, too few 31, stale 12, conflicting 2 — the same bill fragmented by free-text note names (one electricity bill of one property appeared as several one-month entries; the flat and the garage "conflicted" because their notes share words). Its `the invoice names a new account`, keyed the same way, fired 54 times across history. The notes-by-account measurement below shows why: 27 invoice accounts carry the 359 paid notes that have one, and up to 18 distinct note spellings land on ONE account.
+
+## The bills, from the bank alone
+
+`learn_bills`, pure and deterministic. A payment's bill is its payee account; a card payment (no account) belongs to its **merchant**: the title before the first `/` (the import era writes `MERCHANT /CITY … Data waluty: …`), digits dropped, folded and cut to 19 characters like a payee name.
+
+- **An account is a bill** when it was paid at least `BILL_MIN_PAYMENTS` (3) times, or when a note's invoice prints it and it was paid at all.
+- **A card merchant is a bill** only when it looks like one by the bank's own record: at least 3 payments, a regular cadence, an amount `always the same` or `a few values`, and at most `CARD_MAX_PER_MONTH` (1.3) payments per month it is paid in. Measured: of 1,210 merchant keys in 36 months, 296 had 3+ payments and 54 a regular cadence at about one payment a month — but most of those were shops (clothing, pizza, a cinema); the amount rule leaves the subscriptions (video, music, cloud services). Every rule here is a fence against a measured rival, not a classifier: a parking operator paid every two months is still a "bill" by it.
+- **Its profile is its own last 36 months** (`BILL_HISTORY_MONTHS`, counted back from its last payment, so an ended bill keeps the profile it had): cadence, usual day-of-month range (the extreme tenth on each side dropped), amount profile (`always the same` / `a few values`, the top three covering 80 % / `varies`), recurring title words (words with a letter in at least half its titles), first and last payment month.
+- **Its names are over ALL its history**, newest first, each with its first and last month: a payee renamed on an unchanged account (renamed twice) is one bill with three names, and a note written under any of them finds it.
+- **Cadence** is the median gap between the months it was paid in: `monthly`, `every 2 months`, `quarterly` (3–4), `half-yearly` (5–7), `yearly` (11–13), when at least 60 % of the gaps sit at that median (±1 beyond monthly); otherwise `irregular`; fewer than 3 payment months is `too few payments`.
+- **Its id names no account**: `account:` + 12 hex of the account's SHA-256, or `card:` + the merchant. The account itself is in `bills.json` only (0600), never logged or printed.
+
+### Expected, not yet seen — and ended?
+
+Per bill, as far as the ledger reaches (`min(today, synced_to)`; an unsynced ledger says `the bank ledger does not reach this month` and expects nothing):
+
+- **`ended?`** when its last payment is older than two cadence lengths — or, with no cadence (irregular, too few), older than `UNCADENCED_ENDED_MONTHS` (12, a stated choice). It expects nothing.
+- A `monthly`, `every 2 months` or `quarterly` bill with at least `EXPECT_MIN_PAYMENTS` (6) payments expects its next payment by the **end of its usual day range in the month one cadence after its last payment**. One day past that it is `expected, not yet seen`, with `days_late`. Stored per bill and as a bill finding; **not rendered** — the brief slice will use it.
+
+## A note attaches to a bill
+
+A note is an occurrence of some bill, never its identity; its id is its vault path. Its invoice evidence is the union over the note's attachments read `read` or `partial`, except a record flagged `fetched_elsewhere` or `shared_file`, which is evidence for neither note; an account that is one of his own (the bank's accounts table) is no payee. Amounts with `currency_seen: false` or `ambiguous_grouping: true` are WEAK.
+
+**The route** (`NoteResult.route`), one per note:
+
+1. **`invoice account`** — the account its invoice prints is its bill (tier A or B evidence, below).
+2. For a note with no usable invoice account, the bank decides — **never another note's name**:
+   - the bills whose names, over time, carry EVERY word of the note's `paid_to` (folded; words with a letter only) — of those, the ones paid in the note's window are the candidates (all of them when none was);
+   - one candidate → **`payee name, one bill`**;
+   - several → the one whose recurring title words carry a word of the note's file name (its words after the month, minus the payee's), while no word of the note is ANOTHER candidate's own title word (one no other candidate's titles recur) → **`payee name and transfer title`**;
+   - otherwise **`several bills of this payee`**, with how many — what a later slice asks the owner about;
+   - no bill carries the payee's words → `no bill of this payee`; no `paid_to` → `the note names no payee`.
+
+The refutation clause is what lets a garage note reach the garage when the flat's titles carry the street and the garage's carry `garaz`; without it the note's street word reaches both. Four rival rules (any overlap; most words; covers every relevant word; this one) gave the same answers on his data; this one is the one whose fixture they fail.
+
+**Measured, before building it on the notes** (2026-11-13, frozen copy): for the notes whose invoice prints exactly one account that is a bill, the C route was run with the invoice removed and compared with the invoice's account: **207 reached the same bill (42 by name, 165 by name and title), 0 another bill**; 73 were `several bills of this payee` (61 of them the electricity supplier's notes whose one word reaches two bills' titles equally — the flat's and the garage's, whose notes do not say what tells the titles apart), 67 `no bill of this payee` (a housing administrator's notes, paid to the community's account under another name).
+
+## The window
+
+From the first day of the second month before the note's month — or the invoice's earliest read date, when that is LATER — to a due date read on a due-date line plus 30 days (never before the end of the month after), else the last day of the second month after. **A read date only narrows**: invoices print dates from years back, and using one as a start made a 2026 bill take a 2021 payment. Stated choices: of several due-line dates, the one nearest the note's month; a note with no invoice due date uses its own `date_due`.
+
+## The bank side
+
+`read_payments` reads the ledger through `mailbank.read_ledger(keep_raw=True)` — the one read-only opening — and normalises both eras by the raw record's field names: the CSV import (to 2025-08-31: `Numer konta`, `Nadawca/Odbiorca`, `Tytuł`, `Opis operacji`; no creditor-account field) and the bank API (`creditor_account.other.identification` or `.iban`, `creditor.name`, `remittance_information` = title lines then the operation phrase). Left out as payments to nobody: transfers to his own accounts, and the counted phrases `PRZELEW NA TWOJE CELE` / `PRZELEW WŁASNY` (`docs/vocabularies.md`).
+
+## Evidence, strongest first
+
+- **A — account and amount**: a payment to one of the invoice's accounts, of one of its amounts. Weak amounts count only when no strong amount matches, and the pairing is marked `weak amount`. Never an amount with no account.
+- **B — account only**: a payment to the invoice's account in the window, no amount agreeing. **A finding, never "paid", and it spends nothing.**
+- **C — the note's bill by the route above**, for a note with no usable invoice account: the unspent payment of that bill in the window nearest the note's own month (a note amount, when present, picks first; one that differs is marked). Nearest, not earliest: measured, 221 of 251 A pairings were paid in the note's own month, and the earliest in the window is a cycle before (13 of the first 29 C pairings took the payment two months early before this was changed).
+
+**Several invoices on one note** — more than one payee account across its usable attachments — is a finding of its own and pairs nothing. **Several invoices of ONE account on a note** (last cycle's invoice attached beside this one — a measured residual of the first build, where any amount on any attachment could price the note): tier A takes amounts only from the attachment whose read dates sit nearest the note's month (ties: the newest), and the pairing is marked `amounts on the note's other invoices of this account were not used` when another attachment printed amounts. A bundled last-cycle invoice therefore never lets last cycle's payment pay this note. **The invoice number only breaks a tie**: when a candidate's title carries one, it is chosen over otherwise equal candidates (marked).
+
+### Why B stays B — the 90 "amount differs", measured (2026-11-13)
+
+Every one of the 90 notes with a payment to its invoice's account in the window and no amount agreeing was compared with everything its invoice facts hold:
+
+- **0** were a matcher rule problem: no payment equals an amount read from the invoice that A did not consider (weak amounts are already considered when no strong one matches; there are no page-only, currency or grouping misses).
+- **55** paid an amount printed on ANOTHER note's invoice of the same account — the neighbouring cycle: in 27 the payment is that neighbour's own pairing, in 27 the neighbour is paired to another payment, 1 neighbour is unpaired; in 8 of the 55 the bill's own printed amount was there too, taken by a neighbour printing the same (a repeated forecast amount). 50 of the 55 are the electricity supplier's.
+- **35** no neighbour explains — 25 with no amount near, 6 within 10 % and 4 within 1 % of a printed amount: a housing administrator 22 (its monthly payments are a fixed advance that matches no printed amount), insurance 8, the electricity supplier 3, a developer 2.
+- No instalment sums (2–3 payments in the window adding to a printed amount) and 2 forecast schedules (3+ to-pay amounts) among them. 78 were read from a text layer, 12 by OCR.
+
+So nothing is loosened: most of B is the neighbour's payment, and an amount tolerance would take it. Of the 7 "account known, no payment in the window": 3 had no invoice account (an association), 2 an account never paid in the ledger, 1 payments just outside the window (1 of 5 with the amount), 1 the nearest payment 6 months away.
+
+## Assignment
+
+Joint over all notes, deterministic, spent once. Recorded A pairs stand (one whose transaction left the ledger settles nothing, and its note takes no other). Then **A, with every claim evaluated once up front**: each unspent payment that satisfies A for exactly one note goes to that note first; then notes in month order — his notes before notes aish made, within a month — take the earliest unspent A payment. Then **C** over what is left. **B** is computed last and only reported. A note whose month is after the current one pairs nothing. One transaction pays one bill across this ledger and the mail bills' (`mailbank.assign` skips note pairs; `match` skips mail pairs).
+
+**Only A is recorded** (note, transaction, tier, flags, `checked_to`) and never reassigned. **C is recomputed every run and gives way to any later A claim**: a C pairing frozen today would take the payment a neighbour's invoice matches exactly next week.
+
+## Findings, one per note, and marks
+
+Observations only: `note says paid, payment found` (tier A or C); `note says unpaid, payment found (the note is behind)`; `a payment to the invoice's account exists in the window, amount differs` / `…, no amount read` (B); `several invoices on one note`; `several bills of this payee` (with how many); `note says paid, no payment found:` `no invoice read yet, no bill of this payee` / `the invoice shows no account, no bill of this payee` / `bill known, no payment in the window`; `note says paid, and its payment is already paired to a mail bill`; `note says unpaid, no payment,` due date ahead / passed (the invoice's due line, else the note's), or no due date known, month ahead / passed; `the note's paid field is unknown or contradictory`; `the bank ledger does not reach this month`; `one document attached to several notes`; `the invoice was found outside the note's own folders`.
+
+Marks: **`the invoice names a new account`** — only on a note NOT yet paid (no payment found, not marked paid) whose month is the current one or later, when its invoice prints an account that is no bill of its payee (the bills whose names carry its `paid_to` words); it carries, as an observation only, the payee name the newest of those bills is paid to. **History never raises it**, and neither does a payee with no bill to differ from. In practice it can fire only while a note is unpaid and in its own month (or a later one) with its invoice already read — once the note is marked paid or its payment is found, it is never raised. `weak amount`, `amount differs` (C), `chosen by the invoice number in the title`, `paired to an aish-made note while an owner note of the same bill shares the window`, `name disagrees`, `amounts on the note's other invoices of this account were not used`. Per paired account: payments to it that pair with no note.
+
+Each note also stores, for the next slice, what its invoice offers a reminder: exactly one strong to-pay amount, several, or none read; a due date read on a due line, or only the month. Stored, not rendered.
+
+## Stores, the one writer, the command
+
+`<state>/payments/bills.json` — per bill: `account` (null for a card merchant), `kind` (`account` | `no account`), `names` (`{name, first, last}`, newest first), `name_words`, `title_words`, `cadence`, `cadence_months`, `day_range`, `amounts`, `payments`, `first_month`, `last_month`, `last_paid`, `status` (`active` | `ended?`), `expectation` (`state`, `expected_by`, `days_late`), `notes`, `spellings` (the note names that attached to it, without words carrying a digit), `senders` (empty; a later slice fills it) — and `findings` (each bill `expected, not yet seen`, with its days late). `<state>/payments/signatures.json` — per note: finding, tier, marks, `bill`, `route`, `candidates`, `observations`, reminder offer. `note-pairs.jsonl` — A pairs only, keyed by the note's path. All written whole through `atomic_write.publish`, 0600. **Only `learn_and_record` writes them**, under the item acts' lock; the report job calls it after the bank sync and the mail bills' pairs (`mailreport._learn_payment_signatures`), its outcome counts in the ledger entry's `paysig` part, and an exception is recorded by type and never costs the brief. **Could not check**: no readable notes index, invoice facts or ledger writes nothing; any of them stale (the index or facts older than 2 days, the ledger past `mailbank.FRESH_DAYS`) records the outcomes and NO new pairing.
+
+`aish paysig` and `--backtest` recompute for display and write nothing. The command prints the bills table (the payee as the bank writes it, digit runs elided; cadence; payments; notes attached; status), tiers, routes, findings and marks as counts, the bills `expected, not yet seen` with their days late, and the new-account marks with the usual payee — never an amount, an account number or a title. `--backtest YYYY-MM` learns the bills from the ledger before the cut (and the invoice accounts of the notes before it) and reports, for paid notes from the cut on, tier A / B / C / none, the routes of those with no invoice account, how many with no read invoice C matched, whether C alone picks the same payment as A, and unpaid notes' payments found anyway.
+
+`tests/test_paysig.py`: `TestTheBill`, `TestTierA`, `TestTheBills`, `TestExpectations`, `TestTierC`, `TestFindings`, `TestTheBacktest`, `TestTheBankSide`, `TestTheStoresAndTheWriter`, `TestTheCommand`, `TestTheReportJob`. A mutation run (no refutation clause, C earliest, the new account on history, the card per-month or amount rule off, the ledger reach ignored, names or name words from the last 36 months only, every named bill a candidate, `ended?` off) fails at least one test each.
+
+## Measured (2026-11-13; a fresh frozen copy of the notes index, the invoice facts and a `.backup` of the ledger)
+
+**Bills from the bank alone (Part 1, last 36 months)**: 7,371 outgoing payments, 1,101 to an account and 6,270 by card. 106 accounts, 48 with 3+ payments: cadence monthly 27, every 2 months 8, quarterly 1, yearly 2, irregular 10; amount always the same 3, a few values 22, varies 23; 36 kept one payee-name prefix, 12 two or three. 12 of the 48 are on a read invoice; 36 never — the most regular of those a tax office, a telecom's three accounts, a cable operator, housing and sports clubs and family transfers. Payee names with several accounts: an electricity supplier 5 (all linked to notes; their titles differ by words and an 11-digit number), housing communities 4, a club 6, a telecom 3 — **the telecom's titles carry only a per-invoice 14-digit number, nothing recurring: its three accounts are told apart by the account alone.**
+
+**Notes by account**: of 465 paid notes, 359 have an invoice account, 106 none (66 with no invoice read). 27 distinct accounts; notes per account 1 (5 accounts), 2 (5), 3–6 (8), 10+ (9); distinct note spellings per account 1 (9 accounts) up to 13, 15 and 18; 11 notes print several accounts.
+
+**After this slice**, against BEFORE (the invoice matcher with word-keyed associations; 494 notes, 465 paid):
+
+| | before | after |
+|---|---|---|
+| payment found (paid notes) | 264 (A 251, C 13) | 280 (A 251, C 29) |
+| amount differs / no amount read | 90 / 3 | 90 / 3 |
+| several invoices on one note | 11 | 11 |
+| several bills of this payee | — | 26 |
+| no invoice read (and no bill of the payee) | 52 | 29 |
+| invoice shows no account (and no bill) | 29 | 10 |
+| bill known, no payment in the window | 7 | 10 |
+| ledger does not reach (all notes) | 21 | 20 |
+| the invoice names a new account | 54 | 0 |
+
+Pricing a note only by its nearest invoice of one account (above), re-measured 2026-11-15 on a fresh copy: tier A 251 → 248, amount differs 90 → 93; 50 A pairings carry the mark.
+
+Paid notes by route: invoice account 359, payee name one bill 18 (C paired 16), name and title 19 (13), several bills 27, no bill of the payee 42. Bills: 241 (188 `ended?`); of the 53 not ended — monthly 27, every 2 months 11, quarterly 1, yearly 4, irregular 8, too few payments 2; 39 accounts, 14 card merchants; 17 with notes, 36 without. `expected, not yet seen` now: 1 (a parking operator paid by card, 48 days); 33 next payment not yet due, 19 no expectation. Hold-out: at 2026-05, A 10, B 6, C 3, none 8 (C alone the same payment as A 4, another 0); at 2025-11, A 20, B 6, C 4, none 12 (same 12, another 0); unpaid notes with a payment found 0 at both.
+
+## Residuals
+
+- **The flat and the garage are mostly `several bills of this payee`.** Their notes' words (the street) reach both bills' transfer titles; what tells the titles apart is not in the notes. The route reports it — a later slice asks the owner which bill — rather than letting a note's name decide.
+- **A bill is anything the bank shows paid regularly**: family transfers, a tax office, payment gateways (one account per payment operator, not per merchant) and a parking operator are bills by this rule. The rule has no notion of "a bill he cares about"; that is the owner's to say.
+- **A merchant can split across the two ledger eras** where the import and the API write its card title differently. Not measured per merchant.
+- **Weak amounts dominate A** (190 marks) and **A crosses cycles** where consecutive invoices print the same forecast amount; neither is changed here.

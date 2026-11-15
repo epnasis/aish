@@ -141,6 +141,9 @@ class Transaction:
     counterparty: str
     description: str
     creditor_accounts: tuple[str, ...]  # normalized, from the raw record
+    #: The plugin's raw record, kept only when the reader asks for it
+    #: (`read_ledger(keep_raw=True)`, the payment signatures' reader).
+    raw: str = field(default="", repr=False, compare=False)
 
 
 @dataclass
@@ -152,6 +155,8 @@ class Ledger:
     reason: str = ""  # why it could not check, in code's words
     synced_to: str = ""  # YYYY-MM-DD: the OLDEST last sync among the linked accounts
     transactions: list[Transaction] = field(default_factory=list)
+    #: Every account in the plugin's accounts table, normalized: the owner's own.
+    own_accounts: frozenset[str] = frozenset()
 
 
 def _cents(amount: Any, amount_num: Any) -> int | None:
@@ -184,9 +189,10 @@ def _creditor_accounts(raw: Any) -> tuple[str, ...]:
                                if isinstance(v, str) and v.strip()))
 
 
-def read_ledger(state_dir: os.PathLike | str, now: float) -> Ledger:
+def read_ledger(state_dir: os.PathLike | str, now: float, *, keep_raw: bool = False) -> Ledger:
     """The bank ledger, opened read-only. Every failure is "could not check"
-    with its own reason; nothing here writes to it."""
+    with its own reason; nothing here writes to it. The ONE way the ledger
+    file is opened: `paysig` reads it through here with `keep_raw`."""
     path = ledger_path(state_dir)
     if not path.is_file():
         return Ledger(reason="there is no bank ledger (the bank plugin has never synced here)")
@@ -207,6 +213,8 @@ def read_ledger(state_dir: os.PathLike | str, now: float) -> Ledger:
         linked = ("SELECT alias FROM accounts WHERE session_uid IS NOT NULL"
                   if "session_uid" in columns else "SELECT alias FROM accounts")
         aliases = [str(r[0]) for r in conn.execute(linked)]
+        own = ([str(r[0]) for r in conn.execute("SELECT iban FROM accounts WHERE iban IS NOT NULL")]
+               if "iban" in columns else [])
         stamps = {str(k): str(v) for k, v in conn.execute(
             "SELECT key, value FROM meta WHERE key LIKE 'last_sync_at:%'")}
         rows = conn.execute(
@@ -221,7 +229,8 @@ def read_ledger(state_dir: os.PathLike | str, now: float) -> Ledger:
         return Ledger(reason=f"the bank ledger could not be read ({type(exc).__name__})")
     finally:
         conn.close()
-    ledger = Ledger(readable=True)
+    ledger = Ledger(readable=True, own_accounts=frozenset(
+        mailcases.normalize_coordinate(i) for i in own if i.strip()))
     for account, entry, booked, amount, amount_num, currency, party, text, raw in rows:
         cents = _cents(amount, amount_num)
         # Only what a match compares and a reader may render: a real date and
@@ -231,7 +240,8 @@ def read_ledger(state_dir: os.PathLike | str, now: float) -> Ledger:
             continue
         ledger.transactions.append(Transaction(
             f"{account}|{entry}", str(booked), str(currency or "").upper(), cents,
-            str(party or ""), str(text or ""), _creditor_accounts(raw)))
+            str(party or ""), str(text or ""), _creditor_accounts(raw),
+            raw=str(raw or "") if keep_raw else ""))
     ledger.transactions.sort(key=lambda t: (t.booking_date, t.id))
     synced = []
     for alias in aliases:
@@ -446,14 +456,20 @@ class Bank:
     amounts recorded at ingest and the pairing ledger."""
 
     def __init__(self, state_dir: os.PathLike | str | None, now: float) -> None:
+        #: Transactions already paired to a bill NOTE (`paysig`): one payment
+        #: pays one bill across both pairing ledgers.
+        self.note_spent: set[str] = set()
         if state_dir is None:
             self.ledger = Ledger(reason="no state directory")
             self.amounts: dict[str, frozenset[tuple[str, int]]] = {}
             self.pairs: list[tuple[str, str]] = []
             return
+        from . import paysig
+
         self.ledger = read_ledger(state_dir, now)
         self.amounts = read_amounts(state_dir)
         self.pairs = read_pairs(state_dir)
+        self.note_spent = paysig.spent_transactions(state_dir)
 
 
 def assign(ctx: Any, eligible: list[tuple[Any, float]]) -> dict[str, Pairing]:
@@ -470,7 +486,7 @@ def assign(ctx: Any, eligible: list[tuple[Any, float]]) -> dict[str, Pairing]:
     if not bank.ledger.readable:
         return {}
     by_id = {t.id: t for t in bank.ledger.transactions}
-    spent = {tx for tx, _item in bank.pairs}
+    spent = {tx for tx, _item in bank.pairs} | set(getattr(bank, "note_spent", ()))
     recorded: dict[str, list[str]] = {}
     for tx, key in bank.pairs:
         recorded.setdefault(key, []).append(tx)

@@ -1914,7 +1914,11 @@ each taking the earliest-booked unspent matching transaction; one item, at most 
 **A stated choice**: a NEW pair needs a checked (fresh) ledger; a recorded pair is re-verified
 whenever the ledger is readable — a booked transaction in the ledger is still the payment, stale
 or not. A recorded pair whose transaction vanished from the ledger settles nothing.
-`TestThePairing`.
+`TestThePairing`. **Across both pairing ledgers**: a transaction already paired to a bill NOTE
+(`<state>/payments/note-pairs.jsonl`, `paysig`, `docs/payments.md` §Matching bills to payments) is spent
+here too (`Bank.note_spent`), and the notes' matcher treats these pairs as spent; both are written
+only under the item acts' lock, so one payment pays one bill.
+`TestTheStoresAndTheWriter::test_the_mail_bills_never_take_a_payment_a_note_holds`.
 
 **Its place**: the fourth settlement source, **his word > a verified judgement > his own reply >
 the bank** (`Context.state_of`, so the watcher and the report read one answer; a bank-settled

@@ -126,6 +126,7 @@ object — so it cannot drift from the list. Counted = a real call site writes t
 | `mailcases._IDENTITY_MARKERS` | PL + EN + DE | breaks | yes | `_identifier_shaped`: a token that is a reference by its own shape needs no marker | 5 |
 | `mailcases._KEY_CONNECTORS` | EN + PL | breaks | yes | none — the pre-existing connectors of the key pattern | 3 |
 | `mailcases._CURRENCY_WORDS` | currency signs and ISO codes | breaks | yes | — | 10 |
+| `paysig._OWN_TRANSFER_PHRASES` | PL (the bank's operation phrases) | permits | yes | the payee account is one of the accounts table's own accounts | 2 |
 | `invoicefacts._PAYABLE_WORDS` | PL + EN | breaks | yes | none — every amount is extracted whatever its line says; the list only flags | 10 |
 | `invoicefacts._DUE_WORDS` | PL + EN | breaks | yes | none — every date is extracted; the list only flags | 7 |
 | `invoicefacts._INVOICE_WORDS` | PL + EN | breaks | yes | — | 13 |
@@ -149,6 +150,8 @@ into `<state>/mail/runs-YYYYMMDD.jsonl` in the `vocab` record shape, and `vocab.
 files beside the session logs.
 
 `mailreport._ONE_TIME_CODE_PHRASES` came later still (2026-10-28, the daily inbox report): matched word-bounded against the folded Reader `kind` and the subject. `friction`: a miss puts one code mail in the report, and a false match hides a mail from the report — COUNTED there as a one-time code, the mail itself untouched. `mailreader._DOCUMENT_SUFFIXES` came later (2026-10-27, the keeper clamp). It is `breaks`, not `permits`, because the clamp only ever keeps a mail visible: a miss loses one keeper signal and the mail is filed as the Reader answered, and nothing is ever let through by it.
+
+`paysig._OWN_TRANSFER_PHRASES` (2026-11-12, payment signatures, `docs/payments.md`): the bank's operation phrase on a savings-goal or own-account transfer, matched whole against the folded phrase (the import era's `Opis operacji`, the last line of the API era's remittance information). `permits`: a miss lets a savings transfer in as a payment to someone; an invoice never prints his own goal account, so it could pair only through an association. The structural check under it — the payee account is in the accounts table — misses goal sub-accounts (`IDPR…` pseudo-accounts in no table), which is why the list exists. Measured on the frozen copy: 9,181 rows matched, 1,412 more left out by the account check alone.
 
 ### The invoice-facts lists (2026-11-12)
 

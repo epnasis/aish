@@ -2964,6 +2964,33 @@ def _paynotes_cli(args: list[str]) -> int:
     return 0
 
 
+def _paysig_cli(args: list[str]) -> int:
+    """`aish paysig` — the bills learned from the bank (one per payee account)
+    and the bill notes matched to them: the bills table, findings and routes
+    as names and counts; `--backtest YYYY-MM` learns the bills before that
+    month and matches the notes from it on; `--learn` matches and writes the
+    stores under the item acts' lock (the report job does this daily). Reads
+    the state tree only: no vault, bank or model (docs/payments.md §Matching
+    bills to payments). No amount, no account number."""
+    from . import paysig as paysig_mod
+
+    usage = "usage: aish paysig [--backtest YYYY-MM | --learn]"
+    now = datetime.datetime.now()
+    if not args:
+        print(paysig_mod.summary(state_home(), now))
+        return 0
+    if args[0] == "--backtest" and len(args) == 2 and re.fullmatch(
+            r"\d{4}-(0[1-9]|1[0-2])", args[1]):
+        print(paysig_mod.backtest_summary(state_home(), now, args[1]))
+        return 0
+    if args == ["--learn"]:
+        outcome = paysig_mod.learn_and_record(state_home(), now, by="cli")
+        print(json.dumps(outcome, sort_keys=True))
+        return 0 if outcome.get("outcome") == "ok" else 1
+    print(usage)
+    return 2
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "secret":
         return _secret_cli(sys.argv[2:])
@@ -2983,6 +3010,8 @@ def main() -> int:
         return _tooluse_cli(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "paynotes":
         return _paynotes_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "paysig":
+        return _paysig_cli(sys.argv[2:])
 
     config_path = Path(
         os.environ.get("AISH_CONFIG", str(config_home() / "config.toml"))

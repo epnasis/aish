@@ -2588,6 +2588,9 @@ def run(
             pairs_unrecorded = "the item acts' lock was held; new bank pairs were not recorded"
             report = build(state_dir, now=now, since=since, clean=clean, bank_sync=synced,
                            bank_new_pairs=False)
+    # After the sync and the mail bills' pairs: the bill notes' signatures and
+    # pairs, which read both (docs/payments.md §Matching bills to payments).
+    signatures = None if dry_run else _learn_payment_signatures(state_dir, now)
     text = render(report, clean=clean, account=account)
     brief_failed = ""
     try:
@@ -2613,6 +2616,8 @@ def run(
                                  "bank": bank_entry(report),
                                  **({"brief_failed": brief_failed} if brief_failed else {})}
         entry["bank"]["pairs_recorded"] = pairs_recorded
+        if signatures is not None:
+            entry["paysig"] = signatures
         if pairs_unrecorded:
             entry["bank"]["pairs_unrecorded"] = pairs_unrecorded
         if not token:
@@ -2655,6 +2660,17 @@ def _sync_bank(state_dir: os.PathLike | str, day: str, sync: Callable[[float], A
         return sync(mailbank.SYNC_LIMIT_S)
     except Exception as exc:  # noqa: BLE001 — the owner's plugin must not cost the morning
         return mailbank.SyncOutcome(mailbank.SYNC_FAILED, f"the sync raised {type(exc).__name__}")
+
+
+def _learn_payment_signatures(state_dir: os.PathLike | str, now: float) -> dict[str, Any]:
+    """`paysig.learn_and_record`, whose failure never costs the morning: an
+    exception is recorded by its type only (its message may quote a note)."""
+    from . import paysig
+
+    try:
+        return paysig.learn_and_record(state_dir, datetime.datetime.fromtimestamp(now))
+    except Exception as exc:  # noqa: BLE001 — the brief outlives the learner
+        return {"outcome": "error", "reason": type(exc).__name__}
 
 
 def _record_bank_pairs(state_dir: os.PathLike | str, report: Report, now: float) -> int:

@@ -214,14 +214,14 @@ class TestInvoiceNumbers:
         assert self.numbers("Faktura nr FV 123/2026\n") == ["FV 123/2026"]
 
     def test_the_value_ends_at_a_cell_or_a_wide_gap_and_is_capped(self):
-        assert self.numbers("| Numer faktury | 245750201495 |\n") == []
+        assert self.numbers("| Numer faktury | 900000000123 |\n") == []
         assert self.numbers("Numer faktury: 2457   Data: 2026\n") == ["2457"]
         long = self.numbers("Nr dokumentu " + "A1" * 40 + "\n")[0]
         assert len(long) == invoicefacts.INVOICE_VALUE_CAP + 1 and long.endswith("…")
 
     def test_the_next_line_when_the_keyword_ends_its_own(self):
-        found = invoicefacts.extract("Numer faktury:\n  245750201495\n")["invoice_numbers"]
-        assert found == [{"value": "245750201495", "where": "next line"}]
+        found = invoicefacts.extract("Numer faktury:\n  900000000123\n")["invoice_numbers"]
+        assert found == [{"value": "900000000123", "where": "next line"}]
 
     def test_the_value_is_cut_to_its_code_run_so_no_words_or_names_are_kept(self):
         assert self.numbers("Faktura VAT nr FV/1/2026 z dnia 10.11.2026\n") == ["FV/1/2026"]

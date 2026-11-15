@@ -128,10 +128,10 @@ class FakeVault:
 
 def _fm(**overrides) -> dict:
     base = {
-        "category": "utilities", "paid_to": "E.ON", "paid_for": "Wyspowa 8/27",
+        "category": "utilities", "paid_to": "Pradex", "paid_for": "Lipowa 3/14",
         "amount": "496.33", "currency": "PLN", "month": "2026-11",
         "date_due": "2026-11-10", "paid": "false", "attachments": [],
-        "tags": ["pay", "recurring", "aish", "eon"],
+        "tags": ["pay", "recurring", "aish", "pradex"],
         "created": "2026-10-15 20:52:13", "updated": "2026-10-15 20:52:13",
     }
     base.update(overrides)
@@ -166,7 +166,7 @@ class TestPaynotesAmounts:
 
 
 class TestPaynotesNoteParsing:
-    def parse(self, fm, body="", name="2026-11 E.ON Wyspowa.md"):
+    def parse(self, fm, body="", name="2026-11 Pradex Lipowa.md"):
         return paynotes.parse_note(f"Payments/{name}", fm, body, [], fm.get("tags") or [])
 
     @pytest.mark.parametrize("raw, want", [
@@ -205,10 +205,10 @@ class TestPaynotesNoteParsing:
         assert rec["account_valid"] is True
 
     def test_invoice_is_a_string(self):
-        assert self.parse(_fm(invoice_number="245750201495"))["invoice_number"] == "245750201495"
+        assert self.parse(_fm(invoice_number="900000000123"))["invoice_number"] == "900000000123"
 
     def test_missing_frontmatter_takes_month_from_the_file_name(self):
-        rec = self.parse({}, "", name="2026-09 PGNiG Gas.md")
+        rec = self.parse({}, "", name="2026-09 Gazex Gas.md")
         assert rec["has_frontmatter"] is False
         assert (rec["month"], rec["month_source"]) == ("2026-09", "file_name")
         assert rec["paid"] == "unknown" and rec["amount"] is None
@@ -219,13 +219,13 @@ class TestPaynotesNoteParsing:
             "- **Kwota:** 496,33 PLN\n"
             "- **Termin płatności:** 2026-11-10\n"
             f"- **Rachunek bankowy (Pekao S.A.):** `{ACCOUNT_SPACED}`\n"
-            "- **Faktura / Prognoza:** nr 245750201495\n"
+            "- **Faktura / Prognoza:** nr 900000000123\n"
         )
         rec = self.parse(_fm(amount=[], date_due=[], paid=[]), body)
         assert rec["amount"]["minor"] == 49633 and rec["amount"]["source"] == "body"
         assert (rec["date_due"], rec["date_due_source"]) == ("2026-11-10", "body")
         assert (rec["account_number"], rec["account_number_source"]) == (ACCOUNT, "body")
-        assert rec["invoice_number"] == "245750201495"
+        assert rec["invoice_number"] == "900000000123"
         assert (rec["paid"], rec["paid_source"]) == ("true", "body")
         assert rec["paid_lines"] == [{"date": "2026-10-04", "minor": 326400, "currency": "PLN"}]
         assert rec["conflicts"] == []
@@ -296,7 +296,7 @@ class TestPaynotesNoteParsing:
 class TestPaynotesRefresh:
     def vault(self) -> FakeVault:
         v = FakeVault()
-        v.add("2026-11 E.ON Wyspowa", _fm(account_number=ACCOUNT_SPACED))
+        v.add("2026-11 Pradex Lipowa", _fm(account_number=ACCOUNT_SPACED))
         v.add("2026-10 Tax PIT", _fm(category="tax", paid="true", amount="3 264,00",
                                      month="2026-10"),
               "### ✅ Zapłacono 2026-10-04 — 3264,00 PLN\n")
@@ -320,11 +320,11 @@ class TestPaynotesRefresh:
         assert (c["paid_true"], c["paid_false"], c["paid_unknown"]) == (1, 1, 1)
         assert c["unparsed_amount"] == 1
         recs = _records(tmp_path)
-        eon = recs["2026-11 E.ON Wyspowa.md"]
-        assert eon["path"] == "Payments/2026-11 E.ON Wyspowa.md"
-        assert eon["marker"] == {"modified": "2026-11-01 10:00", "size": 900,
+        pradex = recs["2026-11 Pradex Lipowa.md"]
+        assert pradex["path"] == "Payments/2026-11 Pradex Lipowa.md"
+        assert pradex["marker"] == {"modified": "2026-11-01 10:00", "size": 900,
                                  "offloaded": False}
-        assert eon["account_number"] == ACCOUNT and eon["status"] == "read"
+        assert pradex["account_number"] == ACCOUNT and pradex["status"] == "read"
 
     def test_files_are_owner_only(self, tmp_path):
         paynotes.refresh(self.vault(), tmp_path, NOW)
@@ -336,12 +336,12 @@ class TestPaynotesRefresh:
         v = self.vault()
         paynotes.refresh(v, tmp_path, NOW)
         v.calls.clear()
-        v.add("2026-11 E.ON Wyspowa", _fm(amount="500.00"), modified="2026-11-12 08:00",
+        v.add("2026-11 Pradex Lipowa", _fm(amount="500.00"), modified="2026-11-12 08:00",
               size=950)
         index = paynotes.refresh(v, tmp_path, NOW + timedelta(days=1))
-        assert v.reads() == ["Payments/2026-11 E.ON Wyspowa.md"]
+        assert v.reads() == ["Payments/2026-11 Pradex Lipowa.md"]
         assert index["counts"]["read_this_run"] == 1
-        assert _records(tmp_path)["2026-11 E.ON Wyspowa.md"]["amount"]["minor"] == 50000
+        assert _records(tmp_path)["2026-11 Pradex Lipowa.md"]["amount"]["minor"] == 50000
         assert _records(tmp_path)["2026-10 Tax PIT.md"]["status"] == "read"
 
     def test_an_offloaded_note_already_read_is_not_downloaded_again(self, tmp_path):
@@ -382,13 +382,13 @@ class TestPaynotesRefresh:
 
     def test_never_tried_notes_are_read_before_failed_ones(self, tmp_path):
         v = self.vault()
-        v.errors["Payments/2026-11 E.ON Wyspowa.md"] = "boom"
-        paynotes.refresh(v, tmp_path, NOW)  # E.ON fails; the others are read
+        v.errors["Payments/2026-11 Pradex Lipowa.md"] = "boom"
+        paynotes.refresh(v, tmp_path, NOW)  # Pradex fails; the others are read
         v.add("2026-12 New Bill", _fm(month="2026-12"))
         v.calls.clear()
         paynotes.refresh(v, tmp_path, NOW, max_reads=1)
         assert v.reads() == ["Payments/2026-12 New Bill.md"]
-        assert _records(tmp_path)["2026-11 E.ON Wyspowa.md"]["status"] == "pending"
+        assert _records(tmp_path)["2026-11 Pradex Lipowa.md"]["status"] == "pending"
 
     def test_an_unreadable_note_is_recorded_with_the_plugins_reason_and_retried(
         self, tmp_path
@@ -489,7 +489,7 @@ class TestPaynotesLoad:
 
     def test_notes_that_do_not_match_the_index_are_refused(self, tmp_path):
         v = FakeVault()
-        v.add("2026-11 E.ON Wyspowa", _fm())
+        v.add("2026-11 Pradex Lipowa", _fm())
         paynotes.refresh(v, tmp_path, NOW)
         with paynotes.notes_path(tmp_path).open("a") as fh:
             fh.write("{}\n")
@@ -498,7 +498,7 @@ class TestPaynotesLoad:
 
     def test_records_load_typed(self, tmp_path):
         v = FakeVault()
-        v.add("2026-11 E.ON Wyspowa", _fm(account_number=ACCOUNT_SPACED))
+        v.add("2026-11 Pradex Lipowa", _fm(account_number=ACCOUNT_SPACED))
         paynotes.refresh(v, tmp_path, NOW)
         (note,) = paynotes.load(tmp_path, NOW).notes
         assert isinstance(note, paynotes.PaymentNote)
@@ -663,15 +663,15 @@ class TestPaynotesCli:
         from aish import cli
 
         v = FakeVault()
-        v.add("2026-11 E.ON Wyspowa", _fm(account_number=ACCOUNT_SPACED,
-                                          invoice_number="245750201495"))
+        v.add("2026-11 Pradex Lipowa", _fm(account_number=ACCOUNT_SPACED,
+                                          invoice_number="900000000123"))
         paynotes.refresh(v, tmp_path, datetime.now())
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
         assert cli._paynotes_cli([]) == 0
         out = capsys.readouterr().out
         assert "listed: 1" in out and "outcome: ok" in out
         assert "cannot open the vault" in out
-        for secret in ("E.ON", "Wyspowa", "1240", "245750201495", "496", "utilities"):
+        for secret in ("Pradex", "Lipowa", "1240", "900000000123", "496", "utilities"):
             assert secret not in out
 
     def test_prints_the_outcome_word_never_the_error_text(self, tmp_path, monkeypatch,
@@ -679,21 +679,21 @@ class TestPaynotesCli:
         from aish import cli
 
         v = FakeVault()
-        v.add("2026-11 E.ON Wyspowa", _fm())
+        v.add("2026-11 Pradex Lipowa", _fm())
         paynotes.refresh(v, tmp_path, datetime.now())
-        v.list_error = "no folder 'Payments/E.ON Wyspowa' in the vault"
+        v.list_error = "no folder 'Payments/Pradex Lipowa' in the vault"
         paynotes.refresh(v, tmp_path, datetime.now())
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
         cli._paynotes_cli([])
         out = capsys.readouterr().out
-        assert "outcome: list failed" in out and "Wyspowa" not in out
+        assert "outcome: list failed" in out and "Lipowa" not in out
         # And before any success: still only the word.
         fresh = tmp_path / "fresh"
         paynotes.refresh(v, fresh, datetime.now())
         monkeypatch.setenv("AISH_STATE_DIR", str(fresh))
         cli._paynotes_cli([])
         out = capsys.readouterr().out
-        assert "list failed" in out and "Wyspowa" not in out
+        assert "list failed" in out and "Lipowa" not in out
 
     def test_no_index_is_said_plainly(self, tmp_path, monkeypatch, capsys):
         from aish import cli
@@ -781,23 +781,23 @@ def _both(v, state_dir: Path, reader=None, **kwargs) -> dict:
 
 class TestInvoiceFetch:
     def test_the_plugins_real_arguments_and_the_scratch_downloads_dir(self, tmp_path):
-        v = _invoice_vault("2026-11 E.ON")
+        v = _invoice_vault("2026-11 Pradex")
         _both(v, tmp_path)
-        assert v.fetches() == [("Payments/2026-11 E.ON.md", "2026-11 E.ON.pdf")]
+        assert v.fetches() == [("Payments/2026-11 Pradex.md", "2026-11 Pradex.pdf")]
         ((_, args),) = [c for c in v.calls if c[0] == paynotes.INVOICE_TOOL]
-        assert args == {"note": "Payments/2026-11 E.ON.md", "name": "2026-11 E.ON.pdf",
+        assert args == {"note": "Payments/2026-11 Pradex.md", "name": "2026-11 Pradex.pdf",
                         "wait": paynotes.INVOICE_FETCH_WAIT}
         assert v.downloads == [paynotes.scratch_dir(tmp_path) / "fetch"]
 
     def test_the_copy_is_read_inside_the_private_scratch_and_deleted(self, tmp_path):
-        v = _invoice_vault("2026-11 E.ON")
+        v = _invoice_vault("2026-11 Pradex")
         seen: list[tuple[str, int]] = []
         reader = FakeReader()
         reader.on_read = lambda source: seen.append(
             (str(source), stat.S_IMODE(source.parent.parent.stat().st_mode)))
         _both(v, tmp_path, reader)
         scratch = paynotes.scratch_dir(tmp_path)
-        assert seen == [(str(scratch / "fetch" / "2026-11 E.ON.pdf"), 0o700)]
+        assert seen == [(str(scratch / "fetch" / "2026-11 Pradex.pdf"), 0o700)]
         assert reader.calls[0][1] == scratch / "renditions"
         assert reader.calls[0][2] == set()  # nothing read before: no page skipped
         assert not scratch.exists()
@@ -832,14 +832,14 @@ class TestInvoiceFetch:
         # pytest's tmp_path is itself under the system temp dir, where a stray
         # copy WOULD be removed (TestInvoiceStrayCopy); point that elsewhere.
         monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "systemp"))
-        v = _invoice_vault("2026-11 E.ON")
+        v = _invoice_vault("2026-11 Pradex")
         elsewhere = tmp_path / "elsewhere.pdf"
         elsewhere.write_bytes(b"%PDF-1.7 elsewhere")
 
         def lying(name, args, downloads_dir=None, should_stop=None):
             text = v(name, args, downloads_dir)
             if name == paynotes.INVOICE_TOOL:
-                reported = str(Path(downloads_dir) / "2026-11 E.ON.pdf")
+                reported = str(Path(downloads_dir) / "2026-11 Pradex.pdf")
                 text = text.replace(json.dumps(reported)[1:-1], str(elsewhere))
             return text
 
@@ -847,7 +847,7 @@ class TestInvoiceFetch:
         state = tmp_path / "state"
         paynotes.refresh(v, state, NOW)
         paynotes.refresh_invoices(lying, state, NOW, read=reader)
-        rec = _invoices(state)["2026-11 E.ON.pdf"]
+        rec = _invoices(state)["2026-11 Pradex.pdf"]
         assert (rec["status"], rec["reason_class"]) == ("unread", "fetch failed")
         assert reader.calls == [] and elsewhere.exists()
         assert not paynotes.scratch_dir(state).exists()
@@ -901,7 +901,7 @@ class TestInvoiceFetch:
         assert runner is not None and paynotes.INVOICE_TOOL not in runner.tools
 
     def test_no_attachment_tool_is_an_outcome(self, tmp_path):
-        v = _invoice_vault("2026-11 E.ON")
+        v = _invoice_vault("2026-11 Pradex")
         paynotes.refresh(v, tmp_path, NOW)
         runner = paynotes.PluginRunner({}, str(tmp_path))
         section = paynotes.refresh_invoices(runner, tmp_path, NOW, read=FakeReader())
@@ -942,8 +942,8 @@ class TestInvoiceReading:
 
     def _through_refresh(self, path: Path, state: Path) -> tuple[dict, dict]:
         v = FakeVault()
-        v.add("2026-11 E.ON", _fm(attachments=[f"[[{path.name}]]"]))
-        v.attach("2026-11 E.ON", path.name, path.read_bytes())
+        v.add("2026-11 Pradex", _fm(attachments=[f"[[{path.name}]]"]))
+        v.attach("2026-11 Pradex", path.name, path.read_bytes())
         paynotes.refresh(v, state, NOW)
         section = paynotes.refresh_invoices(v, state, NOW)
         return _invoices(state)[path.name], section
@@ -1278,13 +1278,13 @@ class TestInvoiceStoppableFetch:
 
 class TestInvoiceRefresh:
     def test_facts_are_stored_typed_and_counted(self, tmp_path):
-        section = _both(_invoice_vault("2026-11 E.ON"), tmp_path)
+        section = _both(_invoice_vault("2026-11 Pradex"), tmp_path)
         assert section["outcome"] == "ok"
         c = section["counts"]
         assert (c["listed"], c["read"], c["by_text_layer"], c["with_account"],
                 c["with_payable_amount"]) == (1, 1, 1, 1, 1)
-        rec = _invoices(tmp_path)["2026-11 E.ON.pdf"]
-        assert rec["path"] == "Payments/2026-11 E.ON.md"
+        rec = _invoices(tmp_path)["2026-11 Pradex.pdf"]
+        assert rec["path"] == "Payments/2026-11 Pradex.md"
         assert rec["extractor"] == paynotes.invoicefacts.EXTRACTOR_VERSION
         assert rec["note_marker"] == {"modified": "2026-11-12 10:00", "size": 900,
                                       "offloaded": False}
@@ -1498,9 +1498,9 @@ class TestInvoiceRefresher:
             "outcome": "partial", "counts": {"read_ok_this_run": 0}}}) == day
 
     def test_nothing_from_an_invoice_reaches_the_log(self, tmp_path, monkeypatch, capsys):
-        v = _invoice_vault("2026-11 E.ON")
+        v = _invoice_vault("2026-11 Pradex")
         reader = FakeReader()
-        reader.raise_on.add(b"%PDF-1.7 2026-11 E.ON")
+        reader.raise_on.add(b"%PDF-1.7 2026-11 Pradex")
         monkeypatch.setattr(paynotes, "read_document", reader)
         _run_refresher(paynotes.Refresher(tmp_path, make_runner=lambda: v,
                                           clock=lambda: NOW), 1)
@@ -1509,7 +1509,7 @@ class TestInvoiceRefresher:
                                           clock=lambda: NOW), 1)
         err = capsys.readouterr().err
         assert "invoices" in err
-        for secret in ("E.ON", "1240", "496", "FV/123", ACCOUNT):
+        for secret in ("Pradex", "1240", "496", "FV/123", ACCOUNT):
             assert secret not in err
 
 
@@ -1551,9 +1551,9 @@ class TestInvoiceCli:
     def test_prints_counts_and_outcome_words_only(self, tmp_path, monkeypatch, capsys):
         from aish import cli
 
-        v = _invoice_vault("2026-11 E.ON", "2026-10 PGNiG")
-        v.file_errors[("Payments/2026-10 PGNiG.md", "2026-10 PGNiG.pdf")] = (
-            "'2026-10 PGNiG.pdf' is offloaded to iCloud and did not finish downloading")
+        v = _invoice_vault("2026-11 Pradex", "2026-10 Gazex")
+        v.file_errors[("Payments/2026-10 Gazex.md", "2026-10 Gazex.pdf")] = (
+            "'2026-10 Gazex.pdf' is offloaded to iCloud and did not finish downloading")
         paynotes.refresh(v, tmp_path, datetime.now())
         paynotes.refresh_invoices(v, tmp_path, datetime.now(), read=FakeReader())
         monkeypatch.setenv("AISH_STATE_DIR", str(tmp_path))
@@ -1562,5 +1562,5 @@ class TestInvoiceCli:
         assert "attachments listed: 2" in out and "read by text layer: 1" in out
         assert "with a valid account: 1" in out and "with a payable amount: 1" in out
         assert "fetch failed: 1" in out and "remaining: 0" in out
-        for secret in ("E.ON", "PGNiG", "1240", "496", "FV/123", "offloaded", "2857"):
+        for secret in ("Pradex", "Gazex", "1240", "496", "FV/123", "offloaded", "2857"):
             assert secret not in out
