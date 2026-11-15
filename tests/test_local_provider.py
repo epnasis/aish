@@ -553,13 +553,68 @@ class TestLocalRolesStayOffIt:
 
 
 class TestLocalSelectable:
-    def test_the_picker_offers_it_as_the_owners_server(self, monkeypatch):
-        monkeypatch.setattr(cli, "cloud_model_catalog", lambda _state: {"local": [REPO]})
-        agent = SimpleNamespace(provider="ollama", model="qwen3:8b")
+    def test_the_picker_names_the_server_and_the_one_model_it_serves(self, local_env):
+        """The owner picked `qwen3:8b · local` believing it was his server's Qwen
+        (2026-11-15): "local" labelled Ollama on THIS machine, and the server's
+        own row said only "default default_model"."""
+        local_env.setattr(cli, "cloud_model_catalog", lambda _state: {"local": [REPO]})
+        agent = SimpleNamespace(provider="gemini", model="gemini-flash-latest")
         rows = dict(cli.available_models(agent, state_dir=object()))
-        assert rows["local"].startswith("your server · default default_model")
-        assert rows[f"local:{REPO}"].startswith("your server · ")
+        assert rows[f"local:{REPO}"].startswith("your server mi.lan · ")
+        # The bare row is mlx-lm's alias for that same model: one model, one row.
+        assert "local" not in rows
         assert rows["gemini"].startswith("cloud · ")
+
+    def test_the_alias_in_use_marks_the_served_model_current(self, local_env):
+        local_env.setattr(cli, "cloud_model_catalog", lambda _state: {"local": [REPO]})
+        agent = SimpleNamespace(provider="local", model="default_model")
+        rows = dict(cli.available_models(agent, state_dir=object()))
+        assert rows[f"local:{REPO}"].endswith(" · current")
+
+    def test_without_one_listed_model_the_bare_row_stays_and_says_what_it_is(self, local_env):
+        for listed in ([], [REPO, "other/model"]):
+            local_env.setattr(cli, "cloud_model_catalog", lambda _state, ids=listed: {"local": ids})
+            agent = SimpleNamespace(provider="gemini", model="x")
+            rows = dict(cli.available_models(agent, state_dir=object()))
+            assert rows["local"] == "your server mi.lan · the model it was started with"
+
+    def test_ollama_rows_name_the_machine_they_run_on(self, monkeypatch):
+        import ollama
+
+        listed = SimpleNamespace(models=[SimpleNamespace(model="gemma3:4b", size=3.3e9)])
+        monkeypatch.setattr(ollama, "list", lambda: listed)
+        monkeypatch.setattr(cli, "cloud_model_catalog", lambda _state: {})
+        monkeypatch.setattr(cli.socket, "gethostname", lambda: "mm.lan")
+        monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        agent = SimpleNamespace(provider="gemini", model="x")
+        assert dict(cli.available_models(agent, None))["gemma3:4b"] == "mm · Ollama · 3 GB"
+        monkeypatch.setenv("OLLAMA_HOST", "http://gpu-box:11434")
+        assert dict(cli.available_models(agent, None))["gemma3:4b"] == "gpu-box · Ollama · 3 GB"
+        monkeypatch.setenv("OLLAMA_HOST", "0.0.0.0")
+        assert dict(cli.available_models(agent, None))["gemma3:4b"] == "mm · Ollama · 3 GB"
+
+    def test_the_web_current_is_spelled_as_the_row_it_ticks(self):
+        """The page ticks the row whose name equals `current`; a chat on the
+        alias must tick the one served model's row, the only row there is."""
+        one = [(f"local:{REPO}", "your server · x")]
+        assert cli.picker_spelling("local", one) == f"local:{REPO}"
+        assert cli.picker_spelling("local:default_model", one) == f"local:{REPO}"
+        two = one + [("local:other/model", "your server · x")]
+        assert cli.picker_spelling("local:default_model", two) == "local:default_model"
+        assert cli.picker_spelling("gemma3:4b", one) == "gemma3:4b"
+        gemini_default = backends.PROVIDERS["gemini"].default_model
+        assert cli.picker_spelling("gemini", one) == f"gemini:{gemini_default}"
+        assert cli.picker_spelling("claude-max", one) == "claude-max"
+
+    def test_recent_spells_the_alias_as_the_one_served_model(self, local_env):
+        local_env.setattr(cli, "_configured_providers", lambda: ["local"])
+        models = [(f"local:{REPO}", "your server mi.lan · OpenAI-compatible server")]
+        recent = cli.recent_models(
+            ["local", f"local:{REPO}", "local:default_model"], models, "gemini:x"
+        )
+        assert [spec for spec, _ in recent] == [f"local:{REPO}"]
+        # ...and the alias in use is the current model, so it is not Recent.
+        assert cli.recent_models([f"local:{REPO}"], models, "local:default_model") == []
 
     def test_typing_a_local_spec_offers_that_exact_model(self):
         ranked = cli.rank_models([], f"local:{REPO}")

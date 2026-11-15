@@ -135,6 +135,7 @@ from .cli import (
     model_spec,
     parse_feedback,
     parse_learn,
+    picker_spelling,
     rank_models,
     recent_models,
     runs_locally,
@@ -5464,9 +5465,10 @@ class WebServer:
             # (#412). Only the browsing view shows it, so a search skips the scan.
             browsing = not query.strip() and state_dir is not None
             used = SessionLog.models_used(state_dir) if browsing else iter(())
-            return rank_models(models, query), recent_models(used, models, current)
+            ranked = rank_models(models, query)
+            return ranked, recent_models(used, models, current), picker_spelling(current, models)
 
-        ranked, recent = await asyncio.to_thread(load)
+        ranked, recent, current = await asyncio.to_thread(load)
         await client.ws.send_json(
             {
                 "type": "model_list",

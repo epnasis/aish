@@ -6,6 +6,7 @@ import difflib
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -1330,26 +1331,64 @@ def available_models(agent, state_dir: Path | None = None) -> list[tuple[str, st
         listed = ollama.list().models
     except Exception:
         listed = []
+    ollama_host = _ollama_host() if listed else ""
     for m in listed:
         name = getattr(m, "model", None)
         if not name:
             continue
         size = (getattr(m, "size", 0) or 0) / 1e9
         current = " · current" if provider_now == "ollama" and agent.model == name else ""
-        models.append((name, f"local · {size:.0f} GB{current}"))
-    for pname, provider in backends.PROVIDERS.items():
-        current = " · current" if provider_now == pname else ""
-        models.append(
-            (pname, f"{_where(pname)} · default {provider.default_model}{current}")
-        )
-    models.append(("claude-max", "cloud · Claude subscription (restart to switch)"))
+        models.append((name, f"{ollama_host} · Ollama · {size:.0f} GB{current}"))
     catalog = cloud_model_catalog(state_dir) if state_dir is not None else {}
+    # A local server that lists exactly one model serves exactly that one (mi's
+    # failfast lists only what it was started with), so the bare `local` row and
+    # mlx-lm's alias for it name the same model as that one catalog row.
+    served = catalog.get(backends.LOCAL, [])
+    one_served = served[0] if len(served) == 1 else None
+    for pname, provider in backends.PROVIDERS.items():
+        if pname == backends.LOCAL and one_served:
+            continue
+        current = " · current" if provider_now == pname else ""
+        if pname == backends.LOCAL:
+            default = "the model it was started with"
+        else:
+            default = f"default {provider.default_model}"
+        models.append((pname, f"{_where(pname)} · {default}{current}"))
+    models.append(("claude-max", "cloud · Claude subscription (restart to switch)"))
     for pname, ids in catalog.items():
         label = PROVIDER_LABELS.get(pname, pname)
         for model_id in ids:
-            current = " · current" if provider_now == pname and agent.model == model_id else ""
+            chosen = {model_id}
+            if pname == backends.LOCAL and model_id == one_served:
+                chosen.add(backends.PROVIDERS[pname].default_model)
+            current = " · current" if provider_now == pname and agent.model in chosen else ""
             models.append((f"{pname}:{model_id}", f"{_where(pname)} · {label}{current}"))
     return models
+
+
+def _ollama_host() -> str:
+    """The machine the Ollama rows run on: OLLAMA_HOST's host when it names
+    another one (the ollama client honours the variable), else this one."""
+    configured = os.environ.get("OLLAMA_HOST", "").strip()
+    if configured:
+        target = configured if "://" in configured else f"http://{configured}"
+        host = urllib.parse.urlsplit(target).hostname
+        if host and host not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}:
+            return host
+    return socket.gethostname().split(".")[0]
+
+
+def picker_spelling(spec: str, models: list[tuple[str, str]]) -> str:
+    """`spec` as the picker's rows spell it: provider-prefixed (Ollama names
+    bare), and mlx-lm's `default_model` alias as the one model the local server
+    lists, since the picker shows only that row for both."""
+    if spec.startswith("claude-max"):
+        return spec
+    provider, name = backends.parse_model(spec)
+    spelled = name if provider == "ollama" else f"{provider}:{name}"
+    alias = f"{backends.LOCAL}:{backends.PROVIDERS[backends.LOCAL].default_model}"
+    served = [row for row, _ in models if row.startswith(f"{backends.LOCAL}:")]
+    return served[0] if spelled == alias and len(served) == 1 else spelled
 
 
 RECENT_MODELS = 5  # rows in the picker's Recent section
@@ -1373,14 +1412,14 @@ def recent_models(
     claude-max never: the web cannot switch to it without a restart."""
     listed = dict(models)
     configured = set(_configured_providers())
+    current = picker_spelling(current, models)
     recent: list[tuple[str, str]] = []
     seen: set[str] = set()
     for spec in used:
         if spec.startswith("claude-max"):
             continue
         provider, name = backends.parse_model(spec)
-        if provider != "ollama":
-            spec = f"{provider}:{name}"
+        spec = picker_spelling(spec, models)
         if spec == current or spec in seen:
             continue
         seen.add(spec)
@@ -1424,7 +1463,14 @@ def last_model_elsewhere(
 def _where(provider_name: str) -> str:
     """The picker's first word for a provider: whose machine the chat goes to."""
     provider = backends.PROVIDERS.get(provider_name)
-    return "cloud" if provider is None or provider.cloud else "your server"
+    if provider is None or provider.cloud:
+        return "cloud"
+    try:
+        url = backends.local_url() if provider_name == backends.LOCAL else ""
+    except backends.BackendError:
+        url = ""
+    host = urllib.parse.urlsplit(url).hostname if url else None
+    return f"your server {host}" if host else "your server"
 
 
 def rank_models(models: list[tuple[str, str]], query: str) -> list[tuple[str, str]]:
