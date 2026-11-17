@@ -1648,6 +1648,22 @@ PRELOAD_REMINDER = (
 # as unchanged, or as none. The gate enforces per turn whatever the prose says.
 RULES_REMINDER = "<system-reminder>{rules}</system-reminder>"
 OBJECTIVE_REMINDER = "<system-reminder>{objective}</system-reminder>"
+
+# Sent with every task whose tool list was SELECTED (#444 H1). The model's
+# list is its only evidence of what exists; narrowed silently, "not handed"
+# reads as "does not exist" — owner session 2026-11-16 15:45 answered that
+# obsidian_write "is not available" while the off-menu net would have run it.
+# What it promises is what `_admit_off_menu` does: any name on the full menu
+# runs when called. Imperative + example (prompts as capability statements
+# are ignored).
+PARTIAL_MENU_REMINDER = (
+    "<system-reminder>Your tool list is a SELECTION aish made for this task, "
+    "not every tool aish has. A tool that exists but is not in your list still "
+    "runs when you call it by its exact name. You MUST NOT tell the user a tool "
+    "or capability is unavailable because it is missing from your list: call it "
+    "by name, or say you were not given it. Example: you used gmail_send earlier "
+    "in this chat and it is not in your list now — call gmail_send.</system-reminder>"
+)
 RULES_UNCHANGED = (
     "RULES IN FORCE FOR THIS TURN: unchanged — exactly the rules listed in full "
     "in the most recent earlier reminder that lists them. The harness still "
@@ -1937,6 +1953,7 @@ def task_reminder(
     plan_text: str = "",
     trigger_text: str = "",
     mention_text: str = "",
+    partial_menu: bool = False,
 ) -> str:
     """The per-task system reminder: always the current local time (issue #36
     — it lives here, not in the system prompt, so messages[0] stays
@@ -1962,6 +1979,8 @@ def task_reminder(
         time_note += "\n" + OBJECTIVE_REMINDER.format(objective=trigger_text)
     if mention_text:
         time_note += "\n" + OBJECTIVE_REMINDER.format(objective=mention_text)
+    if partial_menu:
+        time_note += "\n" + PARTIAL_MENU_REMINDER
     if preload_text:
         return f"{time_note}\n{PRELOAD_REMINDER.format(knowledge=preload_text)}"
     return f"{time_note}\n{TASK_REMINDER}" if index else time_note
@@ -4642,6 +4661,8 @@ class Agent:
         # stood when the selection was made, so a tool created mid-task joins.
         self._menu: tool_menu.Selection | None = None
         self._menu_full_names: frozenset[str] = frozenset()
+        # Plugin tool -> its family (`tool_menu.families`), fixed with the menu.
+        self._menu_families: dict[str, tuple[str, ...]] = {}
         self._tool_index: Any = None
         self._entity_index: Any = None
         # Arm C's `load_tool` schema, built once per task (catalog mode only).
@@ -6138,6 +6159,7 @@ class Agent:
                 if take_surface(self.base_context)[0] == "cli"
                 else ""
             ),
+            partial_menu=self._menu is not None,
         )
         self.messages.append({"role": "system", "content": reminder})
         if rules_text:
@@ -8174,6 +8196,20 @@ class Agent:
         self._note(f"⚑ {name} was not on this task's menu; ran it and added it")
         return True
 
+    def _admit_family_in_use(self, name: str) -> None:
+        """A tool the model CALLS brings its family onto the menu for the next
+        call: the next step a tool's result points at is usually a sibling's
+        (an attachment obsidian_read names is fetched by obsidian_attachment),
+        and a menu that withholds it builds the miss itself. On a call, not at
+        seed: completing every SELECTED family measured +7 to +15 tools
+        (+17% to +45% of the menu's characters) on the owner's 2026-11-16
+        menus, most of it families never touched."""
+        if self._menu is None:
+            return
+        siblings = self._menu.admit_family(name, self._menu_families)
+        if siblings:
+            self._note(f"⚑ {name} is in use; added its family: {', '.join(siblings)}")
+
     def _previous_task_tools(self) -> list[str]:
         """Tools called since the previous task began — the continuity
         category. The previous task begins at its reminder; a reopened chat
@@ -8238,6 +8274,7 @@ class Agent:
         read_skill when the skill-read gate is armed."""
         self._refresh_plugin_tools()
         full = self._full_menu()
+        self._menu_families = tool_menu.families(full, NATIVE_TOOL_NAMES)
         mode, via = tool_menu.requested_mode()
         if mode == tool_menu.MODE_ALL:
             self._menu = None
@@ -9283,6 +9320,7 @@ class Agent:
         # The off-menu net (#444 H1): every call of every path passes here,
         # the parallel read fan-out included, so none can miss it.
         off_menu = {"off_menu": True} if self._admit_off_menu(name) else {}
+        self._admit_family_in_use(name)
         # Assigned per call and carried as a LOCAL, never read back off the
         # agent: read-only tools run in parallel, so an instance attribute
         # would hand two concurrent calls the same id — which is exactly the

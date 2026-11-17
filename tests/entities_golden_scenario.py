@@ -33,6 +33,11 @@ def _normalised(chat, agent, tmp_path) -> list:
     text = text.replace(str(agent.scratch_dir), "SCRATCH")
     text = text.replace(str(tmp_path), "CWD")
     text = text.replace(os.environ["AISH_CONFIG_HOME"], "CONFIG")
+    # Added after the golden (tool menu, 2026-11-17) and unrelated to entity
+    # files; getattr, because the parent commit runs this file too.
+    partial = getattr(agent_module, "PARTIAL_MENU_REMINDER", "")
+    if partial:
+        text = text.replace(json.dumps("\n" + partial)[1:-1], "")
     return json.loads(machine_neutral(text))
 
 

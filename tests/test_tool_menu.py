@@ -603,3 +603,113 @@ def test_fake_chat_is_the_suite_one():
     """Guards the import above: these tests drive the same FakeChat as the
     rest of the suite, never a local copy."""
     assert FakeChat.__module__ == "tests.test_agent"
+
+
+def plugin(name: str, description: str) -> None:
+    """A read-only plugin tool in the suite's (redirected) global tools dir."""
+    directory = tool_plugins.GLOBAL_TOOLS_DIR / name
+    directory.mkdir(parents=True)
+    (directory / "TOOL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\nexec: ./run.sh\nmutating: no\n"
+        'returns: text\nschema: {"note": {"type": "string"}}\n---\nbody\n'
+    )
+    script = directory / "run.sh"
+    script.write_text("#!/bin/sh\necho ok\n")
+    script.chmod(0o755)
+
+
+class TestToolFamilies:
+    """A sibling of a tool in use travels with it (`docs/tool-menu.md`,
+    `family`). Owner session 2026-11-16 13:34: obsidian_read listed a note's
+    attachments while obsidian_attachment was unsent, and the model searched
+    the vault with `find` instead."""
+
+    def test_plugin_tools_sharing_a_prefix_are_a_family(self):
+        full = [schema(n, "x.") for n in (
+            "vault_read", "vault_attachment", "vault_write", "solo_tool", "edit_file", "edit_rule",
+        )]
+        family = tool_menu.families(full, native={"edit_file", "edit_rule"})
+        assert family["vault_read"] == ("vault_read", "vault_attachment", "vault_write")
+        assert family["vault_write"] == family["vault_read"]
+        # One tool is no family; native names start with a verb and never form one.
+        assert "solo_tool" not in family
+        assert "edit_file" not in family and "edit_rule" not in family
+
+    def test_a_called_tool_brings_its_family_on_the_next_call(self, tmp_path):
+        plugin("vault_read", "Read one note in the vault: frontmatter, tags and attachments.")
+        plugin("vault_attachment", "Fetch a PDF out of the store into downloads.")
+        plugin("vault_write", "Create or change a record.")
+        agent, chat, records = logged_agent(
+            [model_says(tool_calls=[tool_call("vault_read", note="x")]), model_says("done")],
+            tmp_path,
+        )
+        agent.run_task("read my note about frontmatter tags")
+        first, second = sent_names(chat, 0), sent_names(chat, 1)
+        # Selected by ranking; its siblings are NOT completed at seed (cost).
+        assert "vault_read" in first
+        assert "vault_attachment" not in first and "vault_write" not in first
+        assert {"vault_attachment", "vault_write"} <= set(second)
+        assert agent._menu is not None
+        assert agent._menu.category["vault_attachment"] == tool_menu.FAMILY
+        menu = of_kind(records, "context")[0]["menu"]
+        assert "family" not in menu["names"]
+        assert of_kind(records, "brief")[-1]["tools"]["selection"]["family"] == 2
+
+    def test_a_native_tool_never_brings_a_family(self, tmp_path, read_docs_stub):
+        agent, chat, _ = logged_agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("done")],
+            tmp_path,
+        )
+        agent.run_task("hello")
+        assert agent._menu is not None
+        assert tool_menu.FAMILY not in agent._menu.category.values()
+
+    def test_an_off_menu_call_brings_its_family_on_the_next_call(self, tmp_path):
+        plugin("vault_read", "Read one note.")
+        plugin("vault_attachment", "Fetch a file.")
+        agent, chat, _ = logged_agent(
+            [model_says(tool_calls=[tool_call("vault_read", note="x")]), model_says("done")],
+            tmp_path,
+        )
+        agent.run_task("hello")
+        assert "vault_read" not in sent_names(chat, 0)
+        assert "vault_attachment" not in sent_names(chat, 0)
+        assert {"vault_read", "vault_attachment"} <= set(sent_names(chat, 1))
+        assert agent._menu is not None
+        assert agent._menu.category["vault_read"] == tool_menu.OFF_MENU
+        assert agent._menu.category["vault_attachment"] == tool_menu.FAMILY
+
+
+class TestTheModelIsToldItsMenuIsPartial:
+    """Owner session 2026-11-16 15:45: obsidian_write was unsent, and the
+    answer told him it "is not available" — the model had no way to tell
+    unsent from nonexistent."""
+
+    def reminder(self, chat) -> str:
+        return "\n".join(
+            str(m.get("content")) for m in chat.calls[0]["messages"]
+            if m.get("role") == "system"
+        )
+
+    def test_a_selected_menu_is_said_to_be_a_selection(self, tmp_path):
+        agent, chat = make_agent([model_says("done")], cwd=str(tmp_path))
+        agent.run_task("hello")
+        assert agent_module.PARTIAL_MENU_REMINDER in self.reminder(chat)
+
+    def test_the_full_menu_says_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(tool_menu.MENU_ALL_ENV, "1")
+        agent, chat = make_agent([model_says("done")], cwd=str(tmp_path))
+        agent.run_task("hello")
+        assert agent_module.PARTIAL_MENU_REMINDER not in self.reminder(chat)
+
+    def test_what_it_promises_is_what_the_net_does(self, tmp_path, read_docs_stub):
+        """The reminder says an unlisted tool runs when called by name; the
+        off-menu net is the line that makes it true."""
+        agent, chat = make_agent(
+            [model_says(tool_calls=[tool_call("read_docs", command="ls")]), model_says("done")],
+            cwd=str(tmp_path),
+        )
+        agent.run_task("hello")
+        assert "read_docs" not in sent_names(chat, 0)
+        result = [m for m in agent.messages if m.get("role") == "tool"][0]
+        assert "doc" in str(result["content"])

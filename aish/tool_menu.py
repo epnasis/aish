@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,9 +76,11 @@ CATALOG_LINE_CHARS = 100
 # Categories, in the order a name is claimed: a name is recorded under the
 # FIRST category that wants it.
 CORE, REQUIRED, CONTINUITY, RELEVANT = "core", "required", "continuity", "relevant"
+# A sibling of a tool the model CALLED this task (mid-task growth).
+FAMILY = "family"
 # Mid-task growth; never part of the selection made at task start.
 OFF_MENU, CREATED, LOADED = "off_menu", "created", "loaded"
-CATEGORIES = (CORE, REQUIRED, CONTINUITY, RELEVANT, OFF_MENU, CREATED, LOADED)
+CATEGORIES = (CORE, REQUIRED, CONTINUITY, RELEVANT, OFF_MENU, CREATED, LOADED, FAMILY)
 
 # A family prefix shorter than this is too generic to be a name hit ("gh").
 _MIN_PREFIX = 4
@@ -117,6 +119,10 @@ class Selection:
         self.category[name] = how
         return True
 
+    def admit_family(self, name: str, families: Mapping[str, tuple[str, ...]]) -> list[str]:
+        """Admit `name`'s siblings (`families`); the names newly admitted."""
+        return [s for s in families.get(name, ()) if self.admit(s, FAMILY)]
+
     def counts(self) -> dict[str, int]:
         out = dict.fromkeys(CATEGORIES, 0)
         for how in self.category.values():
@@ -151,6 +157,30 @@ def tool_lines(full_menu: list[dict]) -> list[ToolLine]:
         if name := schema_name(schema):
             lines.append(ToolLine(name, str(function.get("description") or "")))
     return lines
+
+
+def families(full_menu: list[dict], native: Iterable[str]) -> dict[str, tuple[str, ...]]:
+    """Each plugin tool mapped to the plugin tools that share its name prefix
+    (`obsidian` for `obsidian_find`), itself included; a prefix with one tool
+    is no family. Plugin names are namespaced by the service they reach, so
+    the prefix is structure the author already wrote — native names start
+    with a verb (`edit_file`, `edit_rule`), which is no family at all, so
+    native tools never form one."""
+    skip = set(native)
+    by_prefix: dict[str, list[str]] = {}
+    for name in _menu_names(full_menu):
+        prefix = name.casefold().split("_", 1)[0]
+        if name not in skip and prefix != name.casefold():
+            by_prefix.setdefault(prefix, []).append(name)
+    return {
+        name: tuple(members)
+        for members in by_prefix.values() if len(members) > 1
+        for name in members
+    }
+
+
+def _menu_names(full_menu: list[dict]) -> list[str]:
+    return [name for schema in full_menu if (name := schema_name(schema))]
 
 
 def menu_for(full_menu: list[dict], names: Iterable[str]) -> list[dict]:
